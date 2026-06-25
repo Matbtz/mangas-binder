@@ -29,6 +29,7 @@ function cleanDescription(text) {
 export function buildComicInfoXml({
   series,
   volumeNum,
+  number,
   authors = [],
   artists = [],
   description = '',
@@ -36,9 +37,15 @@ export function buildComicInfoXml({
   year,
   mangadexId,
   isCalculated = false,
+  language = 'en',
 }) {
   const volLabel = (volumeNum && volumeNum !== 'none') ? String(volumeNum) : '';
-  const title = volLabel ? `${series}, Vol. ${volLabel}` : series;
+  // Chapter mode: no Volume, Number is the chapter. Volume mode: Number is the volume.
+  const chapterLabel = (number !== undefined && number !== null && number !== '') ? String(number) : '';
+  const numberValue = chapterLabel || volLabel;
+  const title = chapterLabel
+    ? `${series}, Ch. ${chapterLabel}`
+    : (volLabel ? `${series}, Vol. ${volLabel}` : series);
   const writersStr = [...new Set(authors)].join(', ');
   const pencillersStr = [...new Set(artists)].join(', ');
   // Only output Penciller if different from Writer (for manga they're usually the same)
@@ -51,14 +58,15 @@ export function buildComicInfoXml({
 
   const lines = [
     tag('Series', series),
-    volLabel ? tag('Number', volLabel) : null,
+    numberValue ? tag('Number', numberValue) : null,
+    (chapterLabel && volLabel) ? tag('Volume', volLabel) : null,
     tag('Title', title),
     tag('Summary', cleanDescription(description)),
     tag('Year', year),
     tag('Writer', writersStr),
     tag('Penciller', pencillerLine),
     tag('Genre', genreStr),
-    `  <LanguageISO>en</LanguageISO>`,
+    tag('LanguageISO', language),
     `  <BlackAndWhite>Yes</BlackAndWhite>`,
     `  <Manga>Yes</Manga>`,
     tag('Web', web),

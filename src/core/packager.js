@@ -55,9 +55,13 @@ export function chapterCbzName(mangaName, chapterNum) {
   return `${mangaName} - Chapter ${chapterKey(chapterNum)}.cbz`;
 }
 
-export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
-  const outputPath = path.join(outputDir, volumeCbzName(mangaName, volumeLabel));
-
+/**
+ * Build the ordered CBZ entry list: optional cover (sorts first), all chapter
+ * pages renamed to ch{NNNN}_p{NNN}.ext, then ComicInfo.xml at the root.
+ * `chapters` is a list of chapter numbers; `localChapters` maps number -> folder.
+ * @returns {Promise<Array<{archiveName, sourcePath?, content?}>>}
+ */
+export async function buildEntries(chapters, localChapters, { comicInfoXml = null, coverBuffer = null } = {}) {
   const entries = [];
 
   // Cover image — sorts before all chapter pages alphabetically
@@ -86,6 +90,12 @@ export async function buildJob(volumeLabel, chapters, localChapters, outputDir, 
     entries.push({ archiveName: 'ComicInfo.xml', content: Buffer.from(comicInfoXml, 'utf-8') });
   }
 
+  return entries;
+}
+
+export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
+  const outputPath = path.join(outputDir, volumeCbzName(mangaName, volumeLabel));
+  const entries = await buildEntries(chapters, localChapters, { comicInfoXml, coverBuffer });
   return { outputPath, entries };
 }
 
