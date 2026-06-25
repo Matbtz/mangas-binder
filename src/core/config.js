@@ -27,11 +27,19 @@ export const config = {
   // Defaults seeded into the settings table on first run.
   defaults: {
     scanIntervalHours: Number(process.env.SCAN_INTERVAL_HOURS || 6),
-    downloadConcurrency: Number(process.env.DOWNLOAD_CONCURRENCY || 4),
+    downloadConcurrency: Number(process.env.DOWNLOAD_CONCURRENCY || 4), // parallel page fetches per chapter
+    chapterConcurrency: Number(process.env.CHAPTER_CONCURRENCY || 2),   // chapters downloaded in parallel
     defaultPackagingMode: process.env.DEFAULT_PACKAGING_MODE || 'volume', // volume | chapter
     defaultMonitorMode: process.env.DEFAULT_MONITOR_MODE || 'all',         // all | future | none
     defaultLanguage: process.env.DEFAULT_LANGUAGE || 'en',
     dataSaver: process.env.DATA_SAVER === 'true',
     keepLoosePages: process.env.KEEP_LOOSE_PAGES === 'true',
+    // Assign untagged chapters to estimated volumes (uses extrapolate.js).
+    extrapolateVolumes: process.env.EXTRAPOLATE_VOLUMES !== 'false',
+    // Notifications (empty = disabled). ntfyUrl is a full topic URL, e.g. https://ntfy.sh/my-topic
+    discordWebhook: process.env.DISCORD_WEBHOOK || '',
+    ntfyUrl: process.env.NTFY_URL || '',
+    notifyOnImport: process.env.NOTIFY_ON_IMPORT !== 'false',
+    notifyOnError: process.env.NOTIFY_ON_ERROR === 'true',
   },
 };

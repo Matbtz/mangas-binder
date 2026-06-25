@@ -24,6 +24,10 @@ Tome-ready CBZs into Tome's Bindery inbox.
   **volume is complete** and package the whole volume.
 - ⏱️ **Scheduler** scans every X hours for new chapters and processes the queue.
 - 🧩 **Tome-native** naming/layout so Tome ingests cleanly.
+- 🗺️ **Smart volume mapping** — provider-tagged volumes are authoritative; chapters
+  the source left untagged are assigned to *estimated* volumes (and flagged as such
+  in ComicInfo) so volume packaging still works for scanlations.
+- 🔔 **Notifications** via **ntfy** and/or **Discord** when media is added (or on failures).
 
 ## Quick start
 
@@ -72,3 +76,15 @@ roadmap.
 All settings have env defaults (see `.env.example`) and most are editable live in
 the UI's **Settings** tab. Per-series monitor mode and packaging mode are set when
 following and editable on the series detail page.
+
+### Notifications
+
+Set a **Discord webhook URL** and/or an **ntfy topic URL** (e.g. `https://ntfy.sh/my-topic`)
+in Settings → Notifications, then hit **Send test**. You get pinged when a volume/chapter
+is added to your library (and optionally on repeated failures).
+
+## Tests
+
+```bash
+npm test        # node --test — covers volume mapping + packaging
+```

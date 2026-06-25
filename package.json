@@ -7,7 +7,8 @@
   },
   "scripts": {
     "start": "node src/server/app.js",
-    "bind": "node src/cli/index.js"
+    "bind": "node src/cli/index.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=22.5.0"

@@ -169,13 +169,14 @@ async function viewActivity(v) {
 async function viewSettings(v) {
   const [settings, providers] = await Promise.all([api('/settings'), api('/providers')]);
   v.innerHTML = '';
-  const numKeys = ['scanIntervalHours','downloadConcurrency'];
+  const numKeys = ['scanIntervalHours','downloadConcurrency','chapterConcurrency'];
   const enumKeys = { defaultPackagingMode:['volume','chapter'], defaultMonitorMode:['all','future','none'] };
-  const boolKeys = ['dataSaver','keepLoosePages'];
+  const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes'];
+  const textKeys = ['defaultLanguage'];
 
   const sc = h('<div class="card"><h2>Settings</h2></div>');
   const form = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:10px"></div>');
-  for (const k of [...numKeys, ...Object.keys(enumKeys), ...boolKeys, 'defaultLanguage']) {
+  for (const k of [...numKeys, ...Object.keys(enumKeys), ...boolKeys, ...textKeys]) {
     if (!(k in settings)) continue;
     const row = h(`<label class="field">${k}</label>`);
     let inp;
@@ -195,6 +196,36 @@ async function viewSettings(v) {
     await api('/settings',{method:'PATCH',body}); toast('Saved');
   };
   form.appendChild(save); sc.appendChild(form); v.appendChild(sc);
+
+  // Notifications
+  const nc = h('<div class="card"><h2>Notifications</h2></div>');
+  const nform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:10px"></div>');
+  const nFields = [
+    ['discordWebhook','Discord webhook URL','text'],
+    ['ntfyUrl','ntfy topic URL (e.g. https://ntfy.sh/my-topic)','text'],
+    ['notifyOnImport','Notify when media is added','bool'],
+    ['notifyOnError','Notify on failures','bool'],
+  ];
+  for (const [k,label,type] of nFields) {
+    const row = h(`<label class="field">${label}</label>`);
+    let inp;
+    if (type==='bool') { inp = h(`<select style="width:160px"><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(settings[k] ?? false); }
+    else inp = h(`<input value="${esc(settings[k]??'')}" placeholder="(disabled)" style="min-width:320px">`);
+    inp.dataset.nkey = k; row.appendChild(inp); nform.appendChild(row);
+  }
+  const nrow = h('<div class="row"></div>');
+  const nsave = h('<button class="btn primary">Save notifications</button>');
+  nsave.onclick = async () => {
+    const body = {};
+    for (const el of nform.querySelectorAll('[data-nkey]')) {
+      const k = el.dataset.nkey;
+      body[k] = (k==='notifyOnImport'||k==='notifyOnError') ? el.value==='true' : el.value;
+    }
+    await api('/settings',{method:'PATCH',body}); toast('Saved');
+  };
+  const ntest = h('<button class="btn">Send test</button>');
+  ntest.onclick = async () => { try { await api('/notify/test',{method:'POST'}); toast('Test sent'); } catch(e){ toast(e.message); } };
+  nrow.append(nsave, ntest); nform.appendChild(nrow); nc.appendChild(nform); v.appendChild(nc);
 
   const pc = h('<div class="card"><h2>Sources</h2></div>');
   for (const p of providers) {

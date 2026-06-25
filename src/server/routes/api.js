@@ -12,6 +12,7 @@ import {
 import { followSeries, refreshSeries } from '../../core/series-service.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce } from '../../download/worker.js';
+import { notify } from '../../core/notify.js';
 import { seriesView, chapterView } from '../views.js';
 
 const ACTIVE_STATES = ['wanted', 'queued', 'downloading', 'downloaded', 'failed'];
@@ -121,6 +122,13 @@ export default async function apiRoutes(app) {
     if (enabled !== undefined) setProviderEnabled(name, !!enabled);
     if (config !== undefined) setProviderConfig(name, config);
     return { ok: true };
+  });
+
+  // --- Notifications ---
+  app.post('/api/notify/test', async (req, reply) => {
+    const res = await notify('mangas-binder', 'Test notification — your alerts are working.', { tags: ['white_check_mark'] });
+    if (!res.configured) return reply.code(400).send({ error: 'No Discord webhook or ntfy URL configured' });
+    return res;
   });
 
   // --- Manual triggers ---

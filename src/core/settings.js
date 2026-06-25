@@ -20,11 +20,17 @@ export function ensureSeeded() {
   const d = config.defaults;
   seedSetting('scanIntervalHours', d.scanIntervalHours);
   seedSetting('downloadConcurrency', d.downloadConcurrency);
+  seedSetting('chapterConcurrency', d.chapterConcurrency);
   seedSetting('defaultPackagingMode', d.defaultPackagingMode);
   seedSetting('defaultMonitorMode', d.defaultMonitorMode);
   seedSetting('defaultLanguage', d.defaultLanguage);
   seedSetting('dataSaver', d.dataSaver);
   seedSetting('keepLoosePages', d.keepLoosePages);
+  seedSetting('extrapolateVolumes', d.extrapolateVolumes);
+  seedSetting('discordWebhook', d.discordWebhook);
+  seedSetting('ntfyUrl', d.ntfyUrl);
+  seedSetting('notifyOnImport', d.notifyOnImport);
+  seedSetting('notifyOnError', d.notifyOnError);
 
   const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, 1)');
   for (const p of allProviders()) ins.run(p.name);

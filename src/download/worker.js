@@ -8,6 +8,8 @@ import { getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
 import { downloadChapter, chapterStagingDir } from './downloader.js';
 import { bindChapter, bindVolume } from '../core/binder.js';
+import { resolveVolumes } from '../core/mapping.js';
+import { notifyImport, notifyError } from '../core/notify.js';
 import { pLimit } from './limit.js';
 
 const MAX_ATTEMPTS = 5;
@@ -26,12 +28,15 @@ export async function runOnce({ limit = 200 } = {}) {
   running = true;
   try {
     const concurrency = getSetting('downloadConcurrency', 4);
+    const chapterConcurrency = getSetting('chapterConcurrency', 2);
     const dataSaver = getSetting('dataSaver', false);
     const wanted = chaptersInState('wanted', limit);
     const affectedVolumeSeries = new Set();
     let processed = 0, imported = 0, failed = 0;
 
-    const limiter = pLimit(Math.max(1, Math.min(concurrency, 4)));
+    // Pages download in parallel within a chapter (downloadConcurrency); chapters
+    // run a few at a time (chapterConcurrency) to stay polite to the source.
+    const limiter = pLimit(Math.max(1, chapterConcurrency));
     await Promise.all(wanted.map(ch => limiter(async () => {
       const series = getSeries(ch.series_id);
       if (!series) return;
@@ -49,6 +54,7 @@ export async function runOnce({ limit = 200 } = {}) {
           setChapterState(ch.id, 'imported', { cbz_path: res.path });
           imported++;
           logHistory('chapter.imported', { seriesId: series.id, chapterId: ch.id, message: res.path });
+          notifyImport(series.title, `Chapter ${ch.number}`);
           await cleanupStaging(series.id, ch.number);
         } else {
           affectedVolumeSeries.add(series.id);
@@ -59,6 +65,7 @@ export async function runOnce({ limit = 200 } = {}) {
         const exhausted = (fresh?.attempts ?? 0) >= MAX_ATTEMPTS;
         setChapterState(ch.id, exhausted ? 'failed' : 'wanted', { error: String(err.message || err) });
         logHistory('chapter.failed', { seriesId: series.id, chapterId: ch.id, message: String(err.message || err) });
+        if (exhausted) notifyError(series.title, `Chapter ${ch.number}`, String(err.message || err));
       }
     })));
 
@@ -90,6 +97,9 @@ async function cleanupStaging(seriesId, number) {
 export async function packageCompleteVolumes(seriesId) {
   const series = getSeries(seriesId);
   if (!series) return 0;
+
+  // Assign estimated volumes to any untagged chapters before grouping.
+  resolveVolumes(seriesId);
 
   const chapters = listChaptersForSeries(seriesId)
     .filter(c => c.state === 'downloaded' || c.state === 'imported');
@@ -123,17 +133,20 @@ export async function packageCompleteVolumes(seriesId) {
       coverMap = await provider.getVolumeCovers(series.provider_series_id).catch(() => new Map());
     }
     const coverUrl = coverMap?.get(String(v)) || coverMap?.get(volLabel) || null;
+    const calculated = vchapters.some(c => c.calculated);
 
     try {
-      const res = await bindVolume(series, volLabel, vchapters, { coverUrl, overwrite: true });
+      const res = await bindVolume(series, volLabel, vchapters, { coverUrl, calculated, overwrite: true });
       for (const c of vchapters) {
         setChapterState(c.id, 'imported', { cbz_path: res.path });
         await cleanupStaging(seriesId, c.number);
       }
       importedVolumes++;
-      logHistory('volume.imported', { seriesId, message: `${series.title} Vol. ${volLabel}` });
+      logHistory('volume.imported', { seriesId, message: `${series.title} Vol. ${volLabel}${calculated ? ' (estimated)' : ''}` });
+      notifyImport(series.title, `Volume ${volLabel}${calculated ? ' (estimated)' : ''}`);
     } catch (err) {
       logHistory('volume.failed', { seriesId, message: `Vol ${volLabel}: ${err.message || err}` });
+      notifyError(series.title, `Volume ${volLabel}`, String(err.message || err));
     }
   }
   return importedVolumes;
