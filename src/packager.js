@@ -1,0 +1,109 @@
+import { ZipArchive } from 'archiver';
+import { createWriteStream } from 'fs';
+import { readdir, mkdir } from 'fs/promises';
+import path from 'path';
+
+const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
+
+function padNum(n, width) {
+  return String(n).padStart(width, '0');
+}
+
+function chapterKey(chapterNum) {
+  const parts = String(chapterNum).split('.');
+  const main = padNum(parseInt(parts[0], 10), 4);
+  return parts.length > 1 ? `${main}.${parts[1]}` : main;
+}
+
+/**
+ * Download a URL and return a Buffer, or null on failure.
+ */
+export async function downloadBuffer(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return Buffer.from(await res.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build the list of entries (images + optional cover + optional ComicInfo.xml)
+ * for a single CBZ volume.
+ *
+ * Entry shape:
+ *   { archiveName, sourcePath }  — file on disk
+ *   { archiveName, content }     — Buffer/string in memory
+ */
+export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
+  const volPadded = isNaN(Number(volumeLabel))
+    ? volumeLabel
+    : padNum(Number(volumeLabel), 2);
+  const suffix = volumeLabel === 'none'
+    ? 'Volume not released'
+    : isCalculated
+      ? `V${volPadded} (calculated)`
+      : `V${volPadded}`;
+  const outputPath = path.join(outputDir, `${mangaName} ${suffix}.cbz`);
+
+  const entries = [];
+
+  // Cover image — sorts before all chapter pages alphabetically
+  if (coverBuffer) {
+    entries.push({ archiveName: '000_cover.jpg', content: coverBuffer });
+  }
+
+  // Chapter pages
+  const sortedChapters = [...chapters].sort((a, b) => parseFloat(a) - parseFloat(b));
+  for (const chNum of sortedChapters) {
+    const folderPath = localChapters[Object.keys(localChapters).find(k => parseFloat(k) === parseFloat(chNum))];
+    if (!folderPath) continue;
+
+    const files = (await readdir(folderPath))
+      .filter(f => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
+      .sort();
+    files.forEach((file, idx) => {
+      const ext = path.extname(file);
+      const archiveName = `ch${chapterKey(chNum)}_p${padNum(idx + 1, 3)}${ext}`;
+      entries.push({ archiveName, sourcePath: path.join(folderPath, file) });
+    });
+  }
+
+  // ComicInfo.xml — must be at root of the ZIP
+  if (comicInfoXml) {
+    entries.push({ archiveName: 'ComicInfo.xml', content: Buffer.from(comicInfoXml, 'utf-8') });
+  }
+
+  return { outputPath, entries };
+}
+
+export async function createCbz(job, onProgress) {
+  await mkdir(path.dirname(job.outputPath), { recursive: true });
+
+  return new Promise((resolve, reject) => {
+    const output = createWriteStream(job.outputPath);
+    // zlib level 0 = store only — images are already compressed
+    const archive = new ZipArchive({ zlib: { level: 0 } });
+
+    output.on('close', resolve);
+    archive.on('error', reject);
+    archive.pipe(output);
+
+    let current = 0;
+    archive.on('entry', () => {
+      current++;
+      if (onProgress) onProgress({ current, total: job.entries.length });
+    });
+
+    for (const entry of job.entries) {
+      if (entry.content !== undefined) {
+        archive.append(entry.content, { name: entry.archiveName });
+      } else {
+        archive.file(entry.sourcePath, { name: entry.archiveName });
+      }
+    }
+
+    archive.finalize();
+  });
+}
