@@ -1,0 +1,37 @@
+import path from 'path';
+
+/** Resolve a path, defaulting relative to the project data dir. */
+function abs(p) {
+  return path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
+}
+
+/**
+ * Static, process-level configuration from environment variables.
+ * Mutable, per-series and operational preferences live in the DB (settings table);
+ * this file is only for things needed before the DB is open (paths, ports, auth).
+ */
+export const config = {
+  // Where Tome's Bindery / library is mounted — finished CBZs land here.
+  outputDir: abs(process.env.OUTPUT_DIR || './data/output'),
+  // Working area for in-progress page downloads (never exposed to Tome).
+  stagingDir: abs(process.env.STAGING_DIR || './data/staging'),
+  // SQLite database file.
+  dbPath: abs(process.env.DB_PATH || './data/mangas-binder.db'),
+
+  // HTTP server.
+  port: Number(process.env.PORT || 8787),
+  host: process.env.HOST || '0.0.0.0',
+  // Empty token => no auth (fine for solo localhost). Set to require Bearer/?token=.
+  authToken: process.env.AUTH_TOKEN || '',
+
+  // Defaults seeded into the settings table on first run.
+  defaults: {
+    scanIntervalHours: Number(process.env.SCAN_INTERVAL_HOURS || 6),
+    downloadConcurrency: Number(process.env.DOWNLOAD_CONCURRENCY || 4),
+    defaultPackagingMode: process.env.DEFAULT_PACKAGING_MODE || 'volume', // volume | chapter
+    defaultMonitorMode: process.env.DEFAULT_MONITOR_MODE || 'all',         // all | future | none
+    defaultLanguage: process.env.DEFAULT_LANGUAGE || 'en',
+    dataSaver: process.env.DATA_SAVER === 'true',
+    keepLoosePages: process.env.KEEP_LOOSE_PAGES === 'true',
+  },
+};
