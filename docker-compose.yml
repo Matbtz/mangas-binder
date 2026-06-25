@@ -1,0 +1,40 @@
+# mangas-binder + Tome sharing a "bindery" volume.
+# mangas-binder downloads + binds CBZs into /bindery; Tome ingests them from there.
+services:
+  mangas-binder:
+    build: .
+    container_name: mangas-binder
+    environment:
+      OUTPUT_DIR: /bindery            # where finished CBZs land (Tome's inbox)
+      DB_PATH: /data/mangas-binder.db
+      STAGING_DIR: /data/staging
+      SCAN_INTERVAL_HOURS: "6"
+      DOWNLOAD_CONCURRENCY: "4"
+      DEFAULT_PACKAGING_MODE: volume  # volume | chapter
+      DEFAULT_LANGUAGE: en
+      # AUTH_TOKEN: "set-me-to-require-auth"
+    volumes:
+      - ./mb-data:/data
+      - bindery:/bindery
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+
+  tome:
+    image: ghcr.io/bndct-devops/tome:latest   # adjust to the published image/tag
+    container_name: tome
+    environment:
+      TOME_INCOMING_DIR: /bindery     # ingest CBZs dropped by mangas-binder
+      TOME_LIBRARY_DIR: /books
+      TOME_DATA_DIR: /data
+      TOME_AUTO_IMPORT: "true"        # hands-off ingest every 300s
+    volumes:
+      - bindery:/bindery
+      - ./books:/books
+      - ./tome-data:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  bindery:

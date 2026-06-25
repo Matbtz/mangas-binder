@@ -1,0 +1,45 @@
+import { chapterStateCounts } from '../core/repo.js';
+
+/** Shape a series DB row for API responses (parse JSON columns, add counts). */
+export function seriesView(row, { withCounts = true } = {}) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    provider: row.provider,
+    providerSeriesId: row.provider_series_id,
+    title: row.title,
+    authors: JSON.parse(row.authors_json || '[]'),
+    artists: JSON.parse(row.artists_json || '[]'),
+    genres: JSON.parse(row.genres_json || '[]'),
+    description: row.description,
+    year: row.year,
+    status: row.status,
+    language: row.language,
+    monitored: !!row.monitored,
+    monitorMode: row.monitor_mode,
+    packagingMode: row.packaging_mode,
+    totalVolumesHint: row.total_volumes_hint,
+    lastScanAt: row.last_scan_at,
+    counts: withCounts ? chapterStateCounts(row.id) : undefined,
+  };
+}
+
+/** Shape a chapter DB row for API responses. */
+export function chapterView(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    seriesId: row.series_id,
+    number: row.number,
+    volume: row.volume,
+    title: row.title,
+    language: row.language,
+    state: row.state,
+    pages: row.pages,
+    calculated: !!row.calculated,
+    attempts: row.attempts,
+    error: row.error,
+    cbzPath: row.cbz_path,
+    publishedAt: row.published_at,
+  };
+}

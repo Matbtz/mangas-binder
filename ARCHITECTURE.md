@@ -10,6 +10,23 @@
 
 ---
 
+## 0. Implementation status
+
+Phases 0–5 are implemented (web UI + API + scheduler + download/bind pipeline +
+Tome handoff). Two deviations from the stack proposed below, both simplifications:
+
+- **DB:** uses Node's built-in `node:sqlite` (Node ≥ 22.5) instead of
+  `better-sqlite3` — no native build step, zero extra deps.
+- **Frontend:** a no-build vanilla-JS SPA (`web/`) instead of Vite+Preact — keeps
+  the "less ambition" footprint; can be swapped later without touching the API.
+
+Not yet done: notifications, import-existing-library, upgrade/dedupe beyond
+skip-if-exists. End-to-end download couldn't be exercised in CI (MangaDex blocks
+datacenter IPs); the offline pipeline (bind/volume-completeness/CBZ/ComicInfo) is
+tested.
+
+---
+
 ## 1. Prior art (does this already exist?)
 
 | Project | What it is | Why we still build |
