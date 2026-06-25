@@ -54,3 +54,16 @@ export async function getTotalVolumesForTitle(title) {
     return null;
   }
 }
+
+/**
+ * Metadata-only provider conforming to providers/base.js.
+ * Supplies the total-volume hint that feeds core/extrapolate.js; it cannot
+ * download pages, so it is never selected as a download source.
+ */
+export const provider = {
+  name: 'mangaupdates',
+  label: 'MangaUpdates',
+  capabilities: { download: false, metadata: true },
+  search: searchMangaUpdates,
+  getTotalVolumesForTitle,
+};

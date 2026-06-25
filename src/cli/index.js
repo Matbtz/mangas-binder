@@ -2,12 +2,12 @@
 import { createInterface } from 'readline/promises';
 import { existsSync } from 'fs';
 import { program } from 'commander';
-import { searchManga, fetchVolumeMap, fetchMangaDetails, fetchVolumeCovers } from './mangadex.js';
-import { getTotalVolumesForTitle } from './mangaupdates.js';
-import { extrapolateVolumes, getVolumeStats } from './extrapolate.js';
-import { scanLocalChapters, matchChapterToVolume } from './scanner.js';
-import { buildJob, createCbz, downloadBuffer } from './packager.js';
-import { buildComicInfoXml } from './comicinfo.js';
+import { searchManga, fetchVolumeMap, fetchMangaDetails, fetchVolumeCovers } from '../providers/mangadex.js';
+import { getTotalVolumesForTitle } from '../providers/mangaupdates.js';
+import { extrapolateVolumes, getVolumeStats } from '../core/extrapolate.js';
+import { scanLocalChapters, matchChapterToVolume } from '../core/scanner.js';
+import { buildJob, createCbz, downloadBuffer } from '../core/packager.js';
+import { buildComicInfoXml } from '../core/comicinfo.js';
 
 program
   .name('mangas-binder')

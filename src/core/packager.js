@@ -36,16 +36,27 @@ export async function downloadBuffer(url) {
  *   { archiveName, sourcePath }  — file on disk
  *   { archiveName, content }     — Buffer/string in memory
  */
-export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
+/**
+ * Tome-compatible CBZ filename for a volume.
+ * Matches Tome's "Series Vol. N" / "Series, Vol. N" filename parser; ComicInfo.xml
+ * still takes precedence inside the archive. Calculated/estimated volumes are tagged
+ * in ComicInfo Notes, not in the filename, so they import cleanly.
+ */
+export function volumeCbzName(mangaName, volumeLabel) {
+  if (volumeLabel === 'none') return `${mangaName} - Unsorted.cbz`;
   const volPadded = isNaN(Number(volumeLabel))
     ? volumeLabel
     : padNum(Number(volumeLabel), 2);
-  const suffix = volumeLabel === 'none'
-    ? 'Volume not released'
-    : isCalculated
-      ? `V${volPadded} (calculated)`
-      : `V${volPadded}`;
-  const outputPath = path.join(outputDir, `${mangaName} ${suffix}.cbz`);
+  return `${mangaName} Vol. ${volPadded}.cbz`;
+}
+
+/** Tome-compatible CBZ filename for a single chapter. */
+export function chapterCbzName(mangaName, chapterNum) {
+  return `${mangaName} - Chapter ${chapterKey(chapterNum)}.cbz`;
+}
+
+export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
+  const outputPath = path.join(outputDir, volumeCbzName(mangaName, volumeLabel));
 
   const entries = [];
 

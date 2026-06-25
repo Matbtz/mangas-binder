@@ -1,3 +1,8 @@
 node_modules/
 .mangadex-*.json
 *.cbz
+/data/
+/staging/
+*.db
+*.db-*
+.env
