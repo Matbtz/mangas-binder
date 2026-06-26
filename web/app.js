@@ -53,32 +53,75 @@ async function viewLibrary(v) {
     <strong>${series.length}</strong> series · scheduler ${health.scheduler.running ? '<span class="pill ok">on</span>' : '<span class="pill warn">off</span>'} (${health.scheduler.intervalHours}h)
     </div></div>`);
   const libBtn = h('<button class="btn" style="margin-left:auto">Scan library</button>');
-  libBtn.onclick = async () => { const r = await api('/library/scan', { method:'POST' }); toast(`Marked ${r.markedChapters} owned across ${r.matchedFiles} file(s)`); route(); };
+  libBtn.onclick = async () => {
+    const r = await api('/library/scan', { method:'POST' });
+    toast(`Marked ${r.markedChapters} owned across ${r.matchedFiles} file(s)`);
+    route();
+  };
   const scanBtn = h('<button class="btn primary">Scan now</button>');
   scanBtn.onclick = async () => { await api('/scan', { method:'POST' }); toast('Scan started'); };
   head.append(libBtn, scanBtn);
   v.appendChild(head);
 
-  if (!series.length) { v.appendChild(h('<p class="muted">No series followed yet. Use the <b>Add</b> tab.</p>')); return; }
-  const grid = h('<div class="grid"></div>');
-  for (const s of series) {
-    const card = h(`<div class="card">
-      <div class="title-row"><strong>${esc(s.title)}</strong> <span class="pill ${s.status==='completed'?'ok':'acc'}">${esc(s.status||'?')}</span></div>
-      <div class="muted" style="font-size:12px">${esc(s.authors.join(', '))} · ${esc(s.packagingMode)} · ${esc(s.monitorMode)} · ${esc(s.language)}</div>
-      <div style="margin:8px 0">${countsBadges(s.counts)}</div>
-    </div>`);
-    const actions = h('<div class="row"></div>');
-    const refresh = h('<button class="btn sm">Refresh</button>');
-    refresh.onclick = async () => { await api(`/series/${s.id}/refresh`, { method:'POST' }); toast('Refreshing…'); };
-    const detail = h('<button class="btn sm">Chapters</button>');
-    detail.onclick = () => showDetail(s.id);
-    const del = h('<button class="btn sm">Unfollow</button>');
-    del.onclick = async () => { if (confirm(`Unfollow ${s.title}?`)) { await api(`/series/${s.id}`, { method:'DELETE' }); route(); } };
-    actions.append(refresh, detail, del);
-    card.appendChild(actions);
-    grid.appendChild(card);
+  if (!series.length) { v.appendChild(h('<p class="muted">No series followed yet. Use the <b>Add</b> tab.</p>')); }
+  else {
+    const grid = h('<div class="grid"></div>');
+    for (const s of series) {
+      const card = h(`<div class="card">
+        <div class="title-row"><strong>${esc(s.title)}</strong> <span class="pill ${s.status==='completed'?'ok':'acc'}">${esc(s.status||'?')}</span></div>
+        <div class="muted" style="font-size:12px">${esc(s.authors.join(', '))} · ${esc(s.packagingMode)} · ${esc(s.monitorMode)} · ${esc(s.language)}</div>
+        <div style="margin:8px 0">${countsBadges(s.counts)}</div>
+      </div>`);
+      const actions = h('<div class="row"></div>');
+      const refresh = h('<button class="btn sm">Refresh</button>');
+      refresh.onclick = async () => { await api(`/series/${s.id}/refresh`, { method:'POST' }); toast('Refreshing…'); };
+      const detail = h('<button class="btn sm">Chapters</button>');
+      detail.onclick = () => showDetail(s.id);
+      const del = h('<button class="btn sm">Unfollow</button>');
+      del.onclick = async () => { if (confirm(`Unfollow ${s.title}?`)) { await api(`/series/${s.id}`, { method:'DELETE' }); route(); } };
+      actions.append(refresh, detail, del);
+      card.appendChild(actions);
+      grid.appendChild(card);
+    }
+    v.appendChild(grid);
   }
-  v.appendChild(grid);
+
+  // --- Untracked series found in the library ---
+  try {
+    const { untracked } = await api('/library/untracked');
+    if (untracked.length) {
+      const sec = h('<div class="card"><h2>In your library — not followed</h2><p class="muted" style="margin:0 0 12px">These series were found in your library folders but are not tracked by mangas-binder.</p></div>');
+      const grid2 = h('<div class="grid"></div>');
+      for (const u of untracked) {
+        const volLabel = u.volumes.length
+          ? `Vol. ${u.volumes.join(', ')} (${u.fileCount} file${u.fileCount!==1?'s':''})`
+          : `${u.fileCount} file${u.fileCount!==1?'s':''}`;
+        const card = h(`<div class="card">
+          <div class="title-row"><strong>${esc(u.title)}</strong> <span class="pill">${esc(volLabel)}</span></div>
+          ${u.mangadexId ? `<div class="muted" style="font-size:12px">MangaDex ID: ${esc(u.mangadexId)}</div>` : '<div class="muted" style="font-size:12px">No MangaDex ID found — follow manually via Add tab</div>'}
+        </div>`);
+        if (u.mangadexId) {
+          const actions = h('<div class="row" style="margin-top:8px"></div>');
+          const pk = h('<select class="pk"><option value="volume">volume CBZ</option><option value="chapter">chapter CBZ</option></select>');
+          const mm = h('<select class="mm"><option value="all">all</option><option value="future">future only</option></select>');
+          const btn = h('<button class="btn primary sm">Follow</button>');
+          btn.onclick = async () => {
+            btn.disabled = true; btn.textContent = 'Following…';
+            try {
+              await api('/series', { method:'POST', body:{ provider:'mangadex', providerSeriesId: u.mangadexId, packagingMode: pk.value, monitorMode: mm.value } });
+              toast('Following ' + u.title);
+              route();
+            } catch(e) { toast(e.message); btn.disabled = false; btn.textContent = 'Follow'; }
+          };
+          actions.append(pk, mm, btn);
+          card.appendChild(actions);
+        }
+        grid2.appendChild(card);
+      }
+      sec.appendChild(grid2);
+      v.appendChild(sec);
+    }
+  } catch { /* untracked endpoint failure shouldn't break the library view */ }
 }
 
 async function showDetail(id) {

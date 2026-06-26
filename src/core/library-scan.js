@@ -69,31 +69,64 @@ export function readCbzInfo(filePath) {
 
 /**
  * Scan the configured library dirs and mark owned chapters as imported.
- * @param {{ seriesId?: number }} opts  limit to one series if given
- * @returns {{ files, matchedFiles, markedChapters, perSeries }}
+ * Also discovers CBZs whose series isn't followed yet and returns them as
+ * `untracked` suggestions.
+ * @param {{ seriesId?: number }} opts  limit reconciliation to one series if given
+ * @returns {{ files, matchedFiles, markedChapters, perSeries, untracked }}
  */
 export function scanLibrary({ seriesId } = {}) {
-  const targets = seriesId ? [getSeries(seriesId)].filter(Boolean) : listSeries();
-  if (!targets.length) return { files: 0, matchedFiles: 0, markedChapters: 0, perSeries: {} };
+  const all = listSeries();
 
-  // Build lookup tables for fast matching.
-  const byMangadexId = new Map();
-  const byTitle = new Map();
-  for (const s of targets) {
-    if (s.provider === 'mangadex') byMangadexId.set(s.provider_series_id, s);
-    byTitle.set(sanitize(s.title).toLowerCase(), s);
+  // Build lookup tables for all tracked series (not just the target) so we can
+  // exclude them from the untracked suggestions.
+  const allByMangadexId = new Map();
+  const allByTitle = new Map();
+  for (const s of all) {
+    if (s.provider === 'mangadex') allByMangadexId.set(s.provider_series_id, s);
+    allByTitle.set(sanitize(s.title).toLowerCase(), s);
   }
+
+  const targets = seriesId ? [getSeries(seriesId)].filter(Boolean) : all;
+  if (!targets.length && !seriesId) {
+    // No series followed yet — still discover untracked
+  }
+
+  const byMangadexId = new Map(targets
+    .filter(s => s.provider === 'mangadex')
+    .map(s => [s.provider_series_id, s]));
+  const byTitle = new Map(targets.map(s => [sanitize(s.title).toLowerCase(), s]));
 
   const files = [...new Set(config.libraryScanDirs.flatMap(d => walkCbz(d)))];
   const chaptersBySeries = new Map(); // seriesId -> Map(number -> row)
   let matchedFiles = 0, markedChapters = 0;
   const perSeries = {};
 
+  // Accumulate untracked: keyed by mangadexId (or sanitized title as fallback)
+  const untrackedMap = new Map(); // key -> { title, mangadexId, volumes: Set, files: [] }
+
   for (const file of files) {
     const info = readCbzInfo(file);
+
+    // Check if this file belongs to any tracked series.
     const match = (info.mangadexId && byMangadexId.get(info.mangadexId))
       || byTitle.get(sanitize(info.series).toLowerCase());
-    if (!match) continue;
+
+    if (!match) {
+      // Only surface as untracked if not tracked at all (not just outside current target).
+      const isTracked = (info.mangadexId && allByMangadexId.has(info.mangadexId))
+        || allByTitle.has(sanitize(info.series).toLowerCase());
+      if (!isTracked) {
+        const key = info.mangadexId || sanitize(info.series).toLowerCase();
+        if (!untrackedMap.has(key)) {
+          untrackedMap.set(key, { title: info.series, mangadexId: info.mangadexId, volumes: new Set(), files: [] });
+        }
+        const entry = untrackedMap.get(key);
+        if (info.volume) entry.volumes.add(info.volume);
+        entry.files.push(file);
+      }
+      continue;
+    }
+
     if (seriesId && match.id !== seriesId) continue;
     matchedFiles++;
 
@@ -121,5 +154,13 @@ export function scanLibrary({ seriesId } = {}) {
   if (markedChapters > 0) {
     logHistory('library.scanned', { message: `marked ${markedChapters} owned chapter(s) across ${matchedFiles} file(s)` });
   }
-  return { files: files.length, matchedFiles, markedChapters, perSeries };
+
+  const untracked = [...untrackedMap.values()].map(e => ({
+    title: e.title,
+    mangadexId: e.mangadexId,
+    volumes: [...e.volumes].sort((a, b) => parseFloat(a) - parseFloat(b)),
+    fileCount: e.files.length,
+  }));
+
+  return { files: files.length, matchedFiles, markedChapters, perSeries, untracked };
 }

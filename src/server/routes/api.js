@@ -132,6 +132,11 @@ export default async function apiRoutes(app) {
     if (!s) return reply.code(404).send({ error: 'not found' });
     return scanLibrary({ seriesId: s.id });
   });
+  // Read-only: discover CBZs on disk whose series isn't followed yet.
+  app.get('/api/library/untracked', async () => {
+    const { untracked } = scanLibrary();
+    return { untracked };
+  });
 
   // --- Notifications ---
   app.post('/api/notify/test', async (req, reply) => {
