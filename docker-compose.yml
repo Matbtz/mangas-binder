@@ -1,5 +1,4 @@
-# mangas-binder + Tome sharing a "bindery" volume.
-# mangas-binder downloads + binds CBZs into /bindery; Tome ingests them from there.
+# mangas-binder — downloads + binds CBZs into /bindery; Tome ingests from there.
 services:
   mangas-binder:
     build: .
@@ -16,9 +15,11 @@ services:
       # COMICVINE_API_KEY: "your-comicvine-key"
       # GETCOMICS_BASE_URL: "https://getcomics.org"
       # AUTH_TOKEN: "set-me-to-require-auth"
+      LIBRARY_SCAN_DIRS: "/bindery,/books"   # scan both output and Tome's library
     volumes:
-      - ./mb-data:/data
-      - bindery:/bindery
+      - /home/mat/Documents/data:/data              # keep DB local (SQLite + NAS = bad perf)
+      - /media/documents/bindery:/bindery           # NAS — finished CBZs land here
+      - /media/documents/books:/books:ro            # NAS — Tome's library, read-only for scan
     ports:
       - "8787:8787"
     healthcheck:
@@ -28,21 +29,3 @@ services:
       retries: 3
     restart: unless-stopped
 
-  tome:
-    image: ghcr.io/bndct-devops/tome:latest   # adjust to the published image/tag
-    container_name: tome
-    environment:
-      TOME_INCOMING_DIR: /bindery     # ingest CBZs dropped by mangas-binder
-      TOME_LIBRARY_DIR: /books
-      TOME_DATA_DIR: /data
-      TOME_AUTO_IMPORT: "true"        # hands-off ingest every 300s
-    volumes:
-      - bindery:/bindery
-      - ./books:/books
-      - ./tome-data:/data
-    ports:
-      - "8080:8080"
-    restart: unless-stopped
-
-volumes:
-  bindery:
