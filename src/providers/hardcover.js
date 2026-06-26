@@ -98,7 +98,7 @@ export const provider = {
   },
 
   async testConnection() {
-    const res = await graphqlQuery(SEARCH_QUERY, { query: '%batman%' });
+    const res = await graphqlQuery(CLASSIFY_QUERY, { query: '%batman%' });
     const books = res?.data?.books || [];
     return { message: `Reached Hardcover GraphQL, API key valid (${books.length} sample books returned).` };
   }
@@ -142,8 +142,7 @@ query SearchBooks($query: String!) {
     title
     slug
     description
-    release_year
-    image { url }
+    release_date
   }
 }
 `;
@@ -154,7 +153,7 @@ query GetBook($id: Int!) {
     id
     title
     description
-    release_year
+    release_date
     contributions {
       author { name }
     }
