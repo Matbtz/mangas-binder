@@ -112,8 +112,18 @@ export function getDb() {
   if (db) return db;
   mkdirSync(path.dirname(config.dbPath), { recursive: true });
   db = new DatabaseSync(config.dbPath);
+  // WAL + tuned pragmas: node:sqlite is synchronous and single-connection, so
+  // every query blocks the event loop — keeping writes cheap and never stalling
+  // on a lock matters. busy_timeout absorbs the scheduler/worker writing while a
+  // request reads; synchronous=NORMAL is safe under WAL and avoids an fsync per
+  // commit; the memory pragmas keep temp B-trees/sorts off the (NAS-backed) disk.
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA busy_timeout = 5000;');
+  db.exec('PRAGMA synchronous = NORMAL;');
+  db.exec('PRAGMA temp_store = MEMORY;');
+  db.exec('PRAGMA cache_size = -16000;'); // ~16 MB page cache
+  db.exec('PRAGMA wal_autocheckpoint = 1000;');
   db.exec(SCHEMA);
   migrate(db);
   return db;

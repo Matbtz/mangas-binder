@@ -32,7 +32,7 @@ export async function runScan() {
     }
     // Reconcile with the on-disk library (catches files Tome moved or you added
     // manually) before downloading anything.
-    const lib = scanLibrary();
+    const lib = await scanLibrary({ force: true });
     const work = await runOnce();
     return { refreshed, added, ownedMarked: lib.markedChapters, ...work };
   } finally {

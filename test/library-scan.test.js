@@ -38,7 +38,7 @@ test('scanLibrary marks chapters owned by an existing CBZ as imported', async ()
   assert.ok(res.path.endsWith('Owned Series Vol. 01.cbz'));
 
   // readCbzInfo recognises series (via mangadex Web id) + chapters from page names.
-  const info = readCbzInfo(res.path);
+  const info = await readCbzInfo(res.path);
   assert.equal(info.mangadexId, '11111111-1111-1111-1111-111111111111');
   assert.equal(info.volume, '1');
   assert.deepEqual(info.chapters.sort(), ['1', '2']);
@@ -46,7 +46,7 @@ test('scanLibrary marks chapters owned by an existing CBZ as imported', async ()
   // Simulate a fresh DB that doesn't yet know these are owned.
   getDb().exec("UPDATE chapters SET state='wanted', volume=NULL, calculated=0, cbz_path=NULL");
 
-  const out = scanLibrary({ seriesId: s.id });
+  const out = await scanLibrary({ seriesId: s.id });
   assert.equal(out.matchedFiles, 1);
   assert.equal(out.markedChapters, 2);
 
@@ -58,10 +58,10 @@ test('scanLibrary marks chapters owned by an existing CBZ as imported', async ()
   }
 
   // Re-scan is idempotent (nothing left to mark).
-  assert.equal(scanLibrary({ seriesId: s.id }).markedChapters, 0);
+  assert.equal((await scanLibrary({ seriesId: s.id })).markedChapters, 0);
 });
 
-test('scanLibrary ignores hidden directories (.tmp) and identifies single epub folders', () => {
+test('scanLibrary ignores hidden directories (.tmp) and identifies single epub folders', async () => {
   const libDir = process.env.OUTPUT_DIR;
   const hidden = path.join(libDir, '.tmp');
   mkdirSync(hidden, { recursive: true });
@@ -71,7 +71,7 @@ test('scanLibrary ignores hidden directories (.tmp) and identifies single epub f
   mkdirSync(novel, { recursive: true });
   writeFileSync(path.join(novel, 'book.epub'), Buffer.from('pk'));
 
-  const out = scanLibrary();
+  const out = await scanLibrary();
   const titles = out.untracked.map(u => u.title);
   assert.ok(!titles.includes('.tmp'), '.tmp should be ignored');
   

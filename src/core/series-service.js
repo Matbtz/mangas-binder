@@ -69,7 +69,7 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
   Promise.resolve().then(async () => {
     try {
       await refreshSeries(series.id);
-      scanLibrary({ seriesId: series.id });
+      await scanLibrary({ seriesId: series.id });
     } catch (err) {
       console.error(`Background refresh failed for followed series ${series.id}:`, err);
     }

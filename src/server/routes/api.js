@@ -115,7 +115,7 @@ export default async function apiRoutes(app) {
     });
 
     await refreshSeries(s.id);
-    scanLibrary({ seriesId: s.id });
+    await scanLibrary({ seriesId: s.id });
     runOnce().catch(() => {});
 
     const updated = getSeries(s.id);
@@ -275,7 +275,7 @@ export default async function apiRoutes(app) {
   });
 
   // --- Library reconciliation (mark already-owned CBZs) ---
-  app.post('/api/library/scan', async () => scanLibrary());
+  app.post('/api/library/scan', async () => scanLibrary({ force: true }));
   app.post('/api/series/:id/scan-library', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
@@ -400,7 +400,7 @@ export default async function apiRoutes(app) {
   const untrackedTriageCache = new Map();
 
   app.get('/api/library/untracked', async () => {
-    const { untracked } = scanLibrary();
+    const { untracked } = await scanLibrary();
     const mdxEnabled = isProviderEnabled('mangadex');
     const cvEnabled = isProviderEnabled('comicvine');
     let hcEnabled = false;

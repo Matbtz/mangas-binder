@@ -1,5 +1,6 @@
-import { readdirSync, existsSync, rmSync } from 'fs';
+import { readdirSync, existsSync, rmSync, statSync } from 'fs';
 import path from 'path';
+import { setImmediate as yieldToLoop } from 'timers/promises';
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp']);
 const FOLDER_CH_RE = /^(?:ch(?:apter)?\.?\s*)(\d+(?:\.\d+)?)/i;
@@ -15,6 +16,7 @@ function chNumFromDir(name) {
   return m ? String(parseFloat(m[1])) : null;
 }
 import AdmZip from 'adm-zip';
+import { readZipDirectory } from './zip-read.js';
 import { config } from './config.js';
 import { listSeries, getSeries, listChaptersForSeries, setChapterState, upsertChapter } from './repo.js';
 import { sanitize } from './library.js';
@@ -50,15 +52,9 @@ function walkCbz(dir, out = []) {
   return out;
 }
 
-export function isEpubArchive(filePath) {
+export async function isEpubArchive(filePath) {
   if (filePath.toLowerCase().endsWith('.epub')) return true;
-  try {
-    const zip = new AdmZip(filePath);
-    const names = zip.getEntries().map(e => e.entryName.toLowerCase());
-    return names.some(n => n === 'meta-inf/container.xml' || n === 'mimetype');
-  } catch {
-    return false;
-  }
+  return (await readCbzInfo(filePath)).isEpub;
 }
 
 function walkUntrackedFiles(dir, out = []) {
@@ -77,25 +73,56 @@ function tagText(xml, tag) {
   return m ? m[1].trim() : null;
 }
 
+// Parsed-CBZ cache keyed by path, validated by (mtime, size). A library scan
+// re-reads the same files repeatedly (Library tab renders, scheduler, per-series
+// scans); over a NAS even the small central-directory read adds up, so unchanged
+// files are served from memory. Bounded to avoid unbounded growth.
+const cbzInfoCache = new Map(); // path -> { mtimeMs, size, info }
+const CBZ_CACHE_MAX = 5000;
+
+/** Read just the entry names + ComicInfo.xml, without loading the archive body. */
+async function readArchiveBits(filePath) {
+  try {
+    const { names, entryData } = await readZipDirectory(filePath, {
+      wantEntry: (n) => n.toLowerCase().endsWith('comicinfo.xml'),
+    });
+    return { names, xml: entryData ? entryData.toString('utf-8') : null };
+  } catch {
+    // Rare archives (zip64 / unusual compression): fall back to the full reader.
+    const zip = new AdmZip(filePath);
+    const entries = zip.getEntries();
+    const comic = entries.find(e => e.entryName.toLowerCase().endsWith('comicinfo.xml'));
+    return {
+      names: entries.map(e => e.entryName),
+      xml: comic ? comic.getData().toString('utf-8') : null,
+    };
+  }
+}
+
 /**
- * Read identity + chapter membership from a CBZ.
- * @returns {{ series, mangadexId, volume, chapters: string[] }}
+ * Read identity + chapter membership from a CBZ. Result is cached by file
+ * (mtime, size) so repeat scans are near-instant.
+ * @returns {Promise<{ series, mangadexId, volume, chapters: string[] }>}
  */
-export function readCbzInfo(filePath) {
+export async function readCbzInfo(filePath) {
+  let st = null;
+  try { st = statSync(filePath); } catch { /* gone/unreadable — parse anyway */ }
+  if (st) {
+    const hit = cbzInfoCache.get(filePath);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.info;
+  }
+
   let series = null, mangadexId = null, comicvineId = null, publisher = null, genre = null, manga = null, chapters = [];
   let isEpub = filePath.toLowerCase().endsWith('.epub');
   try {
-    const zip = new AdmZip(filePath);
-    const entries = zip.getEntries();
+    const { names, xml } = await readArchiveBits(filePath);
     if (!isEpub) {
-      isEpub = entries.some(e => {
-        const n = e.entryName.toLowerCase();
-        return n === 'meta-inf/container.xml' || n === 'mimetype';
+      isEpub = names.some(n => {
+        const l = n.toLowerCase();
+        return l === 'meta-inf/container.xml' || l === 'mimetype';
       });
     }
-    const comic = entries.find(e => e.entryName.toLowerCase().endsWith('comicinfo.xml'));
-    if (comic) {
-      const xml = comic.getData().toString('utf-8');
+    if (xml) {
       series = tagText(xml, 'Series');
       publisher = tagText(xml, 'Publisher');
       genre = tagText(xml, 'Genre');
@@ -105,8 +132,8 @@ export function readCbzInfo(filePath) {
       comicvineId = web?.match(COMICVINE_ID_RE)?.[1] || null;
     }
     const found = new Set();
-    for (const e of entries) {
-      const m = path.basename(e.entryName).match(CBZ_PAGE_RE);
+    for (const n of names) {
+      const m = path.basename(n).match(CBZ_PAGE_RE);
       if (m) found.add(String(parseFloat(m[1])));
     }
     chapters = [...found];
@@ -116,7 +143,13 @@ export function readCbzInfo(filePath) {
   const volume = volMatch ? String(parseFloat(volMatch[1])) : null;
   const hasSeriesTag = !!series;
   if (!series) series = path.basename(filePath).replace(/\.(cbz|epub)$/i, '');
-  return { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, chapters, isEpub };
+  const info = { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, chapters, isEpub };
+
+  if (st) {
+    if (cbzInfoCache.size >= CBZ_CACHE_MAX) cbzInfoCache.clear();
+    cbzInfoCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, info });
+  }
+  return info;
 }
 
 /** The provider id encoded in a CBZ that identifies a given followed series. */
@@ -130,10 +163,41 @@ function providerIdFor(series, info) {
  * Scan the configured library dirs and mark owned chapters as imported.
  * Also discovers CBZs whose series isn't followed yet and returns them as
  * `untracked` suggestions.
- * @param {{ seriesId?: number }} opts  limit reconciliation to one series if given
- * @returns {{ files, matchedFiles, markedChapters, perSeries, untracked }}
+ * @param {{ seriesId?: number, force?: boolean }} opts
+ *   `seriesId` limits reconciliation to one series; `force` bypasses the cache.
+ * @returns {Promise<{ files, matchedFiles, markedChapters, perSeries, untracked }>}
  */
-export function scanLibrary({ seriesId } = {}) {
+
+// A full library scan reads the (NAS-backed) library and is the single most
+// expensive thing the server does. The Library tab fires it on every render via
+// /library/untracked, the scheduler runs it each cycle, and a follow can trigger
+// it too — so we (a) coalesce concurrent full scans onto one in-flight run and
+// (b) serve a recent result from cache, instead of re-walking the NAS each time.
+let _fullScanInFlight = null;
+let _fullScanCache = { ts: 0, result: null };
+const FULL_SCAN_TTL_MS = 30_000;
+
+export function scanLibrary({ seriesId, force = false } = {}) {
+  // Per-series scans are cheap and explicit (a single CBZ tree) — run directly.
+  if (seriesId != null) return _scanLibrary({ seriesId });
+
+  if (!force && _fullScanCache.result && Date.now() - _fullScanCache.ts < FULL_SCAN_TTL_MS) {
+    return Promise.resolve(_fullScanCache.result);
+  }
+  if (_fullScanInFlight) return _fullScanInFlight;
+  _fullScanInFlight = (async () => {
+    try {
+      const result = await _scanLibrary({});
+      _fullScanCache = { ts: Date.now(), result };
+      return result;
+    } finally {
+      _fullScanInFlight = null;
+    }
+  })();
+  return _fullScanInFlight;
+}
+
+async function _scanLibrary({ seriesId } = {}) {
   const all = listSeries();
 
   // The provider-specific id a CBZ would carry to identify this series.
@@ -170,8 +234,12 @@ export function scanLibrary({ seriesId } = {}) {
   let matchedFiles = 0, markedChapters = 0;
   const perSeries = {};
 
+  let scanned = 0;
   for (const file of files) {
-    const info = readCbzInfo(file);
+    // Yield periodically so a large library scan never monopolises the event
+    // loop — the server stays responsive to requests while it runs.
+    if ((++scanned & 31) === 0) await yieldToLoop();
+    const info = await readCbzInfo(file);
     const keys = fileKeys(info);
     let match = null;
     for (const k of keys) { if (byKey.has(k)) { match = byKey.get(k); break; } }
@@ -295,7 +363,7 @@ export function scanLibrary({ seriesId } = {}) {
 
     // 1. Scan customDir for CBZ files
     for (const file of walkCbz(customDir)) {
-      const info = readCbzInfo(file);
+      const info = await readCbzInfo(file);
       let matchedCount = 0;
       for (const num of info.chapters) {
         if (ensureCh(num, info.volume, file)) matchedCount++;
@@ -403,7 +471,7 @@ export function scanLibrary({ seriesId } = {}) {
         let epubCount = 0;
         const sampleFiles = bookFiles.slice(0, 3);
         for (const f of sampleFiles) {
-          const info = readCbzInfo(f);
+          const info = await readCbzInfo(f);
           if (!mangadexId && info.mangadexId) mangadexId = info.mangadexId;
           if (!comicvineId && info.comicvineId) comicvineId = info.comicvineId;
           if (!publisher && info.publisher) publisher = info.publisher;
@@ -454,7 +522,7 @@ export function scanLibrary({ seriesId } = {}) {
         byTitle.set(sanitizedTitle, key);
 
       } else if (entry.isFile() && (entry.name.toLowerCase().endsWith('.cbz') || entry.name.toLowerCase().endsWith('.epub'))) {
-        const info = readCbzInfo(fullPath);
+        const info = await readCbzInfo(fullPath);
         const keys = fileKeys(info);
         if (keys.some(k => allByKey.has(k))) continue;
 
