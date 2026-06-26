@@ -108,7 +108,7 @@ function getApiKey() {
   const cfg = getProviderConfig('hardcover') || {};
   const key = process.env.HARDCOVER_API_KEY || cfg.apikey;
   if (!key) throw new Error('Hardcover API key not set — configure HARDCOVER_API_KEY or add it in Settings → Sources');
-  return String(key).replace(/^bearer\s+/i, '').trim();
+  return String(key).replace(/^bearer\s+/i, '').replace(/\s+/g, '').trim();
 }
 
 async function graphqlQuery(query, variables = {}) {
@@ -120,8 +120,9 @@ async function graphqlQuery(query, variables = {}) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Accept': 'application/json, */*;q=0.8',
         'Authorization': `Bearer ${token}`,
-        'User-Agent': 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
       },
       body: JSON.stringify({ query, variables }),
       signal: controller.signal
