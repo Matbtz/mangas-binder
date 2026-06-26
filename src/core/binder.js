@@ -1,7 +1,14 @@
+import { readFile, readdir, cp, mkdir } from 'fs/promises';
+import { existsSync, statSync } from 'fs';
+import path from 'path';
 import { buildEntries, volumeCbzName, chapterCbzName, issueCbzName, downloadBuffer } from './packager.js';
 import { buildComicInfoXml } from './comicinfo.js';
 import { chapterStagingDir } from '../download/downloader.js';
 import { writeCbz, destPath } from './library.js';
+import { extractToStaging } from '../download/archive-downloader.js';
+import { getSeries, getChapter, listChaptersForSeries, setChapterState } from './repo.js';
+import { getProvider } from '../providers/index.js';
+import { logHistory } from './db.js';
 
 /**
  * The binder: turns downloaded chapter page folders into Tome-ready CBZs with
@@ -89,4 +96,137 @@ export async function bindVolume(series, volumeLabel, chapters, { calculated = f
   const entries = await buildEntries(nums, localChapters, { comicInfoXml, coverBuffer });
   const dest = destPath(series.title, volumeCbzName(series.title, volumeLabel));
   return writeCbz(entries, dest, { overwrite });
+}
+
+/** Ensure chapter pages exist in staging, restoring from cbz_path if needed. */
+export async function ensureChapterStaging(series, chapter) {
+  const dir = chapterStagingDir(series.id, chapter.number);
+  try {
+    if (existsSync(dir)) {
+      const files = await readdir(dir);
+      if (files.some(f => /\.(jpg|jpeg|png|webp|gif|avif)$/i.test(f))) return true;
+    }
+  } catch {}
+
+  const cbzPath = chapter.cbz_path || chapter.cbzPath;
+  if (!cbzPath || !existsSync(cbzPath)) return false;
+
+  try {
+    const st = statSync(cbzPath);
+    if (st.isDirectory()) {
+      await mkdir(dir, { recursive: true });
+      await cp(cbzPath, dir, { recursive: true });
+      return true;
+    }
+    if (/\.(cbz|zip)$/i.test(cbzPath)) {
+      const buf = await readFile(cbzPath);
+      await extractToStaging(buf, series.id, chapter.number);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+export async function packageSingleChapter(seriesId, chapterId) {
+  const series = getSeries(seriesId);
+  const chapter = getChapter(chapterId);
+  if (!series || !chapter) throw new Error('Series or chapter not found');
+
+  await ensureChapterStaging(series, chapter);
+  const provider = getProvider(series.provider);
+  let coverUrl = null;
+  if (provider.getVolumeCovers && chapter.volume) {
+    const covers = await provider.getVolumeCovers(series.provider_series_id).catch(() => new Map());
+    coverUrl = covers.get(String(parseFloat(chapter.volume))) || null;
+  }
+
+  const res = await bindChapter(series, chapter, { coverUrl });
+  setChapterState(chapter.id, 'bindery', { cbz_path: res.path });
+  logHistory('chapter.packaged', { seriesId, chapterId, message: `Packaged ${series.title} #${chapter.number}` });
+  return res;
+}
+
+export async function packageSingleVolume(seriesId, volumeKey) {
+  const series = getSeries(seriesId);
+  if (!series) throw new Error('Series not found');
+
+  const chapters = listChaptersForSeries(seriesId).filter(c => (c.volume || 'none') === volumeKey);
+  if (!chapters.length) throw new Error(`No chapters found in volume ${volumeKey}`);
+
+  for (const c of chapters) {
+    await ensureChapterStaging(series, c);
+  }
+
+  const provider = getProvider(series.provider);
+  let coverUrl = null;
+  if (provider.getVolumeCovers && volumeKey !== 'none' && volumeKey !== 'Specials') {
+    const covers = await provider.getVolumeCovers(series.provider_series_id).catch(() => new Map());
+    coverUrl = covers.get(String(parseFloat(volumeKey))) || covers.get(volumeKey) || null;
+  }
+
+  const calculated = chapters.some(c => c.calculated);
+  const res = await bindVolume(series, volumeKey, chapters, { coverUrl, calculated, overwrite: true });
+  for (const c of chapters) {
+    setChapterState(c.id, 'bindery', { cbz_path: res.path });
+  }
+  logHistory('volume.packaged', { seriesId, message: `Packaged ${series.title} Vol. ${volumeKey}` });
+  return res;
+}
+
+export function auditSeriesVolumes(seriesId) {
+  const LOCAL_STATES = new Set(['imported', 'downloaded', 'bindery']);
+  const chapters = listChaptersForSeries(seriesId);
+  const byVol = new Map();
+  for (const c of chapters) {
+    const vk = c.volume || 'none';
+    if (vk === 'none' || vk === 'Specials') continue;
+    if (!byVol.has(vk)) byVol.set(vk, []);
+    byVol.get(vk).push(c);
+  }
+
+  if (!byVol.size) return [];
+
+  const alerts = [];
+  const sortedVols = [...byVol.keys()].sort((a, b) => parseFloat(a) - parseFloat(b));
+
+  for (const vk of sortedVols) {
+    const vChapters = byVol.get(vk);
+    const localChs = vChapters.filter(c => LOCAL_STATES.has(c.state));
+    if (!localChs.length) continue;
+
+    // Chapters the API knows about for this volume that we don't have locally
+    // (skipped chapters are intentionally excluded and don't count as missing).
+    const notLocal = vChapters.filter(c => !LOCAL_STATES.has(c.state) && c.state !== 'skipped');
+    const isIncomplete = notLocal.length > 0;
+
+    // Express missing chapters as ranges (e.g. "103..105") for display.
+    const missingNums = notLocal
+      .map(c => parseFloat(c.number))
+      .filter(n => !Number.isNaN(n) && Number.isInteger(n))
+      .sort((a, b) => a - b);
+    const missingGaps = [];
+    for (let i = 0; i < missingNums.length; ) {
+      let start = missingNums[i], end = start;
+      while (i + 1 < missingNums.length && missingNums[i + 1] === end + 1) { end = missingNums[++i]; }
+      missingGaps.push(start === end ? `${start}` : `${start}..${end}`);
+      i++;
+    }
+
+    const unexpectedLangs = [...new Set(
+      localChs.filter(c => c.language !== 'en' && c.language !== 'fr').map(c => c.language)
+    )];
+
+    if (isIncomplete || unexpectedLangs.length > 0) {
+      alerts.push({
+        volumeKey: vk,
+        localCount: localChs.length,
+        totalCount: vChapters.length,
+        isIncomplete,
+        missingGaps,
+        unexpectedLangs,
+      });
+    }
+  }
+
+  return alerts;
 }
