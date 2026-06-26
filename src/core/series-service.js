@@ -146,5 +146,10 @@ export async function refreshSeries(seriesId) {
 
   touchSeriesScan(seriesId);
   if (added > 0) logHistory('series.new_chapters', { seriesId, message: `${added} new chapter(s)` });
+  // Assign estimated volume numbers to chapters the provider left untagged (e.g.
+  // English MangaDex scanlations with no volume, or ComicVine issues). This runs
+  // synchronously because it's a fast DB-only pass and ensures volume data is ready
+  // before the library scan that follows.
+  resolveVolumes(seriesId);
   return { added, counts: chapterStateCounts(seriesId) };
 }

@@ -61,6 +61,36 @@ test('scanLibrary marks chapters owned by an existing CBZ as imported', async ()
   assert.equal((await scanLibrary({ seriesId: s.id })).markedChapters, 0);
 });
 
+test('scanLibrary matches foreign CBZ via parent directory name when Series tag is absent', async () => {
+  const libDir = process.env.OUTPUT_DIR;
+  // Series "Foreign Series" in the DB
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: '22222222-2222-2222-2222-222222222222',
+    title: 'Foreign Series', authors: ['B'], language: 'en', monitored: true, packagingMode: 'volume',
+  });
+  // Two chapters with volume assignment
+  for (const n of ['1', '2']) {
+    upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });
+  }
+
+  // Simulate a foreign CBZ: named just "01.cbz" (no Series tag, no "Vol" keyword)
+  // placed in a folder named after the series.
+  const AdmZip = (await import('adm-zip')).default;
+  const seriesDir = path.join(libDir, 'Foreign Series');
+  mkdirSync(seriesDir, { recursive: true });
+  const cbzPath = path.join(seriesDir, '01.cbz');
+  const zip = new AdmZip();
+  zip.addFile('page001.jpg', PNG);
+  zip.writeZip(cbzPath);
+
+  const out = await scanLibrary({ seriesId: s.id });
+  assert.equal(out.matchedFiles, 1, 'should match the foreign CBZ via folder name');
+
+  const chs = listChaptersForSeries(s.id);
+  const imported = chs.filter(c => c.state === 'imported');
+  assert.equal(imported.length, 2, 'both chapters in volume 1 should be marked imported');
+});
+
 test('scanLibrary ignores hidden directories (.tmp) and identifies single epub folders', async () => {
   const libDir = process.env.OUTPUT_DIR;
   const hidden = path.join(libDir, '.tmp');

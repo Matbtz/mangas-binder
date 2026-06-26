@@ -37,7 +37,7 @@ import { getSetting } from './settings.js';
  */
 
 const CBZ_PAGE_RE = /^ch(\d+(?:\.\d+)?)_p\d+/i;
-const FILENAME_VOL_RE = /\b(?:vol|tome)\.?\s*0*(\d+(?:\.\d+)?)/i;
+const FILENAME_VOL_RE = /\b(?:vol(?:ume)?|tome)\.?\s*0*(\d+(?:\.\d+)?)/i;
 const WEB_ID_RE = /mangadex\.org\/title\/([0-9a-f-]{36})/i;
 const COMICVINE_ID_RE = /comicvine\.gamespot\.com\/volume\/4050-(\d+)/i;
 
@@ -263,6 +263,14 @@ async function _scanLibrary({ seriesId } = {}) {
     const keys = fileKeys(info);
     let match = null;
     for (const k of keys) { if (byKey.has(k)) { match = byKey.get(k); break; } }
+    let usedDirFallback = false;
+    if (!match) {
+      // Foreign CBZs stored in a series-named folder (e.g. "Dandadan/07.cbz") often
+      // lack a <Series> tag, so their title key is the filename, not the series name.
+      // Use the parent directory name as a fallback series identifier.
+      const dirKey = `title:${sanitize(path.basename(path.dirname(file))).toLowerCase()}`;
+      if (byKey.has(dirKey)) { match = byKey.get(dirKey); usedDirFallback = true; }
+    }
     if (!match) continue;
     if (seriesId && match.id !== seriesId) continue;
     matchedFiles++;
@@ -298,6 +306,24 @@ async function _scanLibrary({ seriesId } = {}) {
           row.state = 'imported';
           markedChapters++;
           perSeries[match.title] = (perSeries[match.title] || 0) + 1;
+        }
+      }
+    }
+    // When matching was via directory fallback and no "Vol N" keyword appears in the
+    // filename, try reading a bare number from the filename as a volume indicator.
+    // e.g. "Dandadan/07.cbz" → volume 7, "Dandadan/Dandadan_07.cbz" → volume 7.
+    if (matchedCount === 0 && !info.volume && usedDirFallback) {
+      const base = path.basename(file).replace(/\.(cbz|epub)$/i, '');
+      const bareVol = base.match(/(?:^|[-_\s])0*(\d{1,3}(?:\.\d+)?)(?:$|[-_\s])/);
+      if (bareVol) {
+        const vNum = String(parseFloat(bareVol[1]));
+        for (const row of index.values()) {
+          if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
+            setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+            row.state = 'imported';
+            markedChapters++;
+            perSeries[match.title] = (perSeries[match.title] || 0) + 1;
+          }
         }
       }
     }
