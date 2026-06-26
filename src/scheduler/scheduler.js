@@ -1,5 +1,6 @@
 import { listMonitoredSeries } from '../core/repo.js';
 import { refreshSeries } from '../core/series-service.js';
+import { scanLibrary } from '../core/library-scan.js';
 import { runOnce } from '../download/worker.js';
 import { getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
@@ -29,8 +30,11 @@ export async function runScan() {
         logHistory('scan.error', { seriesId: series.id, message: String(err.message || err) });
       }
     }
+    // Reconcile with the on-disk library (catches files Tome moved or you added
+    // manually) before downloading anything.
+    const lib = scanLibrary();
     const work = await runOnce();
-    return { refreshed, added, ...work };
+    return { refreshed, added, ownedMarked: lib.markedChapters, ...work };
   } finally {
     scanning = false;
   }

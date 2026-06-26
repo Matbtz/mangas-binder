@@ -5,6 +5,7 @@ import {
   upsertChapter, chapterStateCounts,
 } from './repo.js';
 import { isProviderEnabled, getSetting } from './settings.js';
+import { scanLibrary } from './library-scan.js';
 import { logHistory } from './db.js';
 
 /**
@@ -48,6 +49,8 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
 
   logHistory('series.followed', { seriesId: series.id, message: details.title });
   await refreshSeries(series.id);
+  // Reconcile against the existing Tome library so we don't re-fetch what's owned.
+  scanLibrary({ seriesId: series.id });
   return getSeries(series.id);
 }
 

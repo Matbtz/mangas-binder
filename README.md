@@ -28,6 +28,8 @@ Tome-ready CBZs into Tome's Bindery inbox.
   the source left untagged are assigned to *estimated* volumes (and flagged as such
   in ComicInfo) so volume packaging still works for scanlations.
 - 🔔 **Notifications** via **ntfy** and/or **Discord** when media is added (or on failures).
+- 📚 **Library reconciliation** — scans your existing Tome CBZ library, detects what
+  you already own (down to the chapter), and marks it so it's never re-downloaded.
 
 ## Quick start
 
@@ -76,6 +78,23 @@ roadmap.
 All settings have env defaults (see `.env.example`) and most are editable live in
 the UI's **Settings** tab. Per-series monitor mode and packaging mode are set when
 following and editable on the series detail page.
+
+### Library reconciliation (already-owned detection)
+
+mangas-binder scans your CBZ library to avoid re-fetching what you already have:
+
+- **What it reads:** for CBZs it produced, chapter membership is encoded in the page
+  names (`ch0012_p003.jpg`), and the series is matched via the MangaDex id stored in
+  ComicInfo's `<Web>` tag (falling back to the series title). The **volume comes from
+  the existing filename** (`… Vol. 05.cbz`) and is adopted as authoritative — so
+  volume boundaries snap to what's already in Tome.
+- **What it does:** marks those chapters `imported` (pointing at the existing file),
+  so the downloader/binder skip them entirely.
+- **When:** automatically when you follow a series and on every scheduler cycle;
+  manually via **Scan library** in the UI or `POST /api/library/scan`.
+- **Scope:** point `LIBRARY_SCAN_DIRS` at your output dir and/or Tome's `/books`.
+  Foreign CBZs (not made by mangas-binder) are matched by series/volume but can't be
+  reconciled per-chapter, since they don't list chapter numbers.
 
 ### Notifications
 

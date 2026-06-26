@@ -18,6 +18,14 @@ export const config = {
   // SQLite database file.
   dbPath: abs(process.env.DB_PATH || './data/mangas-binder.db'),
 
+  // Directories scanned to detect already-owned CBZs (defaults to outputDir).
+  // Point an extra entry at Tome's library mount (e.g. /books, read-only) if Tome
+  // moves files out of the Bindery on import. Comma-separated.
+  libraryScanDirs: (process.env.LIBRARY_SCAN_DIRS
+    ? process.env.LIBRARY_SCAN_DIRS.split(',')
+    : [process.env.OUTPUT_DIR || './data/output']
+  ).map(p => abs(p.trim())),
+
   // HTTP server.
   port: Number(process.env.PORT || 8787),
   host: process.env.HOST || '0.0.0.0',

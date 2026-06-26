@@ -52,9 +52,11 @@ async function viewLibrary(v) {
   const head = h(`<div class="card row"><div>
     <strong>${series.length}</strong> series · scheduler ${health.scheduler.running ? '<span class="pill ok">on</span>' : '<span class="pill warn">off</span>'} (${health.scheduler.intervalHours}h)
     </div></div>`);
-  const scanBtn = h('<button class="btn primary" style="margin-left:auto">Scan now</button>');
+  const libBtn = h('<button class="btn" style="margin-left:auto">Scan library</button>');
+  libBtn.onclick = async () => { const r = await api('/library/scan', { method:'POST' }); toast(`Marked ${r.markedChapters} owned across ${r.matchedFiles} file(s)`); route(); };
+  const scanBtn = h('<button class="btn primary">Scan now</button>');
   scanBtn.onclick = async () => { await api('/scan', { method:'POST' }); toast('Scan started'); };
-  head.appendChild(scanBtn);
+  head.append(libBtn, scanBtn);
   v.appendChild(head);
 
   if (!series.length) { v.appendChild(h('<p class="muted">No series followed yet. Use the <b>Add</b> tab.</p>')); return; }

@@ -10,6 +10,7 @@ import {
   setProviderEnabled, setProviderConfig, isProviderEnabled,
 } from '../../core/settings.js';
 import { followSeries, refreshSeries } from '../../core/series-service.js';
+import { scanLibrary } from '../../core/library-scan.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce } from '../../download/worker.js';
 import { notify } from '../../core/notify.js';
@@ -122,6 +123,14 @@ export default async function apiRoutes(app) {
     if (enabled !== undefined) setProviderEnabled(name, !!enabled);
     if (config !== undefined) setProviderConfig(name, config);
     return { ok: true };
+  });
+
+  // --- Library reconciliation (mark already-owned CBZs) ---
+  app.post('/api/library/scan', async () => scanLibrary());
+  app.post('/api/series/:id/scan-library', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    return scanLibrary({ seriesId: s.id });
   });
 
   // --- Notifications ---
