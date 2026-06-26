@@ -95,6 +95,12 @@ export const provider = {
 
     // Default fallback
     return { mediaType: infoHints.comicvineId ? 'comic' : 'manga', id: best ? String(best.id) : null, title: best?.title || title, description: best?.description || '' };
+  },
+
+  async testConnection() {
+    const res = await graphqlQuery(SEARCH_QUERY, { query: '%batman%' });
+    const books = res?.data?.books || [];
+    return { message: `Reached Hardcover GraphQL, API key valid (${books.length} sample books returned).` };
   }
 };
 
