@@ -2,6 +2,7 @@ import { provider as mangadex } from './mangadex.js';
 import { provider as mangaupdates } from './mangaupdates.js';
 import { provider as comicvine } from './comicvine.js';
 import { provider as getcomics } from './getcomics.js';
+import { provider as hardcover } from './hardcover.js';
 
 /**
  * Provider registry. Every source registers here; the rest of the app only
@@ -22,6 +23,7 @@ const REGISTRY = new Map([
   [mangaupdates.name, mangaupdates],
   [comicvine.name, comicvine],
   [getcomics.name, getcomics],
+  [hardcover.name, hardcover],
 ]);
 
 /** All registered providers (regardless of enabled state). */

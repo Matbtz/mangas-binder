@@ -60,3 +60,22 @@ test('scanLibrary marks chapters owned by an existing CBZ as imported', async ()
   // Re-scan is idempotent (nothing left to mark).
   assert.equal(scanLibrary({ seriesId: s.id }).markedChapters, 0);
 });
+
+test('scanLibrary ignores hidden directories (.tmp) and identifies single epub folders', () => {
+  const libDir = process.env.OUTPUT_DIR;
+  const hidden = path.join(libDir, '.tmp');
+  mkdirSync(hidden, { recursive: true });
+  writeFileSync(path.join(hidden, 'hidden.cbz'), Buffer.from('pk'));
+
+  const novel = path.join(libDir, 'Single Novel');
+  mkdirSync(novel, { recursive: true });
+  writeFileSync(path.join(novel, 'book.epub'), Buffer.from('pk'));
+
+  const out = scanLibrary();
+  const titles = out.untracked.map(u => u.title);
+  assert.ok(!titles.includes('.tmp'), '.tmp should be ignored');
+  
+  const novelEntry = out.untracked.find(u => u.title === 'Single Novel');
+  assert.ok(novelEntry, 'Single Novel should be discovered');
+  assert.equal(novelEntry.isSingleEpub, true, 'should be marked as single epub');
+});

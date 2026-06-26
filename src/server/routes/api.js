@@ -1,5 +1,7 @@
 import { getProvider, describeProviders } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
+import { searchVolumes } from '../../providers/comicvine.js';
+import { hardcover } from '../../providers/hardcover.js';
 import {
   listSeries, getSeries, updateSeries, deleteSeries,
   listChaptersForSeries, getChapter, setChapterState, bulkSetChapterState,
@@ -8,7 +10,7 @@ import {
 import { getDb } from '../../core/db.js';
 import {
   getAllSettings, setSetting, getProviderStates,
-  setProviderEnabled, setProviderConfig, isProviderEnabled,
+  setProviderEnabled, setProviderConfig, getProviderConfig, isProviderEnabled,
 } from '../../core/settings.js';
 import { followSeries, refreshSeries } from '../../core/series-service.js';
 import { scanLibrary } from '../../core/library-scan.js';
@@ -398,16 +400,63 @@ export default async function apiRoutes(app) {
   app.get('/api/library/untracked', async () => {
     const { untracked } = scanLibrary();
     const mdxEnabled = isProviderEnabled('mangadex');
+    const cvEnabled = isProviderEnabled('comicvine');
+    let hcEnabled = false;
+    try {
+      const cfg = getProviderConfig('hardcover') || {};
+      hcEnabled = isProviderEnabled('hardcover') && !!(cfg.apikey || process.env.HARDCOVER_API_KEY);
+    } catch {}
+
     const resolved = await Promise.all(untracked.map(async (s) => {
-      if (s.mangadexId || s.comicvineId || !mdxEnabled) return s;
-      try {
-        const results = await searchManga(s.title);
-        const best = results[0];
-        if (best && titlesMatch(s.title, best.title)) return { ...s, mangadexId: best.id };
-      } catch { /* search failure is non-fatal */ }
-      return s;
+      if (s.mangadexId || s.comicvineId) return s;
+      let mediaType = s.mediaType || 'manga';
+
+      // 1. Hardcover Triage
+      if (hcEnabled) {
+        try {
+          const hc = await hardcover.classifyMedia(s.title, s);
+          if (hc.mediaType === 'book') return { ...s, mediaType: 'book' };
+          mediaType = hc.mediaType;
+        } catch {}
+      }
+
+      // 2. ComicVine search if comic
+      if (mediaType === 'comic' && cvEnabled) {
+        try {
+          const results = await searchVolumes(s.title);
+          const best = results[0];
+          if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
+        } catch {}
+      }
+
+      // 3. MangaDex search
+      if (mdxEnabled) {
+        try {
+          const results = await searchManga(s.title);
+          const best = results[0];
+          if (best && titlesMatch(s.title, best.title)) return { ...s, mangadexId: best.id, mediaType: 'manga' };
+        } catch {}
+      }
+
+      // 4. Fallback: if MangaDex didn't match and we haven't tried ComicVine yet
+      if (mediaType !== 'comic' && cvEnabled && !s.mangadexId) {
+        try {
+          const results = await searchVolumes(s.title);
+          const best = results[0];
+          if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
+        } catch {}
+      }
+
+      return { ...s, mediaType };
     }));
-    return { untracked: resolved };
+
+    const finalUntracked = resolved.filter(s => {
+      if (s.mediaType === 'book') return false; // Hardcover confirmed standard book
+      if (s.isSingleEpub && !s.mangadexId && !s.comicvineId) return false;
+      return true;
+    });
+
+    return { untracked: finalUntracked };
   });
 
   // --- Notifications ---

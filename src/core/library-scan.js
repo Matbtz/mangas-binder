@@ -42,9 +42,32 @@ const COMICVINE_ID_RE = /comicvine\.gamespot\.com\/volume\/4050-(\d+)/i;
 function walkCbz(dir, out = []) {
   if (!existsSync(dir)) return out;
   for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walkCbz(full, out);
     else if (e.isFile() && e.name.toLowerCase().endsWith('.cbz')) out.push(full);
+  }
+  return out;
+}
+
+export function isEpubArchive(filePath) {
+  if (filePath.toLowerCase().endsWith('.epub')) return true;
+  try {
+    const zip = new AdmZip(filePath);
+    const names = zip.getEntries().map(e => e.entryName.toLowerCase());
+    return names.some(n => n === 'meta-inf/container.xml' || n === 'mimetype');
+  } catch {
+    return false;
+  }
+}
+
+function walkUntrackedFiles(dir, out = []) {
+  if (!existsSync(dir)) return out;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name.startsWith('.')) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) walkUntrackedFiles(full, out);
+    else if (e.isFile() && (e.name.toLowerCase().endsWith('.cbz') || e.name.toLowerCase().endsWith('.epub'))) out.push(full);
   }
   return out;
 }
@@ -59,7 +82,7 @@ function tagText(xml, tag) {
  * @returns {{ series, mangadexId, volume, chapters: string[] }}
  */
 export function readCbzInfo(filePath) {
-  let series = null, mangadexId = null, comicvineId = null, chapters = [];
+  let series = null, mangadexId = null, comicvineId = null, publisher = null, genre = null, manga = null, chapters = [];
   try {
     const zip = new AdmZip(filePath);
     const entries = zip.getEntries();
@@ -67,6 +90,9 @@ export function readCbzInfo(filePath) {
     if (comic) {
       const xml = comic.getData().toString('utf-8');
       series = tagText(xml, 'Series');
+      publisher = tagText(xml, 'Publisher');
+      genre = tagText(xml, 'Genre');
+      manga = tagText(xml, 'Manga');
       const web = tagText(xml, 'Web');
       mangadexId = web?.match(WEB_ID_RE)?.[1] || null;
       comicvineId = web?.match(COMICVINE_ID_RE)?.[1] || null;
@@ -81,8 +107,9 @@ export function readCbzInfo(filePath) {
 
   const volMatch = path.basename(filePath).match(FILENAME_VOL_RE);
   const volume = volMatch ? String(parseFloat(volMatch[1])) : null;
-  if (!series) series = path.basename(filePath).replace(/\.cbz$/i, '');
-  return { series, mangadexId, comicvineId, volume, chapters };
+  const hasSeriesTag = !!series;
+  if (!series) series = path.basename(filePath).replace(/\.(cbz|epub)$/i, '');
+  return { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, chapters, isEpub: isEpubArchive(filePath) };
 }
 
 /** The provider id encoded in a CBZ that identifies a given followed series. */
@@ -357,19 +384,26 @@ export function scanLibrary({ seriesId } = {}) {
   for (const scanDir of scanDirs) {
     if (!existsSync(scanDir)) continue;
     for (const entry of readdirSync(scanDir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
       const fullPath = path.join(scanDir, entry.name);
 
       if (entry.isDirectory()) {
-        // Walk CBZs inside for provider IDs and series-title consensus.
-        let mangadexId = null, comicvineId = null;
+        let mangadexId = null, comicvineId = null, publisher = null, genre = null, manga = null;
         const titleCounts = new Map();
-        for (const cbz of walkCbz(fullPath)) {
-          const info = readCbzInfo(cbz);
+        const bookFiles = walkUntrackedFiles(fullPath);
+        if (bookFiles.length === 0) continue;
+
+        let epubCount = 0;
+        for (const f of bookFiles) {
+          const info = readCbzInfo(f);
           if (!mangadexId && info.mangadexId) mangadexId = info.mangadexId;
           if (!comicvineId && info.comicvineId) comicvineId = info.comicvineId;
-          if (info.series) titleCounts.set(info.series, (titleCounts.get(info.series) || 0) + 1);
+          if (!publisher && info.publisher) publisher = info.publisher;
+          if (!genre && info.genre) genre = info.genre;
+          if (!manga && info.manga) manga = info.manga;
+          if (info.hasSeriesTag && info.series) titleCounts.set(info.series, (titleCounts.get(info.series) || 0) + 1);
+          if (info.isEpub) epubCount++;
         }
-        // Use CBZ series title when they agree, or fall back to the folder name itself.
         const displayTitle = (titleCounts.size > 0) ? [...titleCounts.keys()][0] : entry.name;
         const sanitizedTitle = sanitize(displayTitle).toLowerCase();
 
@@ -377,31 +411,30 @@ export function scanLibrary({ seriesId } = {}) {
         if (mangadexId && allByKey.has(`mangadex:${mangadexId}`)) continue;
         if (comicvineId && allByKey.has(`comicvine:${comicvineId}`)) continue;
 
-        const cbzFiles = walkCbz(fullPath);
-        if (cbzFiles.length === 0) continue;
-        const fileCount = cbzFiles.length;
+        const fileCount = bookFiles.length;
+        const isSingleEpub = (fileCount === 1 && epubCount === 1);
 
         const volumes = new Set();
-        for (const f of cbzFiles) {
+        for (const f of bookFiles) {
           const m = path.basename(f).match(FILENAME_VOL_RE);
           if (m) volumes.add(String(parseFloat(m[1])));
         }
 
         const key = mangadexId || comicvineId || sanitizedTitle;
 
-        // Merge if another directory already resolved to the same title.
         if (byTitle.has(sanitizedTitle)) {
           const existingKey = byTitle.get(sanitizedTitle);
           const existing = untrackedMap.get(existingKey);
           if (existing) {
             existing.fileCount += fileCount;
+            existing.isSingleEpub = false; // merged => >1 file
             for (const v of volumes) existing.volumes.add(v);
             if (!existing.mangadexId && mangadexId) {
               existing.mangadexId = mangadexId;
               if (key !== existingKey) {
-                untrackedMap.delete(existingKey);
-                untrackedMap.set(key, existing);
-                byTitle.set(sanitizedTitle, key);
+                 untrackedMap.delete(existingKey);
+                 untrackedMap.set(key, existing);
+                 byTitle.set(sanitizedTitle, key);
               }
             }
             if (!existing.comicvineId && comicvineId) existing.comicvineId = comicvineId;
@@ -409,35 +442,48 @@ export function scanLibrary({ seriesId } = {}) {
           }
         }
 
-        untrackedMap.set(key, { title: displayTitle, mangadexId, comicvineId, volumes, fileCount });
+        untrackedMap.set(key, { title: displayTitle, mangadexId, comicvineId, publisher, genre, manga, isSingleEpub, volumes, fileCount });
         byTitle.set(sanitizedTitle, key);
 
-      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.cbz')) {
-        // CBZ directly in scan root (flat layout without a series subfolder).
+      } else if (entry.isFile() && (entry.name.toLowerCase().endsWith('.cbz') || entry.name.toLowerCase().endsWith('.epub'))) {
         const info = readCbzInfo(fullPath);
         const keys = fileKeys(info);
         if (keys.some(k => allByKey.has(k))) continue;
 
         const key = info.mangadexId || info.comicvineId || sanitize(info.series).toLowerCase();
         if (!untrackedMap.has(key)) {
-          untrackedMap.set(key, { title: info.series, mangadexId: info.mangadexId, comicvineId: info.comicvineId, volumes: new Set(), fileCount: 0 });
+          untrackedMap.set(key, { title: info.series, mangadexId: info.mangadexId, comicvineId: info.comicvineId, publisher: info.publisher, genre: info.genre, manga: info.manga, isSingleEpub: !!info.isEpub, volumes: new Set(), fileCount: 0 });
           byTitle.set(sanitize(info.series).toLowerCase(), key);
         }
         const e = untrackedMap.get(key);
         if (info.volume) e.volumes.add(info.volume);
         e.fileCount++;
+        if (e.fileCount > 1) e.isSingleEpub = false;
       }
     }
   }
 
-  const untracked = [...untrackedMap.values()].map(e => ({
-    title: e.title,
-    mangadexId: e.mangadexId,
-    comicvineId: e.comicvineId,
-    mediaType: e.comicvineId ? 'comic' : 'manga',
-    volumes: [...e.volumes].sort((a, b) => parseFloat(a) - parseFloat(b)),
-    fileCount: e.fileCount,
-  }));
+  const untracked = [...untrackedMap.values()].map(e => {
+    let mediaType = e.comicvineId ? 'comic' : 'manga';
+    if (!e.comicvineId) {
+      const pub = (e.publisher || '').toLowerCase();
+      const g = (e.genre || '').toLowerCase();
+      const comicPubs = ['dc comics', 'marvel', 'image', 'dark horse', 'idw', 'dynamite', 'boom', 'vertigo', '2000 ad', 'archie'];
+      if (comicPubs.some(p => pub.includes(p)) || g.includes('superhero')) mediaType = 'comic';
+    }
+    return {
+      title: e.title,
+      mangadexId: e.mangadexId,
+      comicvineId: e.comicvineId,
+      mediaType,
+      isSingleEpub: !!e.isSingleEpub,
+      publisher: e.publisher || null,
+      genre: e.genre || null,
+      manga: e.manga || null,
+      volumes: [...e.volumes].sort((a, b) => parseFloat(a) - parseFloat(b)),
+      fileCount: e.fileCount,
+    };
+  });
 
   return { files: files.length, matchedFiles, markedChapters, perSeries, untracked };
 }

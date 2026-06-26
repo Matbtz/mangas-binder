@@ -48,6 +48,10 @@ export function ensureSeeded() {
     const cur = getProviderConfig('getcomics');
     if (!cur.baseUrl) setProviderConfig('getcomics', { ...cur, baseUrl: process.env.GETCOMICS_BASE_URL });
   }
+  if (process.env.HARDCOVER_API_KEY) {
+    const cur = getProviderConfig('hardcover');
+    if (!cur.apikey) setProviderConfig('hardcover', { ...cur, apikey: process.env.HARDCOVER_API_KEY });
+  }
   seeded = true;
 }
 
