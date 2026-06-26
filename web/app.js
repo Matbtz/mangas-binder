@@ -1,0 +1,352 @@
+// Minimal no-build SPA for mangas-binder.
+const $ = (sel, el = document) => el.querySelector(sel);
+const h = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+
+// Auth token persisted in localStorage (only needed if server sets AUTH_TOKEN).
+const token = () => localStorage.getItem('mb_token') || '';
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (token()) headers.Authorization = `Bearer ${token()}`;
+  const res = await fetch(`/api${path}`, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+const STATE_PILL = { imported:'ok', downloaded:'acc', downloading:'acc', queued:'', wanted:'warn', failed:'err', skipped:'' };
+const countsBadges = (c = {}) => Object.entries(c).map(([s,n]) => `<span class="pill ${STATE_PILL[s]||''}">${s} ${n}</span>`).join(' ');
+
+const TABS = ['Library', 'Add', 'Activity', 'Settings'];
+let current = 'Library';
+
+function renderNav() {
+  const nav = $('#nav'); nav.innerHTML = '';
+  for (const t of TABS) {
+    const b = h(`<button class="${t===current?'active':''}">${t}</button>`);
+    b.onclick = () => { current = t; route(); };
+    nav.appendChild(b);
+  }
+}
+
+async function route() {
+  renderNav();
+  const v = $('#view'); v.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    if (current === 'Library') await viewLibrary(v);
+    else if (current === 'Add') await viewAdd(v);
+    else if (current === 'Activity') await viewActivity(v);
+    else if (current === 'Settings') await viewSettings(v);
+  } catch (e) { v.innerHTML = `<div class="card"><span class="pill err">error</span> ${esc(e.message)}</div>`; }
+}
+
+// --- Library ---------------------------------------------------------------
+async function viewLibrary(v) {
+  const [series, health] = await Promise.all([api('/series'), api('/health')]);
+  v.innerHTML = '';
+  const head = h(`<div class="card row"><div>
+    <strong>${series.length}</strong> series · scheduler ${health.scheduler.running ? '<span class="pill ok">on</span>' : '<span class="pill warn">off</span>'} (${health.scheduler.intervalHours}h)
+    </div></div>`);
+  const libBtn = h('<button class="btn" style="margin-left:auto">Scan library</button>');
+  libBtn.onclick = async () => {
+    const r = await api('/library/scan', { method:'POST' });
+    toast(`Marked ${r.markedChapters} owned across ${r.matchedFiles} file(s)`);
+    route();
+  };
+  const scanBtn = h('<button class="btn primary">Scan now</button>');
+  scanBtn.onclick = async () => { await api('/scan', { method:'POST' }); toast('Scan started'); };
+  head.append(libBtn, scanBtn);
+  v.appendChild(head);
+
+  if (!series.length) { v.appendChild(h('<p class="muted">No series followed yet. Use the <b>Add</b> tab.</p>')); }
+  else {
+    const grid = h('<div class="grid"></div>');
+    for (const s of series) {
+      const card = h(`<div class="card">
+        <div class="title-row"><strong>${esc(s.title)}</strong> <span class="pill">${esc(s.mediaType||'manga')}</span> <span class="pill ${s.status==='completed'?'ok':'acc'}">${esc(s.status||'?')}</span></div>
+        <div class="muted" style="font-size:12px">${esc((s.publisher? s.publisher+' · ':'') + s.authors.join(', '))} · ${esc(s.packagingMode)} · ${esc(s.monitorMode)} · ${esc(s.language)}</div>
+        <div style="margin:8px 0">${countsBadges(s.counts)}</div>
+      </div>`);
+      const actions = h('<div class="row"></div>');
+      const refresh = h('<button class="btn sm">Refresh</button>');
+      refresh.onclick = async () => { await api(`/series/${s.id}/refresh`, { method:'POST' }); toast('Refreshing…'); };
+      const detail = h('<button class="btn sm">Chapters</button>');
+      detail.onclick = () => showDetail(s.id);
+      const del = h('<button class="btn sm">Unfollow</button>');
+      del.onclick = async () => { if (confirm(`Unfollow ${s.title}?`)) { await api(`/series/${s.id}`, { method:'DELETE' }); route(); } };
+      actions.append(refresh, detail, del);
+      card.appendChild(actions);
+      grid.appendChild(card);
+    }
+    v.appendChild(grid);
+  }
+
+  // --- Untracked series found in the library ---
+  try {
+    const { untracked } = await api('/library/untracked');
+    if (untracked.length) {
+      const sec = h('<div class="card"><h2>In your library — not followed</h2><p class="muted" style="margin:0 0 12px">These series were found in your library folders but are not tracked by mangas-binder.</p></div>');
+      const grid2 = h('<div class="grid"></div>');
+      for (const u of untracked) {
+        const provider = u.comicvineId ? 'comicvine' : (u.mangadexId ? 'mangadex' : null);
+        const providerId = u.comicvineId || u.mangadexId;
+        const comic = u.mediaType === 'comic';
+        const volLabel = u.volumes.length
+          ? `Vol. ${u.volumes.join(', ')} (${u.fileCount} file${u.fileCount!==1?'s':''})`
+          : `${u.fileCount} file${u.fileCount!==1?'s':''}`;
+        const idLabel = provider ? `${comic?'ComicVine':'MangaDex'} ID: ${providerId}` : 'No source ID found — follow manually via Add tab';
+        const card = h(`<div class="card">
+          <div class="title-row"><strong>${esc(u.title)}</strong> <span class="pill">${esc(u.mediaType)}</span> <span class="pill">${esc(volLabel)}</span></div>
+          <div class="muted" style="font-size:12px">${esc(idLabel)}</div>
+        </div>`);
+        if (provider) {
+          const actions = h('<div class="row" style="margin-top:8px"></div>');
+          const pk = h(`<select class="pk"><option value="chapter">per ${comic?'issue':'chapter'}</option><option value="volume">${comic?'collected':'volume'} CBZ</option></select>`);
+          pk.value = comic ? 'chapter' : 'volume';
+          const mm = h('<select class="mm"><option value="all">all</option><option value="future">future only</option></select>');
+          const btn = h('<button class="btn primary sm">Follow</button>');
+          btn.onclick = async () => {
+            btn.disabled = true; btn.textContent = 'Following…';
+            try {
+              await api('/series', { method:'POST', body:{ provider, providerSeriesId: providerId, packagingMode: pk.value, monitorMode: mm.value } });
+              toast('Following ' + u.title);
+              route();
+            } catch(e) { toast(e.message); btn.disabled = false; btn.textContent = 'Follow'; }
+          };
+          actions.append(pk, mm, btn);
+          card.appendChild(actions);
+        }
+        grid2.appendChild(card);
+      }
+      sec.appendChild(grid2);
+      v.appendChild(sec);
+    }
+  } catch { /* untracked endpoint failure shouldn't break the library view */ }
+}
+
+async function showDetail(id) {
+  const v = $('#view'); v.innerHTML = '<p class="muted">Loading…</p>';
+  const s = await api(`/series/${id}`);
+  v.innerHTML = '';
+  const comic = (s.mediaType||'manga') === 'comic';
+  const back = h('<button class="btn sm">← Library</button>'); back.onclick = route;
+  v.appendChild(h(`<div class="card"><div class="title-row"><h2>${esc(s.title)}</h2> <span class="pill">${esc(s.mediaType||'manga')}</span></div>
+    <div class="row" id="modes"></div></div>`));
+  $('.card', v).prepend(back);
+
+  // Editable modes
+  const modes = $('#modes', v);
+  modes.append(field('Monitor', ['all','future','none'], s.monitorMode, async val => { await api(`/series/${id}`,{method:'PATCH',body:{monitorMode:val}}); toast('Saved'); }));
+  modes.append(field('Packaging', ['volume','chapter'], s.packagingMode, async val => { await api(`/series/${id}`,{method:'PATCH',body:{packagingMode:val}}); toast('Saved'); }));
+
+  const table = h(`<div class="card"><table><thead><tr><th>${comic?'Issue':'Ch'}</th><th>${comic?'Coll.':'Vol'}</th><th>Title</th><th>State</th><th></th></tr></thead><tbody></tbody></table></div>`);
+  const tb = $('tbody', table);
+  for (const c of s.chapters) {
+    const tr = h(`<tr><td>${esc(c.number)}</td><td>${esc(c.volume||'—')}</td><td>${esc(c.title||'')}</td>
+      <td><span class="pill ${STATE_PILL[c.state]||''}">${c.state}</span>${c.error?` <span class="muted" title="${esc(c.error)}">⚠</span>`:''}</td><td></td></tr>`);
+    if (c.state === 'failed' || c.state === 'skipped') {
+      const btn = h('<button class="btn sm">Retry</button>');
+      btn.onclick = async () => { await api(`/chapters/${c.id}/retry`,{method:'POST'}); showDetail(id); };
+      $('td:last-child', tr).appendChild(btn);
+    }
+    tb.appendChild(tr);
+  }
+  v.appendChild(table);
+}
+
+function field(label, options, value, onChange) {
+  const wrap = h(`<label class="field">${label}</label>`);
+  const sel = h(`<select>${options.map(o=>`<option ${o===value?'selected':''}>${o}</option>`).join('')}</select>`);
+  sel.onchange = () => onChange(sel.value);
+  wrap.appendChild(sel);
+  return wrap;
+}
+
+// --- Add -------------------------------------------------------------------
+async function viewAdd(v) {
+  v.innerHTML = '';
+  // Searchable sources = metadata providers (MangaDex for manga, ComicVine for comics).
+  const providers = (await api('/providers')).filter(p => p.capabilities.metadata && p.enabled);
+  const byName = Object.fromEntries(providers.map(p => [p.name, p]));
+  const card = h(`<div class="card"><h2>Search a source</h2><div class="row">
+    <select id="prov">${providers.map(p=>`<option value="${p.name}">${esc(p.label)} (${p.mediaType})</option>`).join('')}</select>
+    <input id="q" placeholder="Title…" style="flex:1;min-width:200px" />
+    <button class="btn primary" id="go">Search</button></div>
+    <p class="muted" id="provhint" style="font-size:12px;margin:8px 0 0"></p></div>`);
+  v.appendChild(card);
+  const results = h('<div id="results"></div>'); v.appendChild(results);
+
+  const isComic = () => (byName[$('#prov',card).value]?.mediaType === 'comic');
+  const updateHint = () => {
+    $('#provhint', card).textContent = isComic()
+      ? 'Comics: metadata from ComicVine, files from GetComics. Defaults to one CBZ per issue.'
+      : 'Manga: metadata + pages from MangaDex.';
+    $('#q', card).placeholder = isComic() ? 'Comic series title…' : 'Manga title…';
+  };
+  $('#prov', card).onchange = updateHint;
+  updateHint();
+
+  const doSearch = async () => {
+    const q = $('#q', card).value.trim(); if (!q) return;
+    results.innerHTML = '<p class="muted">Searching…</p>';
+    try {
+      const { results: rs, provider } = await api(`/search?provider=${$('#prov',card).value}&q=${encodeURIComponent(q)}`);
+      const comic = isComic();
+      const unit = comic ? 'issue' : 'chapter';
+      const coll = comic ? 'collected volume' : 'volume';
+      results.innerHTML = '';
+      if (!rs.length) { results.innerHTML = '<p class="muted">No results.</p>'; return; }
+      for (const r of rs) {
+        const meta = [r.publisher, r.year, r.issueCount ? `${r.issueCount} issues` : null].filter(Boolean).join(' · ');
+        const row = h(`<div class="card row"><div style="flex:1"><strong>${esc(r.title)}</strong>${meta?`<div class="muted" style="font-size:12px">${esc(meta)}</div>`:''}</div>
+          <select class="pk"><option value="chapter">per ${unit}</option><option value="volume">${coll} CBZ</option></select>
+          <select class="mm"><option value="all">all</option><option value="future">future only</option></select></div>`);
+        // Manga default to volume packaging; comics default to per-issue.
+        $('.pk', row).value = comic ? 'chapter' : 'volume';
+        const add = h('<button class="btn primary">Follow</button>');
+        add.onclick = async () => {
+          add.disabled = true; add.textContent = 'Following…';
+          try { await api('/series',{method:'POST',body:{provider,providerSeriesId:r.id,packagingMode:$('.pk',row).value,monitorMode:$('.mm',row).value}}); toast('Following '+r.title); current='Library'; route(); }
+          catch(e){ toast(e.message); add.disabled=false; add.textContent='Follow'; }
+        };
+        row.appendChild(add); results.appendChild(row);
+      }
+    } catch (e) { results.innerHTML = `<div class="card"><span class="pill err">error</span> ${esc(e.message)}</div>`; }
+  };
+  $('#go', card).onclick = doSearch;
+  $('#q', card).addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
+}
+
+// --- Activity --------------------------------------------------------------
+async function viewActivity(v) {
+  const [queue, history] = await Promise.all([api('/queue'), api('/history')]);
+  v.innerHTML = '';
+  const q = h(`<div class="card"><h2>Queue (${queue.length})</h2><table><thead><tr><th>Series</th><th>Ch</th><th>State</th><th>Att.</th></tr></thead><tbody></tbody></table></div>`);
+  for (const c of queue) $('tbody', q).appendChild(h(`<tr><td>#${c.seriesId}</td><td>${esc(c.number)}</td><td><span class="pill ${STATE_PILL[c.state]||''}">${c.state}</span></td><td>${c.attempts}</td></tr>`));
+  if (!queue.length) $('tbody', q).appendChild(h('<tr><td colspan="4" class="muted">Idle.</td></tr>'));
+  v.appendChild(q);
+  const hi = h(`<div class="card"><h2>History</h2><table><thead><tr><th>When</th><th>Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div>`);
+  for (const e of history) $('tbody', hi).appendChild(h(`<tr><td class="muted">${esc(e.ts)}</td><td>${esc(e.event)}</td><td>${esc(e.message||'')}</td></tr>`));
+  if (!history.length) $('tbody', hi).appendChild(h('<tr><td colspan="3" class="muted">Nothing yet.</td></tr>'));
+  v.appendChild(hi);
+}
+
+// --- Settings --------------------------------------------------------------
+async function viewSettings(v) {
+  const [settings, providers] = await Promise.all([api('/settings'), api('/providers')]);
+  v.innerHTML = '';
+  const numKeys = ['scanIntervalHours','downloadConcurrency','chapterConcurrency'];
+  const enumKeys = { defaultPackagingMode:['volume','chapter'], defaultMonitorMode:['all','future','none'] };
+  const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes'];
+  const textKeys = ['defaultLanguage'];
+
+  const sc = h('<div class="card"><h2>Settings</h2></div>');
+  const form = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:10px"></div>');
+  for (const k of [...numKeys, ...Object.keys(enumKeys), ...boolKeys, ...textKeys]) {
+    if (!(k in settings)) continue;
+    const row = h(`<label class="field">${k}</label>`);
+    let inp;
+    if (numKeys.includes(k)) inp = h(`<input type="number" value="${esc(settings[k])}" style="width:140px">`);
+    else if (boolKeys.includes(k)) { inp = h(`<select style="width:140px"><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(settings[k]); }
+    else if (enumKeys[k]) inp = h(`<select style="width:140px">${enumKeys[k].map(o=>`<option ${o===settings[k]?'selected':''}>${o}</option>`).join('')}</select>`);
+    else inp = h(`<input value="${esc(settings[k])}" style="width:140px">`);
+    inp.dataset.key = k; row.appendChild(inp); form.appendChild(row);
+  }
+  const save = h('<button class="btn primary" style="align-self:flex-start">Save settings</button>');
+  save.onclick = async () => {
+    const body = {};
+    for (const el of form.querySelectorAll('[data-key]')) {
+      const k = el.dataset.key;
+      body[k] = numKeys.includes(k) ? Number(el.value) : boolKeys.includes(k) ? el.value==='true' : el.value;
+    }
+    await api('/settings',{method:'PATCH',body}); toast('Saved');
+  };
+  form.appendChild(save); sc.appendChild(form); v.appendChild(sc);
+
+  // Notifications
+  const nc = h('<div class="card"><h2>Notifications</h2></div>');
+  const nform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:10px"></div>');
+  const nFields = [
+    ['discordWebhook','Discord webhook URL','text'],
+    ['ntfyUrl','ntfy topic URL (e.g. https://ntfy.sh/my-topic)','text'],
+    ['notifyOnImport','Notify when media is added','bool'],
+    ['notifyOnError','Notify on failures','bool'],
+  ];
+  for (const [k,label,type] of nFields) {
+    const row = h(`<label class="field">${label}</label>`);
+    let inp;
+    if (type==='bool') { inp = h(`<select style="width:160px"><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(settings[k] ?? false); }
+    else inp = h(`<input value="${esc(settings[k]??'')}" placeholder="(disabled)" style="min-width:320px">`);
+    inp.dataset.nkey = k; row.appendChild(inp); nform.appendChild(row);
+  }
+  const nrow = h('<div class="row"></div>');
+  const nsave = h('<button class="btn primary">Save notifications</button>');
+  nsave.onclick = async () => {
+    const body = {};
+    for (const el of nform.querySelectorAll('[data-nkey]')) {
+      const k = el.dataset.nkey;
+      body[k] = (k==='notifyOnImport'||k==='notifyOnError') ? el.value==='true' : el.value;
+    }
+    await api('/settings',{method:'PATCH',body}); toast('Saved');
+  };
+  const ntest = h('<button class="btn">Send test</button>');
+  ntest.onclick = async () => { try { await api('/notify/test',{method:'POST'}); toast('Test sent'); } catch(e){ toast(e.message); } };
+  nrow.append(nsave, ntest); nform.appendChild(nrow); nc.appendChild(nform); v.appendChild(nc);
+
+  const PROVIDER_CONFIG = {
+    comicvine: [['apikey', 'ComicVine API key (comicvine.gamespot.com/api)', 'password']],
+    getcomics: [['baseUrl', 'GetComics base URL (optional override)', 'text']],
+  };
+  const capLabel = (c) => c.archive ? 'archive' : c.download ? 'download' : 'metadata';
+
+  const pc = h('<div class="card"><h2>Sources</h2></div>');
+  for (const p of providers) {
+    const wrap = h('<div style="border-top:1px solid #2a2a2a;padding:10px 0"></div>');
+    const row = h(`<div class="row" style="justify-content:space-between"><div><strong>${esc(p.label)}</strong>
+      <span class="pill">${esc(p.mediaType)}</span>
+      <span class="pill ${p.capabilities.download||p.capabilities.archive?'acc':''}">${capLabel(p.capabilities)}</span></div></div>`);
+    const btns = h('<div class="row" style="gap:6px;align-items:center"></div>');
+    const status = h('<span class="muted" style="font-size:12px"></span>');
+    const test = h('<button class="btn sm">Test</button>');
+    test.onclick = async () => {
+      test.disabled = true; const prev = test.textContent; test.textContent = 'Testing…';
+      status.className = 'muted'; status.style.fontSize = '12px'; status.textContent = '';
+      try {
+        const r = await api(`/providers/${p.name}/test`, { method:'POST' });
+        status.innerHTML = `<span class="pill ${r.ok?'ok':'err'}">${r.ok?'✓':'✗'}</span> ${esc(r.message)}`;
+      } catch (e) { status.innerHTML = `<span class="pill err">✗</span> ${esc(e.message)}`; }
+      finally { test.disabled = false; test.textContent = prev; }
+    };
+    const tg = h(`<button class="btn sm">${p.enabled?'Enabled':'Disabled'}</button>`);
+    tg.classList.toggle('primary', p.enabled);
+    tg.onclick = async () => { await api(`/providers/${p.name}`,{method:'PATCH',body:{enabled:!p.enabled}}); viewSettings(v); };
+    btns.append(test, tg); row.appendChild(btns); wrap.appendChild(row);
+    wrap.appendChild(status);
+
+    const fields = PROVIDER_CONFIG[p.name];
+    if (fields) {
+      const cfgForm = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:8px;margin-top:8px"></div>');
+      for (const [key, label, type] of fields) {
+        const f = h(`<label class="field" style="font-size:12px">${label}</label>`);
+        const inp = h(`<input type="${type==='password'?'password':'text'}" value="${esc(p.config?.[key]??'')}" placeholder="(not set)" style="min-width:320px">`);
+        inp.dataset.cfg = key; f.appendChild(inp); cfgForm.appendChild(f);
+      }
+      const csave = h('<button class="btn sm primary" style="align-self:flex-start">Save</button>');
+      csave.onclick = async () => {
+        const config = {};
+        for (const el of cfgForm.querySelectorAll('[data-cfg]')) if (el.value.trim()) config[el.dataset.cfg] = el.value.trim();
+        await api(`/providers/${p.name}`, { method:'PATCH', body:{ config } }); toast('Saved');
+      };
+      cfgForm.appendChild(csave); wrap.appendChild(cfgForm);
+    }
+    pc.appendChild(wrap);
+  }
+  v.appendChild(pc);
+}
+
+route();

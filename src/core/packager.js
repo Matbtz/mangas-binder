@@ -36,17 +36,44 @@ export async function downloadBuffer(url) {
  *   { archiveName, sourcePath }  — file on disk
  *   { archiveName, content }     — Buffer/string in memory
  */
-export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
+/**
+ * Tome-compatible CBZ filename for a volume.
+ * Matches Tome's "Series Vol. N" / "Series, Vol. N" filename parser; ComicInfo.xml
+ * still takes precedence inside the archive. Calculated/estimated volumes are tagged
+ * in ComicInfo Notes, not in the filename, so they import cleanly.
+ */
+export function volumeCbzName(mangaName, volumeLabel) {
+  if (volumeLabel === 'none') return `${mangaName} - Unsorted.cbz`;
   const volPadded = isNaN(Number(volumeLabel))
     ? volumeLabel
     : padNum(Number(volumeLabel), 2);
-  const suffix = volumeLabel === 'none'
-    ? 'Volume not released'
-    : isCalculated
-      ? `V${volPadded} (calculated)`
-      : `V${volPadded}`;
-  const outputPath = path.join(outputDir, `${mangaName} ${suffix}.cbz`);
+  return `${mangaName} Vol. ${volPadded}.cbz`;
+}
 
+/** Tome-compatible CBZ filename for a single chapter. */
+export function chapterCbzName(mangaName, chapterNum) {
+  return `${mangaName} - Chapter ${chapterKey(chapterNum)}.cbz`;
+}
+
+/**
+ * CBZ filename for a single comic issue, e.g. "Saga #001.cbz" — the convention
+ * Komga/Kavita/Tome parse for issues. Decimal issues (e.g. 1.5) are preserved.
+ */
+export function issueCbzName(seriesName, issueNum) {
+  const n = String(issueNum);
+  const padded = n.includes('.')
+    ? `${padNum(parseInt(n, 10), 3)}.${n.split('.')[1]}`
+    : padNum(parseInt(n, 10), 3);
+  return `${seriesName} #${padded}.cbz`;
+}
+
+/**
+ * Build the ordered CBZ entry list: optional cover (sorts first), all chapter
+ * pages renamed to ch{NNNN}_p{NNN}.ext, then ComicInfo.xml at the root.
+ * `chapters` is a list of chapter numbers; `localChapters` maps number -> folder.
+ * @returns {Promise<Array<{archiveName, sourcePath?, content?}>>}
+ */
+export async function buildEntries(chapters, localChapters, { comicInfoXml = null, coverBuffer = null } = {}) {
   const entries = [];
 
   // Cover image — sorts before all chapter pages alphabetically
@@ -75,6 +102,12 @@ export async function buildJob(volumeLabel, chapters, localChapters, outputDir, 
     entries.push({ archiveName: 'ComicInfo.xml', content: Buffer.from(comicInfoXml, 'utf-8') });
   }
 
+  return entries;
+}
+
+export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
+  const outputPath = path.join(outputDir, volumeCbzName(mangaName, volumeLabel));
+  const entries = await buildEntries(chapters, localChapters, { comicInfoXml, coverBuffer });
   return { outputPath, entries };
 }
 

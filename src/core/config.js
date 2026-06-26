@@ -1,0 +1,53 @@
+import path from 'path';
+
+/** Resolve a path, defaulting relative to the project data dir. */
+function abs(p) {
+  return path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
+}
+
+/**
+ * Static, process-level configuration from environment variables.
+ * Mutable, per-series and operational preferences live in the DB (settings table);
+ * this file is only for things needed before the DB is open (paths, ports, auth).
+ */
+export const config = {
+  // Where Tome's Bindery / library is mounted — finished CBZs land here.
+  outputDir: abs(process.env.OUTPUT_DIR || './data/output'),
+  // Working area for in-progress page downloads (never exposed to Tome).
+  stagingDir: abs(process.env.STAGING_DIR || './data/staging'),
+  // SQLite database file.
+  dbPath: abs(process.env.DB_PATH || './data/mangas-binder.db'),
+
+  // Directories scanned to detect already-owned CBZs (defaults to outputDir).
+  // Point an extra entry at Tome's library mount (e.g. /books, read-only) if Tome
+  // moves files out of the Bindery on import. Comma-separated.
+  libraryScanDirs: (process.env.LIBRARY_SCAN_DIRS
+    ? process.env.LIBRARY_SCAN_DIRS.split(',')
+    : [process.env.OUTPUT_DIR || './data/output']
+  ).map(p => abs(p.trim())),
+
+  // HTTP server.
+  port: Number(process.env.PORT || 8787),
+  host: process.env.HOST || '0.0.0.0',
+  // Empty token => no auth (fine for solo localhost). Set to require Bearer/?token=.
+  authToken: process.env.AUTH_TOKEN || '',
+
+  // Defaults seeded into the settings table on first run.
+  defaults: {
+    scanIntervalHours: Number(process.env.SCAN_INTERVAL_HOURS || 6),
+    downloadConcurrency: Number(process.env.DOWNLOAD_CONCURRENCY || 4), // parallel page fetches per chapter
+    chapterConcurrency: Number(process.env.CHAPTER_CONCURRENCY || 2),   // chapters downloaded in parallel
+    defaultPackagingMode: process.env.DEFAULT_PACKAGING_MODE || 'volume', // volume | chapter
+    defaultMonitorMode: process.env.DEFAULT_MONITOR_MODE || 'all',         // all | future | none
+    defaultLanguage: process.env.DEFAULT_LANGUAGE || 'en',
+    dataSaver: process.env.DATA_SAVER === 'true',
+    keepLoosePages: process.env.KEEP_LOOSE_PAGES === 'true',
+    // Assign untagged chapters to estimated volumes (uses extrapolate.js).
+    extrapolateVolumes: process.env.EXTRAPOLATE_VOLUMES !== 'false',
+    // Notifications (empty = disabled). ntfyUrl is a full topic URL, e.g. https://ntfy.sh/my-topic
+    discordWebhook: process.env.DISCORD_WEBHOOK || '',
+    ntfyUrl: process.env.NTFY_URL || '',
+    notifyOnImport: process.env.NOTIFY_ON_IMPORT !== 'false',
+    notifyOnError: process.env.NOTIFY_ON_ERROR === 'true',
+  },
+};

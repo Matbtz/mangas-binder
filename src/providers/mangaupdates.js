@@ -54,3 +54,27 @@ export async function getTotalVolumesForTitle(title) {
     return null;
   }
 }
+
+/** Lightweight reachability check for the Settings "Test connection" button. */
+export async function testConnection() {
+  await apiFetch(`${BASE_URL}/series/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ search: 'naruto', perpage: 1 }),
+  });
+  return { message: 'Reached MangaUpdates.' };
+}
+
+/**
+ * Metadata-only provider conforming to providers/base.js.
+ * Supplies the total-volume hint that feeds core/extrapolate.js; it cannot
+ * download pages, so it is never selected as a download source.
+ */
+export const provider = {
+  name: 'mangaupdates',
+  label: 'MangaUpdates',
+  capabilities: { download: false, metadata: true },
+  search: searchMangaUpdates,
+  getTotalVolumesForTitle,
+  testConnection,
+};

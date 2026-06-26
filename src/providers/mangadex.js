@@ -6,11 +6,13 @@ const BASE_URL = 'https://api.mangadex.org';
 // Include all content ratings so adult-tagged manga chapters are not silently filtered
 const CONTENT_RATINGS = 'contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic';
 
+const HEADERS = { 'User-Agent': 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)' };
+
 async function apiFetch(url) {
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: HEADERS });
   if (res.status === 429) {
     await new Promise(r => setTimeout(r, 2000));
-    const retry = await fetch(url);
+    const retry = await fetch(url, { headers: HEADERS });
     if (!retry.ok) throw new Error(`MangaDex API error ${retry.status}: ${url}`);
     return retry.json();
   }
@@ -108,8 +110,72 @@ export async function fetchMangaDetails(mangaId) {
     description,
     genres,
     year: attrs.year,
+    status: attrs.status || null, // ongoing | completed | hiatus | cancelled
     mangadexId: mangaId,
   };
+}
+
+/**
+ * List every chapter for a series in the requested language, ordered ascending.
+ * Returns [{ id, number, volume|null, title, lang, publishedAt, pages }].
+ * One row per chapter number (first/earliest scanlation wins).
+ */
+export async function listChapters(mangaId, { lang = 'en' } = {}) {
+  const out = [];
+  const seen = new Set();
+  const limit = 500;
+  let offset = 0;
+  let total = Infinity;
+
+  while (offset < total) {
+    const url = `${BASE_URL}/manga/${mangaId}/feed`
+      + `?order[chapter]=asc&limit=${limit}&offset=${offset}`
+      + `&translatedLanguage[]=${encodeURIComponent(lang)}&${CONTENT_RATINGS}`;
+    const data = await apiFetch(url);
+    total = data.total ?? 0;
+
+    for (const ch of data.data || []) {
+      const a = ch.attributes || {};
+      const number = a.chapter;
+      if (!number || seen.has(number)) continue;
+      // Skip external chapters with no hostable pages (externalUrl + 0 pages)
+      if (a.externalUrl && (a.pages ?? 0) === 0) continue;
+      seen.add(number);
+      out.push({
+        id: ch.id,
+        number,
+        volume: a.volume || null,
+        title: a.title || '',
+        lang: a.translatedLanguage || lang,
+        publishedAt: a.publishAt || a.createdAt || null,
+        pages: a.pages ?? null,
+      });
+    }
+
+    offset += limit;
+    if (offset < total) await new Promise(r => setTimeout(r, 300));
+  }
+
+  return out;
+}
+
+/**
+ * Resolve a chapter's page image URLs via the MangaDex@Home flow.
+ * GET /at-home/server/{id} -> { baseUrl, chapter: { hash, data[], dataSaver[] } }
+ * Page URL = {baseUrl}/{quality}/{hash}/{filename}
+ * @param {string} chapterId
+ * @param {{ dataSaver?: boolean }} opts
+ */
+export async function getChapterPages(chapterId, { dataSaver = false } = {}) {
+  const data = await apiFetch(`${BASE_URL}/at-home/server/${chapterId}`);
+  const baseUrl = data.baseUrl;
+  const hash = data.chapter?.hash;
+  const files = dataSaver ? data.chapter?.dataSaver : data.chapter?.data;
+  const quality = dataSaver ? 'data-saver' : 'data';
+  if (!baseUrl || !hash || !Array.isArray(files)) {
+    throw new Error(`MangaDex@Home returned no pages for chapter ${chapterId}`);
+  }
+  return files.map(f => `${baseUrl}/${quality}/${hash}/${f}`);
 }
 
 /**
@@ -173,3 +239,22 @@ export async function fetchVolumeMap(mangaId, cacheDir, forceRefresh = false) {
   await writeFile(cacheFile, JSON.stringify(volumeMap, null, 2), 'utf-8');
   return volumeMap;
 }
+
+/** Lightweight reachability check for the Settings "Test connection" button. */
+export async function testConnection() {
+  const data = await apiFetch(`${BASE_URL}/manga?limit=1`);
+  return { message: `Reached MangaDex (${data.total ?? 0} titles indexed).` };
+}
+
+/** Provider object conforming to providers/base.js. */
+export const provider = {
+  name: 'mangadex',
+  label: 'MangaDex',
+  capabilities: { download: true, metadata: true },
+  search: searchManga,
+  getSeries: fetchMangaDetails,
+  listChapters,
+  getChapterPages,
+  getVolumeCovers: fetchVolumeCovers,
+  testConnection,
+};

@@ -29,39 +29,58 @@ function cleanDescription(text) {
 export function buildComicInfoXml({
   series,
   volumeNum,
+  number,
+  title,
   authors = [],
   artists = [],
   description = '',
   genres = [],
   year,
   mangadexId,
+  web,
+  publisher,
+  mediaType = 'manga',
   isCalculated = false,
+  language = 'en',
 }) {
+  const isComic = mediaType === 'comic';
   const volLabel = (volumeNum && volumeNum !== 'none') ? String(volumeNum) : '';
-  const title = volLabel ? `${series}, Vol. ${volLabel}` : series;
+  // Chapter/issue mode: Number is the chapter/issue. Volume mode: Number is the volume.
+  const chapterLabel = (number !== undefined && number !== null && number !== '') ? String(number) : '';
+  const numberValue = chapterLabel || volLabel;
+  const unit = isComic ? '#' : 'Ch. ';
+  const autoTitle = chapterLabel
+    ? `${series} ${unit}${chapterLabel}`
+    : (volLabel ? `${series}, Vol. ${volLabel}` : series);
+  const titleStr = (title && String(title).trim()) ? String(title).trim() : autoTitle;
   const writersStr = [...new Set(authors)].join(', ');
   const pencillersStr = [...new Set(artists)].join(', ');
   // Only output Penciller if different from Writer (for manga they're usually the same)
   const pencillerLine = pencillersStr && pencillersStr !== writersStr ? pencillersStr : null;
   const genreStr = genres.join(', ');
   const notes = isCalculated
-    ? 'Volume boundaries are estimated — calculated from known chapters-per-volume average.'
+    ? (isComic
+        ? 'Collection boundaries are estimated — calculated from known issues-per-volume average.'
+        : 'Volume boundaries are estimated — calculated from known chapters-per-volume average.')
     : '';
-  const web = mangadexId ? `https://mangadex.org/title/${mangadexId}` : '';
+  const webUrl = web || (mangadexId ? `https://mangadex.org/title/${mangadexId}` : '');
 
   const lines = [
     tag('Series', series),
-    volLabel ? tag('Number', volLabel) : null,
-    tag('Title', title),
+    numberValue ? tag('Number', numberValue) : null,
+    (chapterLabel && volLabel) ? tag('Volume', volLabel) : null,
+    tag('Title', titleStr),
     tag('Summary', cleanDescription(description)),
+    tag('Publisher', publisher),
     tag('Year', year),
     tag('Writer', writersStr),
     tag('Penciller', pencillerLine),
     tag('Genre', genreStr),
-    `  <LanguageISO>en</LanguageISO>`,
-    `  <BlackAndWhite>Yes</BlackAndWhite>`,
-    `  <Manga>Yes</Manga>`,
-    tag('Web', web),
+    tag('LanguageISO', language),
+    // Manga are typically B&W and read right-to-left; comics are colour, left-to-right.
+    isComic ? null : '  <BlackAndWhite>Yes</BlackAndWhite>',
+    isComic ? null : '  <Manga>Yes</Manga>',
+    tag('Web', webUrl),
     tag('Notes', notes),
   ].filter(Boolean);
 
