@@ -83,9 +83,16 @@ function tagText(xml, tag) {
  */
 export function readCbzInfo(filePath) {
   let series = null, mangadexId = null, comicvineId = null, publisher = null, genre = null, manga = null, chapters = [];
+  let isEpub = filePath.toLowerCase().endsWith('.epub');
   try {
     const zip = new AdmZip(filePath);
     const entries = zip.getEntries();
+    if (!isEpub) {
+      isEpub = entries.some(e => {
+        const n = e.entryName.toLowerCase();
+        return n === 'meta-inf/container.xml' || n === 'mimetype';
+      });
+    }
     const comic = entries.find(e => e.entryName.toLowerCase().endsWith('comicinfo.xml'));
     if (comic) {
       const xml = comic.getData().toString('utf-8');
@@ -109,7 +116,7 @@ export function readCbzInfo(filePath) {
   const volume = volMatch ? String(parseFloat(volMatch[1])) : null;
   const hasSeriesTag = !!series;
   if (!series) series = path.basename(filePath).replace(/\.(cbz|epub)$/i, '');
-  return { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, chapters, isEpub: isEpubArchive(filePath) };
+  return { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, chapters, isEpub };
 }
 
 /** The provider id encoded in a CBZ that identifies a given followed series. */
@@ -394,7 +401,8 @@ export function scanLibrary({ seriesId } = {}) {
         if (bookFiles.length === 0) continue;
 
         let epubCount = 0;
-        for (const f of bookFiles) {
+        const sampleFiles = bookFiles.slice(0, 3);
+        for (const f of sampleFiles) {
           const info = readCbzInfo(f);
           if (!mangadexId && info.mangadexId) mangadexId = info.mangadexId;
           if (!comicvineId && info.comicvineId) comicvineId = info.comicvineId;

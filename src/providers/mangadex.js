@@ -9,15 +9,21 @@ const CONTENT_RATINGS = 'contentRating[]=safe&contentRating[]=suggestive&content
 const HEADERS = { 'User-Agent': 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)' };
 
 async function apiFetch(url) {
-  const res = await fetch(url, { headers: HEADERS });
-  if (res.status === 429) {
-    await new Promise(r => setTimeout(r, 2000));
-    const retry = await fetch(url, { headers: HEADERS });
-    if (!retry.ok) throw new Error(`MangaDex API error ${retry.status}: ${url}`);
-    return retry.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch(url, { headers: HEADERS, signal: controller.signal });
+    if (res.status === 429) {
+      await new Promise(r => setTimeout(r, 2000));
+      const retry = await fetch(url, { headers: HEADERS, signal: controller.signal });
+      if (!retry.ok) throw new Error(`MangaDex API error ${retry.status}: ${url}`);
+      return await retry.json();
+    }
+    if (!res.ok) throw new Error(`MangaDex API error ${res.status}: ${url}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
   }
-  if (!res.ok) throw new Error(`MangaDex API error ${res.status}: ${url}`);
-  return res.json();
 }
 
 export async function searchManga(title) {

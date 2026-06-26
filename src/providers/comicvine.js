@@ -35,21 +35,25 @@ function url(pathname, params = {}) {
 }
 
 async function cvFetch(u) {
-  const res = await fetch(u, { headers: HEADERS });
-  if (res.status === 420 || res.status === 429) {
-    // CV signals rate limiting with 420; back off once and retry.
-    await new Promise(r => setTimeout(r, 3000));
-    const retry = await fetch(u, { headers: HEADERS });
-    if (!retry.ok) throw new Error(`ComicVine API error ${retry.status}`);
-    return retry.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch(u, { headers: HEADERS, signal: controller.signal });
+    if (res.status === 420 || res.status === 429) {
+      await new Promise(r => setTimeout(r, 3000));
+      const retry = await fetch(u, { headers: HEADERS, signal: controller.signal });
+      if (!retry.ok) throw new Error(`ComicVine API error ${retry.status}`);
+      return await retry.json();
+    }
+    if (!res.ok) throw new Error(`ComicVine API error ${res.status}`);
+    const data = await res.json();
+    if (data.status_code && data.status_code !== 1) {
+      throw new Error(`ComicVine: ${data.error || 'request failed'}`);
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
   }
-  if (!res.ok) throw new Error(`ComicVine API error ${res.status}`);
-  const data = await res.json();
-  // CV wraps errors in a 200 with status_code != 1.
-  if (data.status_code && data.status_code !== 1) {
-    throw new Error(`ComicVine: ${data.error || 'request failed'}`);
-  }
-  return data;
 }
 
 function stripHtml(s) {

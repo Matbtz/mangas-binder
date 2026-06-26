@@ -407,48 +407,53 @@ export default async function apiRoutes(app) {
       hcEnabled = isProviderEnabled('hardcover') && !!(cfg.apikey || process.env.HARDCOVER_API_KEY);
     } catch {}
 
-    const resolved = await Promise.all(untracked.map(async (s) => {
-      if (s.mangadexId || s.comicvineId) return s;
-      let mediaType = s.mediaType || 'manga';
+    const resolved = [];
+    for (let i = 0; i < untracked.length; i += 5) {
+      const chunk = untracked.slice(i, i + 5);
+      const resChunk = await Promise.all(chunk.map(async (s) => {
+        if (s.mangadexId || s.comicvineId) return s;
+        let mediaType = s.mediaType || 'manga';
 
-      // 1. Hardcover Triage
-      if (hcEnabled) {
-        try {
-          const hc = await hardcover.classifyMedia(s.title, s);
-          if (hc.mediaType === 'book') return { ...s, mediaType: 'book' };
-          mediaType = hc.mediaType;
-        } catch {}
-      }
+        // 1. Hardcover Triage
+        if (hcEnabled) {
+          try {
+            const hc = await hardcover.classifyMedia(s.title, s);
+            if (hc.mediaType === 'book') return { ...s, mediaType: 'book' };
+            mediaType = hc.mediaType;
+          } catch {}
+        }
 
-      // 2. ComicVine search if comic
-      if (mediaType === 'comic' && cvEnabled) {
-        try {
-          const results = await searchVolumes(s.title);
-          const best = results[0];
-          if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
-        } catch {}
-      }
+        // 2. ComicVine search if comic
+        if (mediaType === 'comic' && cvEnabled) {
+          try {
+            const results = await searchVolumes(s.title);
+            const best = results[0];
+            if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
+          } catch {}
+        }
 
-      // 3. MangaDex search
-      if (mdxEnabled) {
-        try {
-          const results = await searchManga(s.title);
-          const best = results[0];
-          if (best && titlesMatch(s.title, best.title)) return { ...s, mangadexId: best.id, mediaType: 'manga' };
-        } catch {}
-      }
+        // 3. MangaDex search
+        if (mdxEnabled) {
+          try {
+            const results = await searchManga(s.title);
+            const best = results[0];
+            if (best && titlesMatch(s.title, best.title)) return { ...s, mangadexId: best.id, mediaType: 'manga' };
+          } catch {}
+        }
 
-      // 4. Fallback: if MangaDex didn't match and we haven't tried ComicVine yet
-      if (mediaType !== 'comic' && cvEnabled && !s.mangadexId) {
-        try {
-          const results = await searchVolumes(s.title);
-          const best = results[0];
-          if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
-        } catch {}
-      }
+        // 4. Fallback: if MangaDex didn't match and we haven't tried ComicVine yet
+        if (mediaType !== 'comic' && cvEnabled && !s.mangadexId) {
+          try {
+            const results = await searchVolumes(s.title);
+            const best = results[0];
+            if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
+          } catch {}
+        }
 
-      return { ...s, mediaType };
-    }));
+        return { ...s, mediaType };
+      }));
+      resolved.push(...resChunk);
+    }
 
     const finalUntracked = resolved.filter(s => {
       if (s.mediaType === 'book') return false; // Hardcover confirmed standard book
