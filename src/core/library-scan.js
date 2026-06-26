@@ -378,7 +378,8 @@ export function scanLibrary({ seriesId } = {}) {
         if (comicvineId && allByKey.has(`comicvine:${comicvineId}`)) continue;
 
         const cbzFiles = walkCbz(fullPath);
-        const fileCount = cbzFiles.length || 1;
+        if (cbzFiles.length === 0) continue;
+        const fileCount = cbzFiles.length;
 
         const volumes = new Set();
         for (const f of cbzFiles) {
