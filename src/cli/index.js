@@ -213,7 +213,7 @@ async function main() {
   // --- Pass 4: Extrapolation ---
   let calculatedVolumes = {};
   if (unassigned.length > 0 && !opts.skipUnassigned && opts.extrapolate !== false) {
-    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint);
+    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false);
     calculatedVolumes = calculated;
     const calcCount = Object.keys(calculatedVolumes).length;
     if (calcCount > 0) {

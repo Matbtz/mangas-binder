@@ -25,75 +25,87 @@ export function getVolumeStats(volumeMap) {
 }
 
 /**
- * Extrapolates missing volumes from known volume/chapter data.
+ * Extrapolates missing volumes from known volume/chapter anchor points.
  *
- * Steps:
- *  1. Find the last CONSECUTIVE volume (1, 2, 3, ... N without gaps) to ignore
- *     sparse/anomalous high-numbered volumes (e.g. MangaDex has vol 23 but not 11-22).
- *  2. Calculate chsPerVol = round(avg chapters per consecutive volume).
- *  3a. If totalVolumesHint is given: iterate volNum = baseVol+1 to totalVolumesHint,
- *      skip already-confirmed volumes, assign chsPerVol chapters to each slot.
- *      Remaining chapters that don't fit → returned as `overflow`.
- *  3b. If no hint: batch all chapters in groups of chsPerVol (no overflow).
- *  4. Skip volume numbers already present in volumeMap.
+ * For any unassigned chapter:
+ *  1. Finds the nearest preceding anchor volume (maxCh < chNum).
+ *  2. Finds the nearest succeeding anchor volume (minCh > chNum).
+ *  3. Calculates estimated volume = baseVol + ceil((chNum - anchorCh) / chsPerVol).
+ *  4. Clamps estimated volume so it never overshoots the succeeding anchor volume.
  *
  * Returns { calculated, overflow }
- *   calculated: { "12": ["103","104",...], "13": [...], ... }
- *   overflow:   ["130","131",...]  — chapters beyond totalVolumesHint
  */
-export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHint = null) {
+export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHint = null, capAtHint = true) {
   if (!unassignedChapters.length) return { calculated: {}, overflow: [] };
 
   const knownVols = Object.entries(volumeMap)
     .filter(([k]) => k !== 'none')
     .sort(([a], [b]) => parseFloat(a) - parseFloat(b));
 
-  if (!knownVols.length) return { calculated: {}, overflow: [] };
+  let chsPerVol = 10;
+  const knownSet = new Set();
+  const anchors = []; // [{ volNum, minCh, maxCh }]
 
-  const sortedVolNums = knownVols.map(([k]) => parseFloat(k)).sort((a, b) => a - b);
-
-  // Find last consecutive volume (handles sparse gaps like vol 10 → vol 23)
-  let lastConsecutive = 0;
-  for (const v of sortedVolNums) {
-    if (v <= lastConsecutive + 1.5) lastConsecutive = v;
-    else break;
+  if (knownVols.length > 0) {
+    let totalChapters = 0;
+    for (const [vStr, chs] of knownVols) {
+      const vNum = parseFloat(vStr);
+      if (Number.isNaN(vNum)) continue;
+      knownSet.add(String(vNum));
+      totalChapters += chs.length;
+      let minCh = Infinity, maxCh = -Infinity;
+      for (const c of chs) {
+        if (String(c).includes('.')) continue; // ignore fractional chapters for volume anchor boundaries
+        const cNum = parseFloat(c);
+        if (!Number.isNaN(cNum) && Number.isInteger(cNum)) {
+          if (cNum < minCh) minCh = cNum;
+          if (cNum > maxCh) maxCh = cNum;
+        }
+      }
+      if (maxCh > -Infinity) anchors.push({ volNum: vNum, minCh, maxCh });
+    }
+    chsPerVol = Math.round(totalChapters / knownVols.length) || 10;
+    anchors.sort((a, b) => a.maxCh - b.maxCh);
   }
-  const baseVol = lastConsecutive || sortedVolNums[sortedVolNums.length - 1];
-
-  // Average chapters/volume from consecutive volumes only
-  const consecutiveVols = knownVols.filter(([k]) => parseFloat(k) <= lastConsecutive);
-  const totalConsecChapters = consecutiveVols.reduce((sum, [, chs]) => sum + chs.length, 0);
-  const chsPerVol = consecutiveVols.length > 0
-    ? Math.round(totalConsecChapters / consecutiveVols.length)
-    : 10;
 
   const sortedUnassigned = [...unassignedChapters].sort((a, b) => parseFloat(a) - parseFloat(b));
-  // Only skip volumes from the consecutive range — sparse outliers (e.g. a single
-  // bonus chapter tagged as "volume 23" on MangaDex) should not block a slot.
-  const consecutiveVolSet = new Set(consecutiveVols.map(([k]) => String(parseFloat(k))));
-
   const calculated = {};
-  let i = 0;
+  const overflow = [];
 
-  if (totalVolumesHint && totalVolumesHint > baseVol) {
-    // Fill volumes sequentially from baseVol+1 to totalVolumesHint
-    for (let volNum = Math.floor(baseVol) + 1; volNum <= totalVolumesHint; volNum++) {
-      if (consecutiveVolSet.has(String(volNum))) continue; // in solid baseline, skip
-      if (i >= sortedUnassigned.length) break;             // no more chapters to assign
-      calculated[String(volNum)] = sortedUnassigned.slice(i, i + chsPerVol);
-      i += chsPerVol;
+  for (const chStr of sortedUnassigned) {
+    const chNum = parseFloat(chStr);
+    if (Number.isNaN(chNum)) { overflow.push(chStr); continue; }
+
+    if (String(chStr).includes('.') || !Number.isInteger(chNum)) {
+      (calculated['Specials'] ||= []).push(chStr);
+      continue;
     }
-  } else {
-    // No upper bound: group all chapters in batches of chsPerVol
-    let volNum = Math.floor(baseVol) + 1;
-    while (i < sortedUnassigned.length) {
-      while (consecutiveVolSet.has(String(volNum))) volNum++;
-      calculated[String(volNum)] = sortedUnassigned.slice(i, i + chsPerVol);
-      i += chsPerVol;
-      volNum++;
+
+    let baseVol = 0, anchorCh = 0;
+    let nextVol = Infinity;
+
+    for (let j = 0; j < anchors.length; j++) {
+      if (anchors[j].maxCh < chNum) {
+        baseVol = anchors[j].volNum;
+        anchorCh = anchors[j].maxCh;
+      }
+      if (anchors[j].minCh > chNum && anchors[j].volNum < nextVol) {
+        nextVol = anchors[j].volNum;
+      }
+    }
+
+    const diff = Math.max(1, chNum - anchorCh);
+    let estVol = Math.floor(baseVol) + Math.max(1, Math.ceil(diff / chsPerVol));
+    if (nextVol < Infinity) {
+      estVol = Math.min(estVol, Math.floor(nextVol) - 1);
+    }
+
+    if (capAtHint && totalVolumesHint && estVol > totalVolumesHint) {
+      overflow.push(chStr);
+    } else {
+      (calculated[String(estVol)] ||= []).push(chStr);
     }
   }
 
-  const overflow = sortedUnassigned.slice(i);
   return { calculated, overflow };
 }

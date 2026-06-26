@@ -23,17 +23,20 @@ function pad(n, w = 3) { return String(n).padStart(w, '0'); }
  * @param {object} chapter   chapter row (number)
  * @returns {Promise<{ dir: string, pageCount: number }>}
  */
-export async function downloadArchiveChapter(provider, series, chapter) {
+export async function downloadArchiveChapter(provider, series, chapter, { signal } = {}) {
   if (!provider.capabilities?.archive) {
     throw new Error(`Provider ${provider.name} cannot resolve archives`);
   }
-  const found = await provider.findIssueDownload(series, chapter);
+  const customUrl = chapter.download_url || chapter.downloadUrl;
+  const found = customUrl
+    ? (provider.resolvePostUrl ? await provider.resolvePostUrl(customUrl) : { url: customUrl, kind: customUrl.endsWith('.zip') ? 'zip' : 'cbz' })
+    : await provider.findIssueDownload(series, chapter);
   if (!found?.url) throw new Error(`No download found for ${series.title} #${chapter.number}`);
   if (found.kind === 'cbr') {
     throw new Error(`Got a CBR (RAR) archive for #${chapter.number}; CBR isn't supported — only CBZ/ZIP.`);
   }
 
-  const res = await fetchRetry(found.url, { headers: { 'User-Agent': USER_AGENT }, retries: 3 });
+  const res = await fetchRetry(found.url, { headers: { 'User-Agent': USER_AGENT }, retries: 3, signal });
   if (!res.ok) throw new Error(`Archive HTTP ${res.status} for #${chapter.number}`);
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length === 0) throw new Error(`Empty archive for #${chapter.number}`);

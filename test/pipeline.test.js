@@ -65,3 +65,70 @@ test('volume mode: untagged chapters are extrapolated then packaged when closed'
   assert.equal(v7.volume, '3');
   assert.equal(v7.calculated, 1);
 });
+
+test('upsertChapter language prioritization and upgrade resets', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'lang-test', title: 'Lang Test', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume', status: 'ongoing' });
+  
+  // 1. Initial upsert with Spanish 'es'
+  upsertChapter(s.id, { provider: 'mangadex', providerChapterId: 'ch1-es', number: '1', language: 'es', volume: '1', title: 'Capitulo 1', pages: 10 }, 'wanted');
+  
+  let list = listChaptersForSeries(s.id);
+  let ch = list.find(c => c.number === '1');
+  assert.ok(ch);
+  assert.equal(ch.language, 'es');
+  assert.equal(ch.state, 'wanted');
+  assert.equal(ch.title, 'Capitulo 1');
+  assert.equal(ch.pages, 10);
+
+  // Mark it as downloaded
+  setChapterState(ch.id, 'downloaded', { attempts: 1, error: 'none', cbz_path: 'path.cbz' });
+  ch = listChaptersForSeries(s.id).find(c => c.number === '1');
+  assert.equal(ch.state, 'downloaded');
+
+  // 2. Upsert the same chapter with English 'en'
+  upsertChapter(s.id, { provider: 'mangadex', providerChapterId: 'ch1-en', number: '1', language: 'en', volume: '1', title: 'Chapter 1', pages: 12 }, 'wanted');
+  
+  list = listChaptersForSeries(s.id);
+  assert.equal(list.length, 1, 'Should only have 1 chapter row for number 1, no duplicate Spanish row');
+  ch = list[0];
+  assert.equal(ch.language, 'en');
+  assert.equal(ch.state, 'wanted', 'State should be reset to wanted on language upgrade');
+  assert.equal(ch.attempts, 0, 'Attempts should be reset to 0');
+  assert.equal(ch.error, null, 'Error should be reset to null');
+  assert.equal(ch.cbz_path, null, 'cbz_path should be reset to null');
+  assert.equal(ch.pages, 12);
+  assert.equal(ch.title, 'Chapter 1');
+});
+
+test('staging & bindery lifecycle: packaging moves to bindery, scan imports and prunes staging', async () => {
+  const { scanLibrary } = await import('../src/core/library-scan.js');
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: 'bindery-lifecycle',
+    title: 'Lifecycle Series', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume', status: 'completed'
+  });
+
+  // Seed chapter 1 as downloaded
+  seedDownloaded(s.id, '1', '1');
+  const sDir = chapterStagingDir(s.id, '1');
+  assert.ok(existsSync(sDir), 'staging folder should exist initially');
+
+  // Package the completed volume
+  const packaged = await packageCompleteVolumes(s.id);
+  assert.equal(packaged, 1, 'should package 1 volume');
+
+  // Verify it is in 'bindery' state and staging still exists
+  let ch = listChaptersForSeries(s.id).find(c => c.number === '1');
+  assert.equal(ch.state, 'bindery', 'chapter should be in bindery state after packaging');
+  assert.ok(existsSync(sDir), 'staging folder should still exist while in bindery state');
+
+  // Run library scan (it scans outputDir where the CBZ was created)
+  const scanResult = scanLibrary({ seriesId: s.id });
+  assert.equal(scanResult.markedChapters, 1, 'scanner should detect and mark 1 chapter as imported');
+
+  // Verify it is now 'imported' and staging is pruned
+  ch = listChaptersForSeries(s.id).find(c => c.number === '1');
+  assert.equal(ch.state, 'imported', 'chapter state should become imported');
+  assert.ok(!existsSync(sDir), 'staging folder should have been pruned after import');
+});
+
+

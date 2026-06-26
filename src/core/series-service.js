@@ -6,6 +6,7 @@ import {
 } from './repo.js';
 import { isProviderEnabled, getSetting } from './settings.js';
 import { scanLibrary } from './library-scan.js';
+import { resolveVolumes } from './mapping.js';
 import { logHistory } from './db.js';
 
 /**
@@ -54,6 +55,7 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
     description: details.description,
     year: details.year,
     status: details.status,
+    coverPath: details.coverPath ?? null,
     language: opts.language || getSetting('defaultLanguage', 'en'),
     monitored: true,
     monitorMode: opts.monitorMode || getSetting('defaultMonitorMode', 'all'),
@@ -85,7 +87,39 @@ export async function refreshSeries(seriesId) {
   const futureOnly = series.monitor_mode === 'future';
   const noneMode = series.monitor_mode === 'none';
 
+  // Backfill a missing cover from the source so the poster grid isn't blank
+  // (best-effort; an extra fetch only when we have nothing to show).
+  if (!series.cover_path && provider.getSeries) {
+    try {
+      const details = await provider.getSeries(series.provider_series_id);
+      if (details?.coverPath) updateSeries(seriesId, { coverPath: details.coverPath });
+    } catch { /* non-fatal */ }
+  }
+
   const chapters = await provider.listChapters(series.provider_series_id, { lang: series.language });
+
+  if (series.media_type === 'manga' && isProviderEnabled('mangaupdates')) {
+    try {
+      const mu = await mangaupdates.getTotalVolumesForTitle(series.title);
+      if (mu?.totalVolumes && series.total_volumes_hint !== mu.totalVolumes) {
+        updateSeries(seriesId, { totalVolumesHint: mu.totalVolumes });
+      }
+      if (mu?.latestChapter && mu.latestChapter > 0) {
+        const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
+        for (let i = 1; i <= mu.latestChapter; i++) {
+          if (!knownNums.has(String(i))) {
+            chapters.push({
+              id: `mu-synth-${seriesId}-${i}`,
+              number: String(i),
+              volume: null,
+              title: `Chapter ${i}`,
+              lang: series.language,
+            });
+          }
+        }
+      }
+    } catch {}
+  }
 
   let added = 0;
   for (const ch of chapters) {

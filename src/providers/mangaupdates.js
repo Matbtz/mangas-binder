@@ -24,16 +24,23 @@ export async function searchMangaUpdates(title) {
  * Status examples: "24 Volumes (Ongoing)", "12 Volumes (Complete)"
  * Returns null if the count cannot be parsed.
  */
-export async function fetchTotalVolumes(seriesId) {
+export async function fetchSeriesMetadata(seriesId) {
   const data = await apiFetch(`${BASE_URL}/series/${seriesId}`);
   const status = data.status || '';
   const match = status.match(/^(\d+)\s+Volumes?/i);
-  return match ? parseInt(match[1], 10) : null;
+  const totalVolumes = match ? parseInt(match[1], 10) : null;
+  const latestChapter = data.latest_chapter ? parseInt(data.latest_chapter, 10) : null;
+  return { totalVolumes, latestChapter };
+}
+
+export async function fetchTotalVolumes(seriesId) {
+  const meta = await fetchSeriesMetadata(seriesId);
+  return meta.totalVolumes;
 }
 
 /**
- * Convenience: search + fetch total volumes for a title.
- * Returns { totalVolumes, seriesTitle, seriesId } or null if not found.
+ * Convenience: search + fetch metadata for a title.
+ * Returns { totalVolumes, latestChapter, seriesTitle, seriesId } or null if not found.
  */
 export async function getTotalVolumesForTitle(title) {
   let results;
@@ -44,12 +51,11 @@ export async function getTotalVolumesForTitle(title) {
   }
   if (!results.length) return null;
 
-  // Pick the first result with an exact (case-insensitive) title match, else first result
   const best = results.find(r => r.title.toLowerCase() === title.toLowerCase()) || results[0];
 
   try {
-    const totalVolumes = await fetchTotalVolumes(best.id);
-    return { totalVolumes, seriesTitle: best.title, seriesId: best.id };
+    const meta = await fetchSeriesMetadata(best.id);
+    return { totalVolumes: meta.totalVolumes, latestChapter: meta.latestChapter, seriesTitle: best.title, seriesId: best.id };
   } catch {
     return null;
   }

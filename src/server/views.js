@@ -17,6 +17,8 @@ export function seriesView(row, { withCounts = true } = {}) {
     description: row.description,
     year: row.year,
     status: row.status,
+    coverPath: row.cover_path || null,
+    folderPath: row.folder_path || null,
     language: row.language,
     monitored: !!row.monitored,
     monitorMode: row.monitor_mode,
@@ -43,6 +45,10 @@ export function chapterView(row) {
     attempts: row.attempts,
     error: row.error,
     cbzPath: row.cbz_path,
+    downloadUrl: row.download_url || null,
     publishedAt: row.published_at,
+    progDone: row.prog_done ?? null,
+    progTotal: row.prog_total ?? null,
+    startedAt: row.started_at ?? null,
   };
 }

@@ -124,6 +124,17 @@ export async function findIssueDownload(series, chapter) {
   return { url, filename: `${cleanTitle(series.title)} ${chapter.number}.${archiveKind(url)}`, kind: archiveKind(url) };
 }
 
+export async function resolvePostUrl(postUrl) {
+  if (HOST_RE.test(postUrl) && !postUrl.includes('getcomics.org/')) {
+    return { url: postUrl, filename: `manual.${archiveKind(postUrl)}`, kind: archiveKind(postUrl) };
+  }
+  const html = await getHtml(postUrl);
+  const links = extractDownloadLinks(html);
+  if (!links.length) return null;
+  const url = links[0];
+  return { url, filename: `manual.${archiveKind(url)}`, kind: archiveKind(url) };
+}
+
 /** Reachability check for the Settings "Test connection" button. */
 export async function testConnection() {
   const res = await fetchRetry(`${baseUrl()}/`, { headers: HEADERS, retries: 1 });
@@ -139,5 +150,6 @@ export const provider = {
   capabilities: { download: false, archive: true, metadata: false },
   search,
   findIssueDownload,
+  resolvePostUrl,
   testConnection,
 };
