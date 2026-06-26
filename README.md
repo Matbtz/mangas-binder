@@ -103,6 +103,9 @@ following and editable on the series detail page.
 3. In **Add**, pick **ComicVine** as the source, search a series, and **Follow**. Comics
    default to one CBZ **per issue**; switch to *collected volume* packaging if you prefer.
 
+Each source has a **Test** button in **Settings → Sources** that does a live reachability
++ credential check (e.g. confirms your ComicVine key is valid) and shows the result inline.
+
 > GetComics is a third-party site whose markup changes without notice. If comic
 > downloads stop resolving, the scraping lives in `src/providers/getcomics.js`
 > (`parseSearchResults` / `extractDownloadLinks`) and is the only place to fix.

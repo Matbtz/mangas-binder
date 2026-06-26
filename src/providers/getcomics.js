@@ -124,6 +124,13 @@ export async function findIssueDownload(series, chapter) {
   return { url, filename: `${cleanTitle(series.title)} ${chapter.number}.${archiveKind(url)}`, kind: archiveKind(url) };
 }
 
+/** Reachability check for the Settings "Test connection" button. */
+export async function testConnection() {
+  const res = await fetchRetry(`${baseUrl()}/`, { headers: HEADERS, retries: 1 });
+  if (!res.ok) throw new Error(`GetComics returned HTTP ${res.status}`);
+  return { message: `Reached GetComics at ${baseUrl()}.` };
+}
+
 /** Archive-download provider (returns whole CBZ/ZIP archives, not page URLs). */
 export const provider = {
   name: 'getcomics',
@@ -132,4 +139,5 @@ export const provider = {
   capabilities: { download: false, archive: true, metadata: false },
   search,
   findIssueDownload,
+  testConnection,
 };

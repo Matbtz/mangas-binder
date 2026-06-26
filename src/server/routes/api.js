@@ -125,6 +125,23 @@ export default async function apiRoutes(app) {
     return { ok: true };
   });
 
+  // Live reachability / credential check for a single source. Always returns 200
+  // with { ok, message } so the UI can show the result inline (errors included).
+  app.post('/api/providers/:name/test', async (req, reply) => {
+    let provider;
+    try { provider = getProvider(req.params.name); }
+    catch { return reply.code(404).send({ error: 'unknown provider' }); }
+    if (typeof provider.testConnection !== 'function') {
+      return { ok: false, message: 'No connection test available for this source' };
+    }
+    try {
+      const r = await provider.testConnection();
+      return { ok: true, message: r?.message || 'Connection OK' };
+    } catch (e) {
+      return { ok: false, message: String(e?.message || e) };
+    }
+  });
+
   // --- Library reconciliation (mark already-owned CBZs) ---
   app.post('/api/library/scan', async () => scanLibrary());
   app.post('/api/series/:id/scan-library', async (req, reply) => {

@@ -310,10 +310,23 @@ async function viewSettings(v) {
     const row = h(`<div class="row" style="justify-content:space-between"><div><strong>${esc(p.label)}</strong>
       <span class="pill">${esc(p.mediaType)}</span>
       <span class="pill ${p.capabilities.download||p.capabilities.archive?'acc':''}">${capLabel(p.capabilities)}</span></div></div>`);
+    const btns = h('<div class="row" style="gap:6px;align-items:center"></div>');
+    const status = h('<span class="muted" style="font-size:12px"></span>');
+    const test = h('<button class="btn sm">Test</button>');
+    test.onclick = async () => {
+      test.disabled = true; const prev = test.textContent; test.textContent = 'Testing…';
+      status.className = 'muted'; status.style.fontSize = '12px'; status.textContent = '';
+      try {
+        const r = await api(`/providers/${p.name}/test`, { method:'POST' });
+        status.innerHTML = `<span class="pill ${r.ok?'ok':'err'}">${r.ok?'✓':'✗'}</span> ${esc(r.message)}`;
+      } catch (e) { status.innerHTML = `<span class="pill err">✗</span> ${esc(e.message)}`; }
+      finally { test.disabled = false; test.textContent = prev; }
+    };
     const tg = h(`<button class="btn sm">${p.enabled?'Enabled':'Disabled'}</button>`);
     tg.classList.toggle('primary', p.enabled);
     tg.onclick = async () => { await api(`/providers/${p.name}`,{method:'PATCH',body:{enabled:!p.enabled}}); viewSettings(v); };
-    row.appendChild(tg); wrap.appendChild(row);
+    btns.append(test, tg); row.appendChild(btns); wrap.appendChild(row);
+    wrap.appendChild(status);
 
     const fields = PROVIDER_CONFIG[p.name];
     if (fields) {

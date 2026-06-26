@@ -143,6 +143,17 @@ export async function listIssues(volumeId, { lang = 'en' } = {}) {
   return out;
 }
 
+/**
+ * Reachability + API-key check for the Settings "Test connection" button.
+ * Surfaces a clear message when the key is missing or rejected by ComicVine.
+ */
+export async function testConnection() {
+  const data = await cvFetch(url('/search/', {
+    query: 'batman', resources: 'volume', limit: '1', field_list: 'id,name',
+  }));
+  return { message: `Reached ComicVine, API key valid (${data.number_of_total_results ?? 0}+ volumes for a sample query).` };
+}
+
 /** Metadata-only provider. Downloads are handled by a download provider. */
 export const provider = {
   name: 'comicvine',
@@ -152,4 +163,5 @@ export const provider = {
   search: searchVolumes,
   getSeries: getVolume,
   listChapters: listIssues,
+  testConnection,
 };

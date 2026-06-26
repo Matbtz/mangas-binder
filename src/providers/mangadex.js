@@ -240,6 +240,12 @@ export async function fetchVolumeMap(mangaId, cacheDir, forceRefresh = false) {
   return volumeMap;
 }
 
+/** Lightweight reachability check for the Settings "Test connection" button. */
+export async function testConnection() {
+  const data = await apiFetch(`${BASE_URL}/manga?limit=1`);
+  return { message: `Reached MangaDex (${data.total ?? 0} titles indexed).` };
+}
+
 /** Provider object conforming to providers/base.js. */
 export const provider = {
   name: 'mangadex',
@@ -250,4 +256,5 @@ export const provider = {
   listChapters,
   getChapterPages,
   getVolumeCovers: fetchVolumeCovers,
+  testConnection,
 };
