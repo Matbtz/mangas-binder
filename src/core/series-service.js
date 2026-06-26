@@ -64,9 +64,16 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
   });
 
   logHistory('series.followed', { seriesId: series.id, message: details.title });
-  await refreshSeries(series.id);
-  // Reconcile against the existing Tome library so we don't re-fetch what's owned.
-  scanLibrary({ seriesId: series.id });
+  // Refresh chapters & reconcile against library asynchronously in background
+  // so the UI "Follow" button responds instantly (<50ms).
+  Promise.resolve().then(async () => {
+    try {
+      await refreshSeries(series.id);
+      scanLibrary({ seriesId: series.id });
+    } catch (err) {
+      console.error(`Background refresh failed for followed series ${series.id}:`, err);
+    }
+  });
   return getSeries(series.id);
 }
 

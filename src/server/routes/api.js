@@ -397,6 +397,8 @@ export default async function apiRoutes(app) {
   // Read-only: discover series on disk that aren't followed yet.
   // For entries without a provider ID, attempt a MangaDex title search to
   // auto-link them (best-effort, non-fatal).
+  const untrackedTriageCache = new Map();
+
   app.get('/api/library/untracked', async () => {
     const { untracked } = scanLibrary();
     const mdxEnabled = isProviderEnabled('mangadex');
@@ -412,45 +414,55 @@ export default async function apiRoutes(app) {
       const chunk = untracked.slice(i, i + 5);
       const resChunk = await Promise.all(chunk.map(async (s) => {
         if (s.mangadexId || s.comicvineId) return s;
-        let mediaType = s.mediaType || 'manga';
+        const cacheKey = s.title.toLowerCase().trim();
+        const cached = untrackedTriageCache.get(cacheKey);
+        if (cached && (Date.now() - cached.ts < 1800000)) return { ...s, ...cached.res };
 
-        // 1. Hardcover Triage
-        if (hcEnabled) {
-          try {
-            const hc = await hardcover.classifyMedia(s.title, s);
-            if (hc.mediaType === 'book') return { ...s, mediaType: 'book' };
-            mediaType = hc.mediaType;
-          } catch {}
-        }
+        const compute = async () => {
+          let mediaType = s.mediaType || 'manga';
 
-        // 2. ComicVine search if comic
-        if (mediaType === 'comic' && cvEnabled) {
-          try {
-            const results = await searchVolumes(s.title);
-            const best = results[0];
-            if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
-          } catch {}
-        }
+          // 1. Hardcover Triage
+          if (hcEnabled) {
+            try {
+              const hc = await hardcover.classifyMedia(s.title, s);
+              if (hc.mediaType === 'book') return { mediaType: 'book' };
+              mediaType = hc.mediaType;
+            } catch {}
+          }
 
-        // 3. MangaDex search
-        if (mdxEnabled) {
-          try {
-            const results = await searchManga(s.title);
-            const best = results[0];
-            if (best && titlesMatch(s.title, best.title)) return { ...s, mangadexId: best.id, mediaType: 'manga' };
-          } catch {}
-        }
+          // 2. ComicVine search if comic
+          if (mediaType === 'comic' && cvEnabled) {
+            try {
+              const results = await searchVolumes(s.title);
+              const best = results[0];
+              if (best && titlesMatch(s.title, best.title)) return { comicvineId: best.id, mediaType: 'comic' };
+            } catch {}
+          }
 
-        // 4. Fallback: if MangaDex didn't match and we haven't tried ComicVine yet
-        if (mediaType !== 'comic' && cvEnabled && !s.mangadexId) {
-          try {
-            const results = await searchVolumes(s.title);
-            const best = results[0];
-            if (best && titlesMatch(s.title, best.title)) return { ...s, comicvineId: best.id, mediaType: 'comic' };
-          } catch {}
-        }
+          // 3. MangaDex search
+          if (mdxEnabled) {
+            try {
+              const results = await searchManga(s.title);
+              const best = results[0];
+              if (best && titlesMatch(s.title, best.title)) return { mangadexId: best.id, mediaType: 'manga' };
+            } catch {}
+          }
 
-        return { ...s, mediaType };
+          // 4. Fallback: if MangaDex didn't match and we haven't tried ComicVine yet
+          if (mediaType !== 'comic' && cvEnabled && !s.mangadexId) {
+            try {
+              const results = await searchVolumes(s.title);
+              const best = results[0];
+              if (best && titlesMatch(s.title, best.title)) return { comicvineId: best.id, mediaType: 'comic' };
+            } catch {}
+          }
+
+          return { mediaType };
+        };
+
+        const res = await compute();
+        untrackedTriageCache.set(cacheKey, { ts: Date.now(), res });
+        return { ...s, ...res };
       }));
       resolved.push(...resChunk);
     }
