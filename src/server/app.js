@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { mkdirSync } from 'fs';
 import { config } from '../core/config.js';
 import { getDb } from '../core/db.js';
@@ -48,7 +48,7 @@ export async function buildApp() {
 }
 
 // Run directly: node src/server/app.js
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const app = await buildApp();
   startScheduler();
   try {

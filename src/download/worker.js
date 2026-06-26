@@ -1,8 +1,8 @@
 import { rm } from 'fs/promises';
 import { getProvider } from '../providers/index.js';
 import {
-  getSeries, getChapter, chaptersInState, listChaptersForSeries,
-  setChapterState, bumpChapterAttempt,
+  getSeries, getChapter, chaptersInState, listChaptersForSeries, listChaptersInStates,
+  setChapterState, bumpChapterAttempt, setChapterProgress,
 } from '../core/repo.js';
 import { getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
@@ -15,6 +15,12 @@ import { pLimit } from './limit.js';
 
 const MAX_ATTEMPTS = 5;
 let running = false;
+
+/** chapterId → AbortController for downloads currently in flight (for cancellation). */
+const inflight = new Map();
+
+/** True if the error came from a user-requested cancellation rather than a real failure. */
+const isAbort = (err) => err?.name === 'AbortError';
 
 /**
  * Drain all `wanted` chapters: download pages, then either bind immediately
@@ -44,32 +50,54 @@ export async function runOnce({ limit = 200 } = {}) {
       // Files come from the download/archive provider (= metadata provider for manga).
       const dlProvider = getProvider(series.download_provider || series.provider);
 
-      setChapterState(ch.id, 'downloading', { error: null });
+      const controller = new AbortController();
+      inflight.set(ch.id, controller);
+      setChapterState(ch.id, 'downloading', { error: null, prog_done: 0, prog_total: null, started_at: new Date().toISOString() });
       bumpChapterAttempt(ch.id);
       try {
-        const { dir, pageCount } = dlProvider.capabilities.archive
-          ? await downloadArchiveChapter(dlProvider, series, ch)            // comics: whole CBZ/ZIP → pages
-          : await downloadChapter(dlProvider, ch, { concurrency, dataSaver }); // manga: page images
-        setChapterState(ch.id, 'downloaded', { staging_path: dir, pages: pageCount });
+        const customUrl = ch.download_url;
+        const isArchiveUrl = customUrl && (customUrl.startsWith('http') || customUrl.endsWith('.cbz') || customUrl.endsWith('.zip'));
+        const useArchive = dlProvider.capabilities.archive || isArchiveUrl;
+        const activeProvider = isArchiveUrl ? getProvider('getcomics') : dlProvider;
+        // Throttled progress writer (manga only; comics are a single archive = indeterminate).
+        let lastWrite = 0;
+        const onProgress = (done, total) => {
+          const now = Date.now();
+          if (done < total && now - lastWrite < 300) return;
+          lastWrite = now;
+          setChapterProgress(ch.id, done, total);
+        };
+        const { dir, pageCount } = useArchive
+          ? await downloadArchiveChapter(activeProvider, series, ch, { signal: controller.signal })  // comics: whole CBZ/ZIP → pages
+          : await downloadChapter(dlProvider, ch, { concurrency, dataSaver, mangaId: series.provider_series_id, signal: controller.signal, onProgress }); // manga: page images
+        setChapterState(ch.id, 'downloaded', { staging_path: dir, pages: pageCount, prog_done: pageCount, prog_total: pageCount });
         processed++;
 
         if (series.packaging_mode === 'chapter') {
           const res = await bindChapter(series, getChapter(ch.id));
-          setChapterState(ch.id, 'imported', { cbz_path: res.path });
+          setChapterState(ch.id, 'bindery', { cbz_path: res.path });
           imported++;
-          logHistory('chapter.imported', { seriesId: series.id, chapterId: ch.id, message: res.path });
+          logHistory('chapter.packaged', { seriesId: series.id, chapterId: ch.id, message: res.path });
           notifyImport(series.title, `Chapter ${ch.number}`);
-          await cleanupStaging(series.id, ch.number);
         } else {
           affectedVolumeSeries.add(series.id);
         }
       } catch (err) {
-        failed++;
-        const fresh = getChapter(ch.id);
-        const exhausted = (fresh?.attempts ?? 0) >= MAX_ATTEMPTS;
-        setChapterState(ch.id, exhausted ? 'failed' : 'wanted', { error: String(err.message || err) });
-        logHistory('chapter.failed', { seriesId: series.id, chapterId: ch.id, message: String(err.message || err) });
-        if (exhausted) notifyError(series.title, `Chapter ${ch.number}`, String(err.message || err));
+        if (isAbort(err)) {
+          // User cancelled: settle on `skipped`, drop partial pages, don't count as a failure.
+          setChapterState(ch.id, 'skipped', { error: null, prog_done: null, prog_total: null });
+          await cleanupStaging(series.id, ch.number);
+          logHistory('chapter.cancelled', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} cancelled` });
+        } else {
+          failed++;
+          const fresh = getChapter(ch.id);
+          const exhausted = (fresh?.attempts ?? 0) >= MAX_ATTEMPTS;
+          setChapterState(ch.id, exhausted ? 'failed' : 'wanted', { error: String(err.message || err), prog_done: null, prog_total: null });
+          logHistory('chapter.failed', { seriesId: series.id, chapterId: ch.id, message: String(err.message || err) });
+          if (exhausted) notifyError(series.title, `Chapter ${ch.number}`, String(err.message || err));
+        }
+      } finally {
+        inflight.delete(ch.id);
       }
     })));
 
@@ -82,6 +110,34 @@ export async function runOnce({ limit = 200 } = {}) {
   } finally {
     running = false;
   }
+}
+
+/**
+ * Cancel a chapter: abort it if downloading now, otherwise drop it from the
+ * queue. Either way it settles on `skipped` (re-`want` it to resume). Staging
+ * pages are cleaned up. No-op for terminal states (imported/skipped/failed).
+ */
+export async function cancelChapter(id) {
+  const ch = getChapter(id);
+  if (!ch) return { ok: false, error: 'not found' };
+  const controller = inflight.get(id);
+  if (controller) {
+    controller.abort();            // the runOnce loop settles state → skipped + cleanup
+    return { ok: true, aborted: true };
+  }
+  if (['wanted', 'queued', 'downloading', 'downloaded'].includes(ch.state)) {
+    // `downloading` with no controller = stale (e.g. server restarted mid-download).
+    setChapterState(id, 'skipped', { error: null, prog_done: null, prog_total: null });
+    await cleanupStaging(ch.series_id, ch.number);
+  }
+  return { ok: true, aborted: false };
+}
+
+/** Cancel every active (queued/in-flight/downloaded) chapter for a series. */
+export async function cancelSeries(seriesId) {
+  const active = listChaptersInStates(['wanted', 'queued', 'downloading', 'downloaded'], { seriesId });
+  for (const ch of active) await cancelChapter(ch.id);
+  return { ok: true, cancelled: active.length };
 }
 
 async function cleanupStaging(seriesId, number) {
@@ -142,11 +198,10 @@ export async function packageCompleteVolumes(seriesId) {
     try {
       const res = await bindVolume(series, volLabel, vchapters, { coverUrl, calculated, overwrite: true });
       for (const c of vchapters) {
-        setChapterState(c.id, 'imported', { cbz_path: res.path });
-        await cleanupStaging(seriesId, c.number);
+        setChapterState(c.id, 'bindery', { cbz_path: res.path });
       }
       importedVolumes++;
-      logHistory('volume.imported', { seriesId, message: `${series.title} Vol. ${volLabel}${calculated ? ' (estimated)' : ''}` });
+      logHistory('volume.packaged', { seriesId, message: `${series.title} Vol. ${volLabel}${calculated ? ' (estimated)' : ''}` });
       notifyImport(series.title, `Volume ${volLabel}${calculated ? ' (estimated)' : ''}`);
     } catch (err) {
       logHistory('volume.failed', { seriesId, message: `Vol ${volLabel}: ${err.message || err}` });

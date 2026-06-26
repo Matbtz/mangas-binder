@@ -79,7 +79,7 @@ export async function searchVolumes(query) {
 /** Volume (series) detail. */
 export async function getVolume(volumeId) {
   const data = await cvFetch(url(`/volume/4050-${volumeId}/`, {
-    field_list: 'id,name,start_year,publisher,description,deck,people,count_of_issues',
+    field_list: 'id,name,start_year,publisher,description,deck,people,count_of_issues,image',
   }));
   const v = data.results || {};
   const roleHas = (p, ...roles) => {
@@ -100,6 +100,7 @@ export async function getVolume(volumeId) {
     year: v.start_year ? Number(v.start_year) : null,
     status: null, // ComicVine has no reliable ongoing/completed flag
     publisher: v.publisher?.name || null,
+    coverPath: v.image?.medium_url || v.image?.small_url || null,
     comicvineId: String(volumeId),
   };
 }

@@ -2,6 +2,7 @@ import { mkdir, rename, rm, stat } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { config } from './config.js';
+import { getSetting } from './settings.js';
 import { createCbz } from './packager.js';
 
 /**
@@ -21,7 +22,7 @@ export function sanitize(name) {
 
 /** Absolute path of a series' folder in the output (Tome) library. */
 export function seriesDir(seriesTitle) {
-  return path.join(config.outputDir, sanitize(seriesTitle));
+  return path.join(getSetting('outputDir', config.outputDir), sanitize(seriesTitle));
 }
 
 /** Full destination path for a CBZ given a series and a bare filename. */

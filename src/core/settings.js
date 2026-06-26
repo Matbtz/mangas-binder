@@ -31,6 +31,9 @@ export function ensureSeeded() {
   seedSetting('ntfyUrl', d.ntfyUrl);
   seedSetting('notifyOnImport', d.notifyOnImport);
   seedSetting('notifyOnError', d.notifyOnError);
+  seedSetting('libraryScanDirs', config.libraryScanDirs.join(', '));
+  seedSetting('stagingDir', config.stagingDir);
+  seedSetting('outputDir', config.outputDir);
 
   const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, 1)');
   for (const p of allProviders()) ins.run(p.name);

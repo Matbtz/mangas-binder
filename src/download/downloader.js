@@ -1,8 +1,9 @@
 import { writeFile, mkdir, readdir, rename } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
-import { pLimit, fetchRetry } from './limit.js';
+import { pLimit, fetchRetry, abortError } from './limit.js';
 import { config } from '../core/config.js';
+import { getSetting } from '../core/settings.js';
 
 const USER_AGENT = 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)';
 
@@ -16,7 +17,7 @@ function extFromUrl(url) {
 
 /** Staging directory for a chapter's downloaded pages. */
 export function chapterStagingDir(seriesId, number) {
-  return path.join(config.stagingDir, String(seriesId), `ch${number}`);
+  return path.join(getSetting('stagingDir', config.stagingDir), String(seriesId), `ch${number}`);
 }
 
 /**
@@ -33,21 +34,24 @@ export async function downloadChapter(provider, chapter, opts = {}) {
   if (!provider.capabilities?.download) {
     throw new Error(`Provider ${provider.name} cannot download pages`);
   }
-  const { concurrency = 4, dataSaver = false, onProgress } = opts;
+  const { concurrency = 4, dataSaver = false, onProgress, signal } = opts;
   const dir = chapterStagingDir(chapter.series_id ?? chapter.seriesId, chapter.number);
   await mkdir(dir, { recursive: true });
 
-  const urls = await provider.getChapterPages(chapter.providerChapterId ?? chapter.provider_chapter_id, { dataSaver });
+  const targetId = (chapter.download_url && !chapter.download_url.startsWith('http')) ? chapter.download_url : (chapter.providerChapterId ?? chapter.provider_chapter_id);
+  const urls = await provider.getChapterPages(targetId, { dataSaver, mangaId: opts.mangaId, chapterNum: chapter.number });
   if (!urls.length) throw new Error(`No pages resolved for chapter ${chapter.number}`);
 
   const limit = pLimit(concurrency);
   const headers = { 'User-Agent': USER_AGENT };
 
   let done = 0;
+  onProgress?.(0, urls.length);
   await Promise.all(urls.map((url, i) => limit(async () => {
+    if (signal?.aborted) throw abortError();
     const dest = path.join(dir, `${pad(i + 1)}${extFromUrl(url)}`);
     if (existsSync(dest)) { onProgress?.(++done, urls.length); return; }
-    const res = await fetchRetry(url, { headers });
+    const res = await fetchRetry(url, { headers, signal });
     if (!res.ok) throw new Error(`Page ${i + 1} HTTP ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0) throw new Error(`Page ${i + 1} empty`);

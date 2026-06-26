@@ -83,7 +83,9 @@ async function fetchChapterVolumesFromFeed(mangaId, onPage) {
  */
 /** Returns { title, authors, artists, description, genres, year, mangadexId } */
 export async function fetchMangaDetails(mangaId) {
-  const url = `${BASE_URL}/manga/${mangaId}?includes[]=author&includes[]=artist`;
+  const matchUUID = String(mangaId).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  const cleanId = matchUUID ? matchUUID[0] : String(mangaId).trim();
+  const url = `${BASE_URL}/manga/${cleanId}?includes[]=author&includes[]=artist&includes[]=cover_art`;
   const { data } = await apiFetch(url);
   const attrs = data.attributes;
 
@@ -96,6 +98,10 @@ export async function fetchMangaDetails(mangaId) {
     .filter(r => r.type === 'artist')
     .map(r => r.attributes?.name)
     .filter(Boolean);
+
+  const coverRel = data.relationships.find(r => r.type === 'cover_art');
+  const coverFile = coverRel?.attributes?.fileName;
+  const coverPath = coverFile ? `https://uploads.mangadex.org/covers/${mangaId}/${coverFile}.256.jpg` : null;
 
   const description = attrs.description?.en || Object.values(attrs.description || {})[0] || '';
 
@@ -111,6 +117,7 @@ export async function fetchMangaDetails(mangaId) {
     genres,
     year: attrs.year,
     status: attrs.status || null, // ongoing | completed | hiatus | cancelled
+    coverPath,
     mangadexId: mangaId,
   };
 }
@@ -121,32 +128,47 @@ export async function fetchMangaDetails(mangaId) {
  * One row per chapter number (first/earliest scanlation wins).
  */
 export async function listChapters(mangaId, { lang = 'en' } = {}) {
-  const out = [];
-  const seen = new Set();
+  const matchUUID = String(mangaId).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  const cleanId = matchUUID ? matchUUID[0] : String(mangaId).trim();
+
   const limit = 500;
   let offset = 0;
   let total = Infinity;
 
+  // Fetch authoritative Volume & Chapter TOC skeleton via /aggregate
+  const aggMap = new Map(); // chNumber -> volNumber
+  try {
+    const agg = await apiFetch(`${BASE_URL}/manga/${cleanId}/aggregate`);
+    for (const [volNum, vdata] of Object.entries(agg.volumes || {})) {
+      const v = vdata.volume || volNum;
+      if (v === 'none' || v == null) continue;
+      for (const ch of Object.values(vdata.chapters || {})) {
+        if (ch.chapter) aggMap.set(ch.chapter, String(v));
+      }
+    }
+  } catch {}
+
+  const candidatesByChapter = new Map();
+
   while (offset < total) {
-    const url = `${BASE_URL}/manga/${mangaId}/feed`
-      + `?order[chapter]=asc&limit=${limit}&offset=${offset}`
-      + `&translatedLanguage[]=${encodeURIComponent(lang)}&${CONTENT_RATINGS}`;
+    const url = `${BASE_URL}/manga/${cleanId}/feed`
+      + `?order[chapter]=asc&limit=${limit}&offset=${offset}&${CONTENT_RATINGS}`;
     const data = await apiFetch(url);
     total = data.total ?? 0;
 
     for (const ch of data.data || []) {
       const a = ch.attributes || {};
       const number = a.chapter;
-      if (!number || seen.has(number)) continue;
-      // Skip external chapters with no hostable pages (externalUrl + 0 pages)
-      if (a.externalUrl && (a.pages ?? 0) === 0) continue;
-      seen.add(number);
-      out.push({
+      if (!number) continue;
+      if (!candidatesByChapter.has(number)) {
+        candidatesByChapter.set(number, []);
+      }
+      candidatesByChapter.get(number).push({
         id: ch.id,
         number,
-        volume: a.volume || null,
+        volume: a.volume || aggMap.get(number) || null,
         title: a.title || '',
-        lang: a.translatedLanguage || lang,
+        lang: a.translatedLanguage || 'en',
         publishedAt: a.publishAt || a.createdAt || null,
         pages: a.pages ?? null,
       });
@@ -156,6 +178,53 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
     if (offset < total) await new Promise(r => setTimeout(r, 300));
   }
 
+  const out = [];
+  for (const [number, candidates] of candidatesByChapter.entries()) {
+    candidates.sort((a, b) => {
+      // 1. Language priority
+      const getLangScore = (l) => {
+        if (l === lang) return 4;
+        if (l === 'en') return 3;
+        if (l === 'fr') return 2;
+        return 1;
+      };
+      const scoreA = getLangScore(a.lang);
+      const scoreB = getLangScore(b.lang);
+      if (scoreA !== scoreB) {
+        return scoreB - scoreA;
+      }
+
+      // 2. Pages > 0 priority (avoid empty/broken chapters)
+      const pagesA = a.pages || 0;
+      const pagesB = b.pages || 0;
+      if ((pagesA > 0) !== (pagesB > 0)) {
+        return pagesA > 0 ? -1 : 1;
+      }
+
+      // 3. Keep original order
+      return 0;
+    });
+
+    out.push(candidates[0]);
+  }
+
+  const seen = new Set(out.map(c => c.number));
+  for (const [num, vol] of aggMap) {
+    if (!seen.has(num)) {
+      seen.add(num);
+      out.push({
+        id: `agg-${cleanId}-${num}`,
+        number: num,
+        volume: vol,
+        title: `Chapter ${num}`,
+        lang,
+        publishedAt: null,
+        pages: null,
+      });
+    }
+  }
+
+  out.sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
   return out;
 }
 
@@ -166,8 +235,64 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
  * @param {string} chapterId
  * @param {{ dataSaver?: boolean }} opts
  */
-export async function getChapterPages(chapterId, { dataSaver = false } = {}) {
-  const data = await apiFetch(`${BASE_URL}/at-home/server/${chapterId}`);
+export async function getChapterPages(chapterId, { dataSaver = false, mangaId = null, chapterNum = null } = {}) {
+  let cid = chapterId;
+  const sortChapters = (list) => {
+    return [...list].sort((a, b) => {
+      const getLangScore = (l) => {
+        if (l === 'en') return 3;
+        if (l === 'fr') return 2;
+        return 1;
+      };
+      const scoreA = getLangScore(a.attributes?.translatedLanguage);
+      const scoreB = getLangScore(b.attributes?.translatedLanguage);
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      const pagesA = a.attributes?.pages || 0;
+      const pagesB = b.attributes?.pages || 0;
+      if ((pagesA > 0) !== (pagesB > 0)) return pagesA > 0 ? -1 : 1;
+      return 0;
+    });
+  };
+
+  if (cid && (cid.startsWith('agg-') || cid.startsWith('mu-synth-'))) {
+    const parts = cid.split('-');
+    let mUUID = null;
+    let num = null;
+    if (cid.startsWith('agg-')) {
+      mUUID = parts.slice(1, -1).join('-');
+      num = parts[parts.length - 1];
+    } else if (mangaId) {
+      mUUID = mangaId;
+      num = chapterNum;
+    }
+    if (mUUID && num) {
+      try {
+        const res = await apiFetch(`${BASE_URL}/chapter?manga=${mUUID}&chapter=${num}&order[publishAt]=desc`);
+        if (res?.data?.length) {
+          const sorted = sortChapters(res.data);
+          cid = sorted[0].id;
+        }
+      } catch {}
+    }
+  }
+
+  let data;
+  try {
+    data = await apiFetch(`${BASE_URL}/at-home/server/${cid}`);
+  } catch (err) {
+    if (mangaId && chapterNum) {
+      try {
+        const res = await apiFetch(`${BASE_URL}/chapter?manga=${mangaId}&chapter=${chapterNum}&order[publishAt]=desc`);
+        if (res?.data?.length) {
+          const sorted = sortChapters(res.data);
+          cid = sorted[0].id;
+          data = await apiFetch(`${BASE_URL}/at-home/server/${cid}`);
+        }
+      } catch {}
+    }
+    if (!data) throw err;
+  }
+
   const baseUrl = data.baseUrl;
   const hash = data.chapter?.hash;
   const files = dataSaver ? data.chapter?.dataSaver : data.chapter?.data;

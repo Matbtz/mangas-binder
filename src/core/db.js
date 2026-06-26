@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS series (
   year               INTEGER,
   status             TEXT,
   cover_path         TEXT,
+  folder_path        TEXT,
   language           TEXT NOT NULL DEFAULT 'en',
   monitored          INTEGER NOT NULL DEFAULT 1,
   monitor_mode       TEXT NOT NULL DEFAULT 'all',     -- all | future | none
@@ -51,9 +52,13 @@ CREATE TABLE IF NOT EXISTS chapters (
   state               TEXT NOT NULL DEFAULT 'wanted',  -- wanted|queued|downloading|downloaded|packaged|imported|failed|skipped
   staging_path        TEXT,
   cbz_path            TEXT,
+  download_url        TEXT,
   calculated          INTEGER NOT NULL DEFAULT 0,
   attempts            INTEGER NOT NULL DEFAULT 0,
   error               TEXT,
+  prog_done           INTEGER,                         -- live download progress (pages fetched)
+  prog_total          INTEGER,                         -- live download progress (total pages); null = indeterminate
+  started_at          TEXT,                            -- when the current download attempt began
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(series_id, number, language)
@@ -94,6 +99,13 @@ function migrate(database) {
   add('media_type', "media_type TEXT NOT NULL DEFAULT 'manga'");
   add('download_provider', 'download_provider TEXT');
   add('publisher', 'publisher TEXT');
+  add('folder_path', 'folder_path TEXT');
+  const chCols = database.prepare('PRAGMA table_info(chapters)').all().map(c => c.name);
+  const addCh = (name, ddl) => { if (!chCols.includes(name)) database.exec(`ALTER TABLE chapters ADD COLUMN ${ddl}`); };
+  addCh('download_url', 'download_url TEXT');
+  addCh('prog_done', 'prog_done INTEGER');
+  addCh('prog_total', 'prog_total INTEGER');
+  addCh('started_at', 'started_at TEXT');
 }
 
 export function getDb() {

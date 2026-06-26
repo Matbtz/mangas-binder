@@ -43,18 +43,18 @@ export function resolveVolumes(seriesId) {
     }
   }
 
-  if (!unassigned.length || !Object.keys(volumeMap).length) return { assigned: 0 };
+  if (!unassigned.length) return { assigned: 0 };
 
-  const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null);
+  const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null, false);
 
   const upd = getDb().prepare(
-    "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ? AND state != 'imported'"
+    "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ? AND (state != 'imported' OR volume IS NULL OR volume = '')"
   );
   let assigned = 0;
   for (const [vol, nums] of Object.entries(calculated)) {
     for (const n of nums) {
       const c = byNumber.get(n);
-      if (c && c.state !== 'imported') { upd.run(vol, c.id); assigned++; }
+      if (c && (c.state !== 'imported' || c.volume == null || c.volume === '')) { upd.run(vol, c.id); assigned++; }
     }
   }
   return { assigned };

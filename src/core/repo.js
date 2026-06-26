@@ -12,12 +12,12 @@ export function createSeries(s) {
     INSERT INTO series
       (provider, provider_series_id, media_type, download_provider, publisher,
        title, sort_title, authors_json, artists_json,
-       description, genres_json, year, status, cover_path, language,
+       description, genres_json, year, status, cover_path, folder_path, language,
        monitored, monitor_mode, packaging_mode, total_volumes_hint)
     VALUES
       (@provider, @provider_series_id, @media_type, @download_provider, @publisher,
        @title, @sort_title, @authors_json, @artists_json,
-       @description, @genres_json, @year, @status, @cover_path, @language,
+       @description, @genres_json, @year, @status, @cover_path, @folder_path, @language,
        @monitored, @monitor_mode, @packaging_mode, @total_volumes_hint)
     ON CONFLICT(provider, provider_series_id) DO UPDATE SET
        title = excluded.title, updated_at = datetime('now')
@@ -36,6 +36,7 @@ export function createSeries(s) {
     year: s.year ?? null,
     status: s.status ?? null,
     cover_path: s.coverPath ?? null,
+    folder_path: s.folderPath ?? null,
     language: s.language ?? 'en',
     monitored: s.monitored ? 1 : 0,
     monitor_mode: s.monitorMode ?? 'all',
@@ -68,10 +69,19 @@ const SERIES_PATCH_COLS = {
   packagingMode: v => v,
   language: v => v,
   totalVolumesHint: v => v,
+  coverPath: v => v,
+  folderPath: v => v,
+  provider: v => v,
+  providerSeriesId: v => v,
+  downloadProvider: v => v,
+  mediaType: v => v,
+  title: v => v,
 };
 const SERIES_COL_NAMES = {
   monitored: 'monitored', monitorMode: 'monitor_mode', packagingMode: 'packaging_mode',
-  language: 'language', totalVolumesHint: 'total_volumes_hint',
+  language: 'language', totalVolumesHint: 'total_volumes_hint', coverPath: 'cover_path', folderPath: 'folder_path',
+  provider: 'provider', providerSeriesId: 'provider_series_id',
+  downloadProvider: 'download_provider', mediaType: 'media_type', title: 'title',
 };
 
 export function updateSeries(id, patch) {
@@ -106,18 +116,45 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
   const lang = c.language ?? 'en';
   const number = String(c.number);
   const existing = db.prepare(
-    'SELECT id FROM chapters WHERE series_id = ? AND number = ? AND language = ?'
-  ).get(seriesId, number, lang);
+    'SELECT id, language FROM chapters WHERE series_id = ? AND number = ?'
+  ).all(seriesId, number);
 
-  if (existing) {
-    db.prepare(`UPDATE chapters SET
-        volume = COALESCE(?, volume),
-        provider_chapter_id = COALESCE(?, provider_chapter_id),
-        pages = COALESCE(?, pages),
-        updated_at = datetime('now')
-      WHERE id = ?`)
-      .run(c.volume ?? null, c.providerChapterId ?? null, c.pages ?? null, existing.id);
-    return false;
+  if (existing.length > 0) {
+    const main = existing[0];
+    if (existing.length > 1) {
+      const dupIds = existing.slice(1).map(e => e.id);
+      db.prepare(`DELETE FROM chapters WHERE id IN (${dupIds.map(() => '?').join(',')})`).run(...dupIds);
+    }
+
+    if (main.language !== lang) {
+      // Language upgrade/change: reset download state so the new language version is grabbed
+      db.prepare(`UPDATE chapters SET
+          volume = COALESCE(?, volume),
+          provider_chapter_id = COALESCE(?, provider_chapter_id),
+          pages = COALESCE(?, pages),
+          title = COALESCE(?, title),
+          language = ?,
+          state = ?,
+          error = NULL,
+          attempts = 0,
+          cbz_path = NULL,
+          staging_path = NULL,
+          updated_at = datetime('now')
+        WHERE id = ?`)
+        .run(c.volume ?? null, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, lang, initialState, main.id);
+      return false;
+    } else {
+      // Normal update
+      db.prepare(`UPDATE chapters SET
+          volume = COALESCE(?, volume),
+          provider_chapter_id = COALESCE(?, provider_chapter_id),
+          pages = COALESCE(?, pages),
+          title = COALESCE(?, title),
+          updated_at = datetime('now')
+        WHERE id = ?`)
+        .run(c.volume ?? null, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, main.id);
+      return false;
+    }
   }
 
   db.prepare(`INSERT INTO chapters
@@ -144,12 +181,24 @@ export function chaptersInState(state, limit = 100) {
   ).all(state, limit);
 }
 
+/** Chapters in any of the given states (optionally scoped to one series). */
+export function listChaptersInStates(states, { seriesId = null, limit = 500 } = {}) {
+  if (!states.length) return [];
+  const placeholders = states.map(() => '?').join(',');
+  const where = seriesId == null ? '' : ' AND series_id = ?';
+  const args = seriesId == null ? [...states, limit] : [...states, seriesId, limit];
+  return getDb().prepare(
+    `SELECT * FROM chapters WHERE state IN (${placeholders})${where} ORDER BY id LIMIT ?`
+  ).all(...args);
+}
+
 export function setChapterState(id, state, extra = {}) {
   const cols = ['state = ?'];
   const vals = [state];
   for (const [k, col] of Object.entries({
     staging_path: 'staging_path', cbz_path: 'cbz_path', error: 'error',
-    volume: 'volume', pages: 'pages', calculated: 'calculated',
+    volume: 'volume', pages: 'pages', calculated: 'calculated', download_url: 'download_url',
+    language: 'language', prog_done: 'prog_done', prog_total: 'prog_total', started_at: 'started_at',
   })) {
     if (extra[k] !== undefined) { cols.push(`${col} = ?`); vals.push(extra[k]); }
   }
@@ -157,8 +206,33 @@ export function setChapterState(id, state, extra = {}) {
   getDb().prepare(`UPDATE chapters SET ${cols.join(', ')} WHERE id = ?`).run(...vals, id);
 }
 
+/** Light progress write during a download — does not touch state. */
+export function setChapterProgress(id, done, total) {
+  getDb().prepare(
+    "UPDATE chapters SET prog_done = ?, prog_total = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(done ?? null, total ?? null, id);
+}
+
 export function bumpChapterAttempt(id) {
   getDb().prepare('UPDATE chapters SET attempts = attempts + 1 WHERE id = ?').run(id);
+}
+
+export function bulkSetChapterState(ids, state) {
+  if (!ids.length) return 0;
+  const db = getDb();
+  const stmt = db.prepare(
+    "UPDATE chapters SET state = ?, error = NULL, updated_at = datetime('now') WHERE id = ?"
+  );
+  // node:sqlite (DatabaseSync) has no .transaction() helper; wrap manually.
+  db.exec('BEGIN');
+  try {
+    for (const id of ids) stmt.run(state, id);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return ids.length;
 }
 
 /** Per-series counts grouped by state, for the API summary. */

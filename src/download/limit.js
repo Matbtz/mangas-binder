@@ -27,14 +27,16 @@ export const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
  * Fetch with retry + exponential backoff. Retries on network errors, 429, and
- * 5xx. Honors Retry-After on 429 when present.
+ * 5xx. Honors Retry-After on 429 when present. An aborted `signal` rejects
+ * immediately without burning retries.
  * @returns {Promise<Response>}
  */
-export async function fetchRetry(url, { retries = 4, baseDelay = 1000, headers = {} } = {}) {
+export async function fetchRetry(url, { retries = 4, baseDelay = 1000, headers = {}, signal } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (signal?.aborted) throw abortError();
     try {
-      const res = await fetch(url, { headers });
+      const res = await fetch(url, { headers, signal });
       if (res.status === 429 || res.status >= 500) {
         const ra = Number(res.headers.get('retry-after'));
         const wait = ra ? ra * 1000 : baseDelay * 2 ** attempt;
@@ -42,9 +44,17 @@ export async function fetchRetry(url, { retries = 4, baseDelay = 1000, headers =
       }
       return res;
     } catch (err) {
+      if (err?.name === 'AbortError') throw err; // cancellation: don't retry
       lastErr = err;
       if (attempt < retries) { await sleep(baseDelay * 2 ** attempt); continue; }
     }
   }
   throw lastErr || new Error(`Failed to fetch after ${retries} retries: ${url}`);
+}
+
+/** An AbortError consistent with what fetch() throws, for manual abort checks. */
+export function abortError() {
+  const e = new Error('Aborted');
+  e.name = 'AbortError';
+  return e;
 }
