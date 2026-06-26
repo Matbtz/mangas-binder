@@ -122,7 +122,7 @@ test('staging & bindery lifecycle: packaging moves to bindery, scan imports and 
   assert.ok(existsSync(sDir), 'staging folder should still exist while in bindery state');
 
   // Run library scan (it scans outputDir where the CBZ was created)
-  const scanResult = scanLibrary({ seriesId: s.id });
+  const scanResult = await scanLibrary({ seriesId: s.id });
   assert.equal(scanResult.markedChapters, 1, 'scanner should detect and mark 1 chapter as imported');
 
   // Verify it is now 'imported' and staging is pruned

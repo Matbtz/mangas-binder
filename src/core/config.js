@@ -37,6 +37,14 @@ export const config = {
     scanIntervalHours: Number(process.env.SCAN_INTERVAL_HOURS || 6),
     downloadConcurrency: Number(process.env.DOWNLOAD_CONCURRENCY || 4), // parallel page fetches per chapter
     chapterConcurrency: Number(process.env.CHAPTER_CONCURRENCY || 2),   // chapters downloaded in parallel
+    // Master kill-switch: when true, the worker never downloads or packages.
+    // Handy when deploying/testing so the app doesn't start pulling files.
+    downloadsPaused: process.env.DOWNLOADS_PAUSED === 'true',
+    // Scheduler refresh: how many monitored series refresh in parallel, and how
+    // long a single series' refresh may run before it's abandoned (so one stuck
+    // source can't stall the whole scan cycle).
+    refreshConcurrency: Number(process.env.REFRESH_CONCURRENCY || 3),
+    seriesRefreshTimeoutSec: Number(process.env.SERIES_REFRESH_TIMEOUT_SEC || 90),
     defaultPackagingMode: process.env.DEFAULT_PACKAGING_MODE || 'volume', // volume | chapter
     defaultMonitorMode: process.env.DEFAULT_MONITOR_MODE || 'all',         // all | future | none
     defaultLanguage: process.env.DEFAULT_LANGUAGE || 'en',

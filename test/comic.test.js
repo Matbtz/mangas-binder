@@ -86,7 +86,7 @@ test('comic download→bind produces a #NNN issue CBZ with comic ComicInfo', asy
   assert.ok(res.path.endsWith('Saga (2012) #001.cbz'), `got ${res.path}`);
 
   // The produced CBZ carries comic identity (ComicVine web id + Publisher) and chapter pages.
-  const info = readCbzInfo(res.path);
+  const info = await readCbzInfo(res.path);
   assert.equal(info.comicvineId, '42562');
   assert.deepEqual(info.chapters.sort(), ['1']);
   const xml = new AdmZip(res.path).getEntries().find(e => /comicinfo\.xml$/i.test(e.entryName)).getData().toString();

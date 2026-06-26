@@ -36,19 +36,38 @@ function parseHash() {
 /** Navigate to a hash; if already there, re-render in place. */
 function navigate(hash) { if (location.hash === hash) route(); else location.hash = hash; }
 
-// --- Polling (single active poller, always cleared on navigation) ----------
+// --- Live updates: Server-Sent Events with a slow polling fallback ---------
+// One shared EventSource pushes pipeline changes; views refresh on a message
+// (debounced) instead of every view hammering the API on a fixed 2s timer. The
+// fallback interval is a safety net for missed events / proxies that drop SSE.
+let _es = null;
+const _esListeners = new Set();
+function ensureEventSource() {
+  if (_es || typeof EventSource === 'undefined') return;
+  const t = token();
+  try {
+    _es = new EventSource('/api/events' + (t ? `?token=${encodeURIComponent(t)}` : ''));
+    _es.onmessage = () => { for (const l of [..._esListeners]) l(); };
+    _es.onerror = () => { /* EventSource reconnects on its own */ };
+  } catch { _es = null; }
+}
+
 let _stopPoll = null;
 function clearPolling() { if (_stopPoll) { _stopPoll(); _stopPoll = null; } }
-function startPolling(fn, ms = 2000) {
+/**
+ * Run `fn` on every live event (debounced) plus a slow fallback timer.
+ * Signature is unchanged; `ms` is now the fallback interval, not the cadence.
+ */
+function startPolling(fn, ms = 10000) {
   clearPolling();
-  let stopped = false, timer = null;
-  const tick = async () => {
-    if (stopped) return;
-    try { await fn(); } catch { /* keep polling through transient errors */ }
-    if (!stopped) timer = setTimeout(tick, ms);
-  };
+  let stopped = false, timer = null, debounce = null;
+  const run = async () => { if (stopped) return; try { await fn(); } catch { /* keep going through transient errors */ } };
+  const onEvent = () => { if (stopped || debounce) return; debounce = setTimeout(() => { debounce = null; run(); }, 350); };
+  const tick = async () => { if (stopped) return; await run(); if (!stopped) timer = setTimeout(tick, ms); };
+  ensureEventSource();
+  _esListeners.add(onEvent);
   timer = setTimeout(tick, ms);
-  _stopPoll = () => { stopped = true; if (timer) clearTimeout(timer); };
+  _stopPoll = () => { stopped = true; if (timer) clearTimeout(timer); if (debounce) clearTimeout(debounce); _esListeners.delete(onEvent); };
   return _stopPoll;
 }
 
@@ -921,6 +940,7 @@ async function viewActivity(v) {
     histWrap.appendChild(hi);
   };
 
+  const pauseBanner = h('<div></div>'); queueWrap.before(pauseBanner);
   const load = async () => {
     const [queue, health, history] = await Promise.all([api('/queue'), api('/health'), api('/history')]);
     const sp = v.querySelector('#sched-pill');
@@ -929,6 +949,9 @@ async function viewActivity(v) {
       sp.className = `pill ${sc.scanning ? 'acc' : sc.running ? 'ok' : 'warn'}`;
       sp.textContent = sc.scanning ? '↻ scanning…' : sc.running ? `● scheduler on · ${sc.intervalHours}h` : '○ scheduler off';
     }
+    pauseBanner.innerHTML = health.downloadsPaused
+      ? `<div class="card" style="border-color:#a36;background:#3a1f2a"><strong>⏸ Downloads are paused.</strong> <span class="muted">Nothing will download or package until you resume in <a href="#/settings">Settings</a>.</span></div>`
+      : '';
     renderQueue(queue);
     renderHist(history);
   };
@@ -942,7 +965,26 @@ async function viewSettings(v) {
   const [settings, providers] = await Promise.all([api('/settings'), api('/providers')]);
   v.innerHTML = '';
   v.appendChild(h('<div class="page-head"><h1>Settings</h1></div>'));
-  const numKeys = ['scanIntervalHours','downloadConcurrency','chapterConcurrency'];
+
+  // Prominent master switch: pause the whole download/package pipeline.
+  const dlc = h('<div class="card"><h2>Downloads</h2></div>');
+  const paused = !!settings.downloadsPaused;
+  const prow = h(`<label class="field" style="display:flex;align-items:center;gap:10px">
+    <input type="checkbox" ${paused ? 'checked' : ''}>
+    <span>Pause all downloads <span class="muted" style="font-size:11px">— no fetching or packaging; useful while deploying/testing (env: DOWNLOADS_PAUSED)</span></span>
+  </label>`);
+  const pStatus = h(`<span class="pill ${paused ? 'warn' : 'ok'}">${paused ? '⏸ paused' : '● active'}</span>`);
+  prow.querySelector('input').onchange = async (e) => {
+    const val = e.target.checked;
+    await api('/settings', { method:'PATCH', body:{ downloadsPaused: val } });
+    pStatus.className = `pill ${val ? 'warn' : 'ok'}`; pStatus.textContent = val ? '⏸ paused' : '● active';
+    toast(val ? 'Downloads paused' : 'Downloads resumed');
+    if (!val) api('/downloads/run', { method:'POST' }).catch(()=>{});
+  };
+  const phead = h('<div class="row" style="align-items:center;gap:10px"></div>');
+  phead.append(prow, pStatus); dlc.appendChild(phead); v.appendChild(dlc);
+
+  const numKeys = ['scanIntervalHours','downloadConcurrency','chapterConcurrency','refreshConcurrency','seriesRefreshTimeoutSec'];
   const enumKeys = { defaultPackagingMode:['volume','chapter'], defaultMonitorMode:['all','future','none'] };
   const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes'];
   const textKeys = ['defaultLanguage'];

@@ -26,6 +26,21 @@ export function pLimit(n) {
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
+ * Race a promise against a timeout. Rejects with a labelled error if `ms`
+ * elapses first, so one stuck operation can't hang a whole batch. The underlying
+ * work isn't cancelled (callers pass their own AbortSignal for that) — this just
+ * stops the *waiting*.
+ */
+export function withTimeout(promise, ms, label = 'operation') {
+  if (!ms || ms <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
  * Fetch with retry + exponential backoff. Retries on network errors, 429, and
  * 5xx. Honors Retry-After on 429 when present. An aborted `signal` rejects
  * immediately without burning retries.
