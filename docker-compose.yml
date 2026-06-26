@@ -12,10 +12,10 @@ services:
       DEFAULT_PACKAGING_MODE: volume  # volume | chapter
       DEFAULT_LANGUAGE: en
       # Comics & Books: Hardcover triage key + ComicVine key.
-      # HARDCOVER_API_KEY: "your-hardcover-key"
-      # COMICVINE_API_KEY: "your-comicvine-key"
-      # GETCOMICS_BASE_URL: "https://getcomics.org"
-      # AUTH_TOKEN: "set-me-to-require-auth"
+      HARDCOVER_API_KEY: ${HARDCOVER_API_KEY:-}
+      COMICVINE_API_KEY: ${COMICVINE_API_KEY:-}
+      GETCOMICS_BASE_URL: ${GETCOMICS_BASE_URL:-}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
       LIBRARY_SCAN_DIRS: "/bindery,/books"   # scan both output and Tome's library
     volumes:
       - /home/mat/Documents/data:/data              # keep DB local (SQLite + NAS = bad perf)
