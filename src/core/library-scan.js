@@ -35,7 +35,7 @@ import { getSetting } from './settings.js';
  */
 
 const CBZ_PAGE_RE = /^ch(\d+(?:\.\d+)?)_p\d+/i;
-const FILENAME_VOL_RE = /\bvol\.?\s*0*(\d+(?:\.\d+)?)/i;
+const FILENAME_VOL_RE = /\b(?:vol|tome)\.?\s*0*(\d+(?:\.\d+)?)/i;
 const WEB_ID_RE = /mangadex\.org\/title\/([0-9a-f-]{36})/i;
 const COMICVINE_ID_RE = /comicvine\.gamespot\.com\/volume\/4050-(\d+)/i;
 
@@ -149,6 +149,7 @@ export function scanLibrary({ seriesId } = {}) {
       chaptersBySeries.set(match.id, new Map(listChaptersForSeries(match.id).map(c => [String(parseFloat(c.number)), c])));
     }
     const index = chaptersBySeries.get(match.id);
+    let matchedCount = 0;
     for (const num of info.chapters) {
       const row = index.get(String(parseFloat(num)));
       if (!row || row.state === 'imported') continue;
@@ -160,11 +161,22 @@ export function scanLibrary({ seriesId } = {}) {
       });
       row.state = 'imported';
       markedChapters++;
+      matchedCount++;
       perSeries[match.title] = (perSeries[match.title] || 0) + 1;
 
       if (!getSetting('keepLoosePages', false)) {
         const sDir = path.join(getSetting('stagingDir', config.stagingDir), String(match.id), `ch${row.number}`);
         rmSync(sDir, { recursive: true, force: true });
+      }
+    }
+    if (matchedCount === 0 && info.volume) {
+      for (const row of index.values()) {
+        if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === String(parseFloat(info.volume))) {
+          setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+          row.state = 'imported';
+          markedChapters++;
+          perSeries[match.title] = (perSeries[match.title] || 0) + 1;
+        }
       }
     }
   }
@@ -357,22 +369,20 @@ export function scanLibrary({ seriesId } = {}) {
           if (!comicvineId && info.comicvineId) comicvineId = info.comicvineId;
           if (info.series) titleCounts.set(info.series, (titleCounts.get(info.series) || 0) + 1);
         }
-        // Use CBZ series title only when every CBZ in the folder agrees on one name.
-        const displayTitle = titleCounts.size === 1 ? [...titleCounts.keys()][0] : entry.name;
+        // Use CBZ series title when they agree, or fall back to the folder name itself.
+        const displayTitle = (titleCounts.size > 0) ? [...titleCounts.keys()][0] : entry.name;
         const sanitizedTitle = sanitize(displayTitle).toLowerCase();
 
         if (allByKey.has(`title:${sanitizedTitle}`)) continue;
         if (mangadexId && allByKey.has(`mangadex:${mangadexId}`)) continue;
         if (comicvineId && allByKey.has(`comicvine:${comicvineId}`)) continue;
 
-        const innerEntries = readdirSync(fullPath, { withFileTypes: true });
-        const cbzFiles = innerEntries.filter(e => e.isFile() && e.name.toLowerCase().endsWith('.cbz'));
-        const subdirs  = innerEntries.filter(e => e.isDirectory());
-        const fileCount = cbzFiles.length + subdirs.length || 1;
+        const cbzFiles = walkCbz(fullPath);
+        const fileCount = cbzFiles.length || 1;
 
         const volumes = new Set();
         for (const f of cbzFiles) {
-          const m = f.name.match(FILENAME_VOL_RE);
+          const m = path.basename(f).match(FILENAME_VOL_RE);
           if (m) volumes.add(String(parseFloat(m[1])));
         }
 
