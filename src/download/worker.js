@@ -32,6 +32,11 @@ const isAbort = (err) => err?.name === 'AbortError';
  */
 export async function runOnce({ limit = 200 } = {}) {
   if (running) return { processed: 0, imported: 0, failed: 0, skipped: 'already-running' };
+  // Master kill-switch — when paused, the pipeline does nothing (no downloads,
+  // no packaging). Lets you deploy/test without the app pulling files.
+  if (getSetting('downloadsPaused', false)) {
+    return { processed: 0, imported: 0, failed: 0, skipped: 'downloads-paused' };
+  }
   running = true;
   try {
     const concurrency = getSetting('downloadConcurrency', 4);

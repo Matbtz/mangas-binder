@@ -4,7 +4,8 @@ import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { mkdirSync } from 'fs';
 import { config } from '../core/config.js';
-import { getDb } from '../core/db.js';
+import { getDb, logHistory } from '../core/db.js';
+import { resetStaleDownloads } from '../core/repo.js';
 import { ensureSeeded } from '../core/settings.js';
 import { startScheduler } from '../scheduler/scheduler.js';
 import apiRoutes from './routes/api.js';
@@ -16,6 +17,10 @@ export async function buildApp() {
   // Open DB + seed defaults/providers before anything serves traffic.
   getDb();
   ensureSeeded();
+  // A crash/restart can leave chapters stuck mid-download (their in-flight
+  // controller is gone); requeue them so they resume instead of hanging.
+  const stale = resetStaleDownloads();
+  if (stale) logHistory('downloads.requeued', { message: `reset ${stale} stale downloading chapter(s) on startup` });
   mkdirSync(config.outputDir, { recursive: true });
   mkdirSync(config.stagingDir, { recursive: true });
 

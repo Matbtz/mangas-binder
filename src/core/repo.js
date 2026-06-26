@@ -1,4 +1,5 @@
 import { getDb } from './db.js';
+import { publish } from './events.js';
 
 /**
  * Thin data-access helpers over the series/chapters tables. Rows are returned
@@ -204,6 +205,7 @@ export function setChapterState(id, state, extra = {}) {
   }
   cols.push("updated_at = datetime('now')");
   getDb().prepare(`UPDATE chapters SET ${cols.join(', ')} WHERE id = ?`).run(...vals, id);
+  publish('chapter', { id, state });
 }
 
 /** Light progress write during a download — does not touch state. */
@@ -211,6 +213,7 @@ export function setChapterProgress(id, done, total) {
   getDb().prepare(
     "UPDATE chapters SET prog_done = ?, prog_total = ?, updated_at = datetime('now') WHERE id = ?"
   ).run(done ?? null, total ?? null, id);
+  publish('progress', { id, done, total });
 }
 
 export function bumpChapterAttempt(id) {
@@ -232,7 +235,21 @@ export function bulkSetChapterState(ids, state) {
     db.exec('ROLLBACK');
     throw e;
   }
+  publish('chapters', { count: ids.length, state });
   return ids.length;
+}
+
+/**
+ * Reset chapters left in a transient `downloading` state by a crash/restart back
+ * to `wanted` so the worker resumes them (their in-flight controller is gone).
+ * Run once at startup. Returns the number of rows reset.
+ */
+export function resetStaleDownloads() {
+  const res = getDb().prepare(
+    "UPDATE chapters SET state = 'wanted', prog_done = NULL, prog_total = NULL, started_at = NULL, updated_at = datetime('now') WHERE state = 'downloading'"
+  ).run();
+  if (res.changes) publish('chapters', { count: res.changes, state: 'wanted' });
+  return res.changes;
 }
 
 /** Per-series counts grouped by state, for the API summary. */

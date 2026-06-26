@@ -229,7 +229,27 @@ async function _scanLibrary({ seriesId } = {}) {
         .map(p => path.isAbsolute(p) ? p : path.resolve(process.cwd(), p))
     : config.libraryScanDirs;
   // --- Reconciliation: mark already-owned CBZ chapters as imported ---
-  const files = [...new Set(scanDirs.flatMap(d => walkCbz(d)))];
+  // For a single-series scan, only walk that series' own subtree(s) instead of
+  // the whole (NAS-backed) library: the binder writes under a folder named after
+  // the title, plus any linked folder_path. Full scans still walk everything.
+  let scanRoots = scanDirs;
+  if (seriesId) {
+    const target = targets[0];
+    const titleKey = target ? sanitize(target.title).toLowerCase() : null;
+    const roots = new Set();
+    for (const scanDir of scanDirs) {
+      if (!existsSync(scanDir)) continue;
+      for (const entry of readdirSync(scanDir, { withFileTypes: true })) {
+        if (entry.isDirectory() && sanitize(entry.name).toLowerCase() === titleKey) {
+          roots.add(path.join(scanDir, entry.name));
+        }
+      }
+    }
+    const customDir = target?.folder_path || target?.folderPath;
+    if (customDir && existsSync(customDir)) roots.add(customDir);
+    scanRoots = [...roots];
+  }
+  const files = [...new Set(scanRoots.flatMap(d => walkCbz(d)))];
   const chaptersBySeries = new Map(); // seriesId -> Map(number -> row)
   let matchedFiles = 0, markedChapters = 0;
   const perSeries = {};
@@ -456,7 +476,9 @@ async function _scanLibrary({ seriesId } = {}) {
   const untrackedMap = new Map(); // key  -> entry
   const byTitle    = new Map(); // sanitized title -> key
 
-  for (const scanDir of scanDirs) {
+  // Untracked discovery only makes sense for a full scan; a per-series scan
+  // skips it entirely (and avoids re-walking the whole library).
+  for (const scanDir of (seriesId ? [] : scanDirs)) {
     if (!existsSync(scanDir)) continue;
     for (const entry of readdirSync(scanDir, { withFileTypes: true })) {
       if (entry.name.startsWith('.')) continue;

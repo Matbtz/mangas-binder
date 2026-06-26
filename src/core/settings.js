@@ -21,6 +21,9 @@ export function ensureSeeded() {
   seedSetting('scanIntervalHours', d.scanIntervalHours);
   seedSetting('downloadConcurrency', d.downloadConcurrency);
   seedSetting('chapterConcurrency', d.chapterConcurrency);
+  seedSetting('downloadsPaused', d.downloadsPaused);
+  seedSetting('refreshConcurrency', d.refreshConcurrency);
+  seedSetting('seriesRefreshTimeoutSec', d.seriesRefreshTimeoutSec);
   seedSetting('defaultPackagingMode', d.defaultPackagingMode);
   seedSetting('defaultMonitorMode', d.defaultMonitorMode);
   seedSetting('defaultLanguage', d.defaultLanguage);

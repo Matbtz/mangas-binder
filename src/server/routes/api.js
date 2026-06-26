@@ -9,7 +9,7 @@ import {
 } from '../../core/repo.js';
 import { getDb } from '../../core/db.js';
 import {
-  getAllSettings, setSetting, getProviderStates,
+  getAllSettings, getSetting, setSetting, getProviderStates,
   setProviderEnabled, setProviderConfig, getProviderConfig, isProviderEnabled,
 } from '../../core/settings.js';
 import { followSeries, refreshSeries } from '../../core/series-service.js';
@@ -19,6 +19,7 @@ import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '.
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce, cancelChapter, cancelSeries } from '../../download/worker.js';
 import { notify } from '../../core/notify.js';
+import { bus } from '../../core/events.js';
 import { seriesView, chapterView } from '../views.js';
 
 const ACTIVE_STATES = ['wanted', 'queued', 'downloading', 'downloaded', 'failed'];
@@ -40,7 +41,34 @@ export default async function apiRoutes(app) {
     const db = getDb();
     const seriesCount = db.prepare('SELECT COUNT(*) n FROM series').get().n;
     const byState = db.prepare('SELECT state, COUNT(*) n FROM chapters GROUP BY state').all();
-    return { ok: true, seriesCount, chapters: Object.fromEntries(byState.map(r => [r.state, r.n])), scheduler: schedulerStatus() };
+    return {
+      ok: true, seriesCount,
+      chapters: Object.fromEntries(byState.map(r => [r.state, r.n])),
+      scheduler: schedulerStatus(),
+      downloadsPaused: !!getSetting('downloadsPaused', false),
+    };
+  });
+
+  // --- Live updates (Server-Sent Events) ---
+  // One stream per connected UI; the frontend re-fetches on a message instead of
+  // polling on a fixed 2s timer. EventSource can't set headers, so auth (when
+  // enabled) rides on ?token=, which the onRequest hook already accepts.
+  app.get('/api/events', (req, reply) => {
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no', // don't let a reverse proxy buffer the stream
+    });
+    res.write('retry: 3000\n\n');
+    const onEvent = (e) => { try { res.write(`data: ${JSON.stringify(e)}\n\n`); } catch { /* client gone */ } };
+    bus.on('event', onEvent);
+    const keepAlive = setInterval(() => { try { res.write(': ka\n\n'); } catch {} }, 25000);
+    const cleanup = () => { clearInterval(keepAlive); bus.off('event', onEvent); };
+    req.raw.on('close', cleanup);
+    req.raw.on('error', cleanup);
   });
 
   // --- Search a source ---
