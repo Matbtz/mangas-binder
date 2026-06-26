@@ -68,8 +68,8 @@ async function viewLibrary(v) {
     const grid = h('<div class="grid"></div>');
     for (const s of series) {
       const card = h(`<div class="card">
-        <div class="title-row"><strong>${esc(s.title)}</strong> <span class="pill ${s.status==='completed'?'ok':'acc'}">${esc(s.status||'?')}</span></div>
-        <div class="muted" style="font-size:12px">${esc(s.authors.join(', '))} · ${esc(s.packagingMode)} · ${esc(s.monitorMode)} · ${esc(s.language)}</div>
+        <div class="title-row"><strong>${esc(s.title)}</strong> <span class="pill">${esc(s.mediaType||'manga')}</span> <span class="pill ${s.status==='completed'?'ok':'acc'}">${esc(s.status||'?')}</span></div>
+        <div class="muted" style="font-size:12px">${esc((s.publisher? s.publisher+' · ':'') + s.authors.join(', '))} · ${esc(s.packagingMode)} · ${esc(s.monitorMode)} · ${esc(s.language)}</div>
         <div style="margin:8px 0">${countsBadges(s.counts)}</div>
       </div>`);
       const actions = h('<div class="row"></div>');
@@ -93,22 +93,27 @@ async function viewLibrary(v) {
       const sec = h('<div class="card"><h2>In your library — not followed</h2><p class="muted" style="margin:0 0 12px">These series were found in your library folders but are not tracked by mangas-binder.</p></div>');
       const grid2 = h('<div class="grid"></div>');
       for (const u of untracked) {
+        const provider = u.comicvineId ? 'comicvine' : (u.mangadexId ? 'mangadex' : null);
+        const providerId = u.comicvineId || u.mangadexId;
+        const comic = u.mediaType === 'comic';
         const volLabel = u.volumes.length
           ? `Vol. ${u.volumes.join(', ')} (${u.fileCount} file${u.fileCount!==1?'s':''})`
           : `${u.fileCount} file${u.fileCount!==1?'s':''}`;
+        const idLabel = provider ? `${comic?'ComicVine':'MangaDex'} ID: ${providerId}` : 'No source ID found — follow manually via Add tab';
         const card = h(`<div class="card">
-          <div class="title-row"><strong>${esc(u.title)}</strong> <span class="pill">${esc(volLabel)}</span></div>
-          ${u.mangadexId ? `<div class="muted" style="font-size:12px">MangaDex ID: ${esc(u.mangadexId)}</div>` : '<div class="muted" style="font-size:12px">No MangaDex ID found — follow manually via Add tab</div>'}
+          <div class="title-row"><strong>${esc(u.title)}</strong> <span class="pill">${esc(u.mediaType)}</span> <span class="pill">${esc(volLabel)}</span></div>
+          <div class="muted" style="font-size:12px">${esc(idLabel)}</div>
         </div>`);
-        if (u.mangadexId) {
+        if (provider) {
           const actions = h('<div class="row" style="margin-top:8px"></div>');
-          const pk = h('<select class="pk"><option value="volume">volume CBZ</option><option value="chapter">chapter CBZ</option></select>');
+          const pk = h(`<select class="pk"><option value="chapter">per ${comic?'issue':'chapter'}</option><option value="volume">${comic?'collected':'volume'} CBZ</option></select>`);
+          pk.value = comic ? 'chapter' : 'volume';
           const mm = h('<select class="mm"><option value="all">all</option><option value="future">future only</option></select>');
           const btn = h('<button class="btn primary sm">Follow</button>');
           btn.onclick = async () => {
             btn.disabled = true; btn.textContent = 'Following…';
             try {
-              await api('/series', { method:'POST', body:{ provider:'mangadex', providerSeriesId: u.mangadexId, packagingMode: pk.value, monitorMode: mm.value } });
+              await api('/series', { method:'POST', body:{ provider, providerSeriesId: providerId, packagingMode: pk.value, monitorMode: mm.value } });
               toast('Following ' + u.title);
               route();
             } catch(e) { toast(e.message); btn.disabled = false; btn.textContent = 'Follow'; }
@@ -128,8 +133,9 @@ async function showDetail(id) {
   const v = $('#view'); v.innerHTML = '<p class="muted">Loading…</p>';
   const s = await api(`/series/${id}`);
   v.innerHTML = '';
+  const comic = (s.mediaType||'manga') === 'comic';
   const back = h('<button class="btn sm">← Library</button>'); back.onclick = route;
-  v.appendChild(h(`<div class="card"><div class="title-row"><h2>${esc(s.title)}</h2></div>
+  v.appendChild(h(`<div class="card"><div class="title-row"><h2>${esc(s.title)}</h2> <span class="pill">${esc(s.mediaType||'manga')}</span></div>
     <div class="row" id="modes"></div></div>`));
   $('.card', v).prepend(back);
 
@@ -138,7 +144,7 @@ async function showDetail(id) {
   modes.append(field('Monitor', ['all','future','none'], s.monitorMode, async val => { await api(`/series/${id}`,{method:'PATCH',body:{monitorMode:val}}); toast('Saved'); }));
   modes.append(field('Packaging', ['volume','chapter'], s.packagingMode, async val => { await api(`/series/${id}`,{method:'PATCH',body:{packagingMode:val}}); toast('Saved'); }));
 
-  const table = h(`<div class="card"><table><thead><tr><th>Ch</th><th>Vol</th><th>Title</th><th>State</th><th></th></tr></thead><tbody></tbody></table></div>`);
+  const table = h(`<div class="card"><table><thead><tr><th>${comic?'Issue':'Ch'}</th><th>${comic?'Coll.':'Vol'}</th><th>Title</th><th>State</th><th></th></tr></thead><tbody></tbody></table></div>`);
   const tb = $('tbody', table);
   for (const c of s.chapters) {
     const tr = h(`<tr><td>${esc(c.number)}</td><td>${esc(c.volume||'—')}</td><td>${esc(c.title||'')}</td>
@@ -164,24 +170,44 @@ function field(label, options, value, onChange) {
 // --- Add -------------------------------------------------------------------
 async function viewAdd(v) {
   v.innerHTML = '';
-  const providers = (await api('/providers')).filter(p => p.capabilities.download && p.enabled);
+  // Searchable sources = metadata providers (MangaDex for manga, ComicVine for comics).
+  const providers = (await api('/providers')).filter(p => p.capabilities.metadata && p.enabled);
+  const byName = Object.fromEntries(providers.map(p => [p.name, p]));
   const card = h(`<div class="card"><h2>Search a source</h2><div class="row">
-    <select id="prov">${providers.map(p=>`<option value="${p.name}">${esc(p.label)}</option>`).join('')}</select>
-    <input id="q" placeholder="Manga title…" style="flex:1;min-width:200px" />
-    <button class="btn primary" id="go">Search</button></div></div>`);
+    <select id="prov">${providers.map(p=>`<option value="${p.name}">${esc(p.label)} (${p.mediaType})</option>`).join('')}</select>
+    <input id="q" placeholder="Title…" style="flex:1;min-width:200px" />
+    <button class="btn primary" id="go">Search</button></div>
+    <p class="muted" id="provhint" style="font-size:12px;margin:8px 0 0"></p></div>`);
   v.appendChild(card);
   const results = h('<div id="results"></div>'); v.appendChild(results);
+
+  const isComic = () => (byName[$('#prov',card).value]?.mediaType === 'comic');
+  const updateHint = () => {
+    $('#provhint', card).textContent = isComic()
+      ? 'Comics: metadata from ComicVine, files from GetComics. Defaults to one CBZ per issue.'
+      : 'Manga: metadata + pages from MangaDex.';
+    $('#q', card).placeholder = isComic() ? 'Comic series title…' : 'Manga title…';
+  };
+  $('#prov', card).onchange = updateHint;
+  updateHint();
+
   const doSearch = async () => {
     const q = $('#q', card).value.trim(); if (!q) return;
     results.innerHTML = '<p class="muted">Searching…</p>';
     try {
       const { results: rs, provider } = await api(`/search?provider=${$('#prov',card).value}&q=${encodeURIComponent(q)}`);
+      const comic = isComic();
+      const unit = comic ? 'issue' : 'chapter';
+      const coll = comic ? 'collected volume' : 'volume';
       results.innerHTML = '';
       if (!rs.length) { results.innerHTML = '<p class="muted">No results.</p>'; return; }
       for (const r of rs) {
-        const row = h(`<div class="card row"><strong style="flex:1">${esc(r.title)}</strong>
-          <select class="pk"><option value="volume">volume CBZ</option><option value="chapter">chapter CBZ</option></select>
+        const meta = [r.publisher, r.year, r.issueCount ? `${r.issueCount} issues` : null].filter(Boolean).join(' · ');
+        const row = h(`<div class="card row"><div style="flex:1"><strong>${esc(r.title)}</strong>${meta?`<div class="muted" style="font-size:12px">${esc(meta)}</div>`:''}</div>
+          <select class="pk"><option value="chapter">per ${unit}</option><option value="volume">${coll} CBZ</option></select>
           <select class="mm"><option value="all">all</option><option value="future">future only</option></select></div>`);
+        // Manga default to volume packaging; comics default to per-issue.
+        $('.pk', row).value = comic ? 'chapter' : 'volume';
         const add = h('<button class="btn primary">Follow</button>');
         add.onclick = async () => {
           add.disabled = true; add.textContent = 'Following…';
@@ -272,14 +298,40 @@ async function viewSettings(v) {
   ntest.onclick = async () => { try { await api('/notify/test',{method:'POST'}); toast('Test sent'); } catch(e){ toast(e.message); } };
   nrow.append(nsave, ntest); nform.appendChild(nrow); nc.appendChild(nform); v.appendChild(nc);
 
+  const PROVIDER_CONFIG = {
+    comicvine: [['apikey', 'ComicVine API key (comicvine.gamespot.com/api)', 'password']],
+    getcomics: [['baseUrl', 'GetComics base URL (optional override)', 'text']],
+  };
+  const capLabel = (c) => c.archive ? 'archive' : c.download ? 'download' : 'metadata';
+
   const pc = h('<div class="card"><h2>Sources</h2></div>');
   for (const p of providers) {
+    const wrap = h('<div style="border-top:1px solid #2a2a2a;padding:10px 0"></div>');
     const row = h(`<div class="row" style="justify-content:space-between"><div><strong>${esc(p.label)}</strong>
-      <span class="pill ${p.capabilities.download?'acc':''}">${p.capabilities.download?'download':'metadata'}</span></div></div>`);
+      <span class="pill">${esc(p.mediaType)}</span>
+      <span class="pill ${p.capabilities.download||p.capabilities.archive?'acc':''}">${capLabel(p.capabilities)}</span></div></div>`);
     const tg = h(`<button class="btn sm">${p.enabled?'Enabled':'Disabled'}</button>`);
     tg.classList.toggle('primary', p.enabled);
     tg.onclick = async () => { await api(`/providers/${p.name}`,{method:'PATCH',body:{enabled:!p.enabled}}); viewSettings(v); };
-    row.appendChild(tg); pc.appendChild(row);
+    row.appendChild(tg); wrap.appendChild(row);
+
+    const fields = PROVIDER_CONFIG[p.name];
+    if (fields) {
+      const cfgForm = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:8px;margin-top:8px"></div>');
+      for (const [key, label, type] of fields) {
+        const f = h(`<label class="field" style="font-size:12px">${label}</label>`);
+        const inp = h(`<input type="${type==='password'?'password':'text'}" value="${esc(p.config?.[key]??'')}" placeholder="(not set)" style="min-width:320px">`);
+        inp.dataset.cfg = key; f.appendChild(inp); cfgForm.appendChild(f);
+      }
+      const csave = h('<button class="btn sm primary" style="align-self:flex-start">Save</button>');
+      csave.onclick = async () => {
+        const config = {};
+        for (const el of cfgForm.querySelectorAll('[data-cfg]')) if (el.value.trim()) config[el.dataset.cfg] = el.value.trim();
+        await api(`/providers/${p.name}`, { method:'PATCH', body:{ config } }); toast('Saved');
+      };
+      cfgForm.appendChild(csave); wrap.appendChild(cfgForm);
+    }
+    pc.appendChild(wrap);
   }
   v.appendChild(pc);
 }

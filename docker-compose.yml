@@ -12,6 +12,9 @@ services:
       DOWNLOAD_CONCURRENCY: "4"
       DEFAULT_PACKAGING_MODE: volume  # volume | chapter
       DEFAULT_LANGUAGE: en
+      # Comics: ComicVine metadata key (free) + optional GetComics domain override.
+      # COMICVINE_API_KEY: "your-comicvine-key"
+      # GETCOMICS_BASE_URL: "https://getcomics.org"
       # AUTH_TOKEN: "set-me-to-require-auth"
     volumes:
       - ./mb-data:/data

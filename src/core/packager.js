@@ -56,6 +56,18 @@ export function chapterCbzName(mangaName, chapterNum) {
 }
 
 /**
+ * CBZ filename for a single comic issue, e.g. "Saga #001.cbz" — the convention
+ * Komga/Kavita/Tome parse for issues. Decimal issues (e.g. 1.5) are preserved.
+ */
+export function issueCbzName(seriesName, issueNum) {
+  const n = String(issueNum);
+  const padded = n.includes('.')
+    ? `${padNum(parseInt(n, 10), 3)}.${n.split('.')[1]}`
+    : padNum(parseInt(n, 10), 3);
+  return `${seriesName} #${padded}.cbz`;
+}
+
+/**
  * Build the ordered CBZ entry list: optional cover (sorts first), all chapter
  * pages renamed to ch{NNNN}_p{NNN}.ext, then ComicInfo.xml at the root.
  * `chapters` is a list of chapter numbers; `localChapters` maps number -> folder.

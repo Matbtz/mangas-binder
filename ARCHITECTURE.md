@@ -21,12 +21,24 @@ Tome handoff). Two deviations from the stack proposed below, both simplification
   the "less ambition" footprint; can be swapped later without touching the API.
 
 Also done: **notifications** (ntfy + Discord), **smart volume mapping**
-(extrapolation of untagged chapters via `core/mapping.js`), Docker healthcheck,
-and an automated test suite (`node --test`) covering mapping + volume packaging.
+(extrapolation of untagged chapters via `core/mapping.js`), **library reconciliation**
+(`core/library-scan.js`), Docker healthcheck, and an automated test suite
+(`node --test`) covering mapping + volume packaging + comics.
 
-Not yet done: import-existing-library, upgrade/dedupe beyond skip-if-exists.
-End-to-end download couldn't be exercised in CI (MangaDex blocks datacenter IPs);
-the offline pipeline (mapping/volume-completeness/CBZ/ComicInfo) is tested.
+**Comics support (ComicVine + GetComics).** Beyond manga, a series now has a
+`media_type` (`manga`|`comic`) and a `download_provider` distinct from its metadata
+`provider`. Comics pair **ComicVine** (metadata: volume=series, issue=chapter) with
+**GetComics** (files: whole-archive DDL). The GetComics archive is *extracted into the
+same page-staging layout* the MangaDex downloader produces (`download/archive-downloader.js`),
+so binder/packager/library-scan are shared verbatim. Comic-specific bits are isolated:
+`providers/comicvine.js`, `providers/getcomics.js`, the archive downloader, and
+media-type branches in `comicinfo.js` (Publisher, no `<Manga>`/`<BlackAndWhite>`) and
+`packager.js` (`Series #NNN.cbz`). Comics default to per-issue packaging.
+
+Not yet done: upgrade/dedupe beyond skip-if-exists; CBR (RAR) archive support.
+End-to-end download couldn't be exercised in CI (MangaDex blocks datacenter IPs;
+GetComics markup is volatile and untestable offline) — the offline pipeline
+(mapping/volume-completeness/CBZ/ComicInfo/archive-extract/HTML-parsers) is tested.
 
 ---
 
@@ -35,13 +47,14 @@ the offline pipeline (mapping/volume-completeness/CBZ/ComicInfo) is tested.
 | Project | What it is | Why we still build |
 |---|---|---|
 | **Suwayomi/Tachidesk** | Headless manga server w/ extension sources | Heavy (JVM); is its own reader, doesn't target Tome / volume-packaged CBZ |
-| **Kapowarr** | "Sonarr for comics" → CBZ | Comics (ComicVine/GCD), not manga sources |
-| **Mylar3** | Sonarr-like comic manager | Comics, indexer/torrent-oriented |
+| **Kapowarr** | "Sonarr for comics" → CBZ | Comics-only (ComicVine + GetComics); we reuse the same sources but in one manga+comics tool targeting Tome |
+| **Mylar3** | Sonarr-like comic manager | Comics-only, indexer/torrent-oriented; heavier setup |
 | **Mangal** | CLI manga → CBZ | No follow/auto-scan service, no library handoff |
 | **Komga / Kavita** | Library servers/readers | Consume CBZ; don't download |
 
-**Our niche:** manga-first acquisition that produces **Tome-ready, volume-packaged CBZs**
-with rich ComicInfo metadata — the one thing none of the above does cleanly for Tome.
+**Our niche:** one tool that acquires **both manga (MangaDex) and comics (ComicVine +
+GetComics)** and produces **reader-ready, volume/issue-packaged CBZs** with rich
+ComicInfo — a unified manga+comics "Sonarr" that hands off cleanly to Tome (or Komga/Kavita).
 
 > ⚠️ **Legal/ToS note.** Bulk-downloading from aggregator APIs generally violates their
 > terms (MangaDex's API terms forbid storing/redistributing and demand rate-limit respect).

@@ -8,13 +8,15 @@ import { getDb } from './db.js';
 // --- Series ----------------------------------------------------------------
 
 export function createSeries(s) {
-  const info = getDb().prepare(`
+  getDb().prepare(`
     INSERT INTO series
-      (provider, provider_series_id, title, sort_title, authors_json, artists_json,
+      (provider, provider_series_id, media_type, download_provider, publisher,
+       title, sort_title, authors_json, artists_json,
        description, genres_json, year, status, cover_path, language,
        monitored, monitor_mode, packaging_mode, total_volumes_hint)
     VALUES
-      (@provider, @provider_series_id, @title, @sort_title, @authors_json, @artists_json,
+      (@provider, @provider_series_id, @media_type, @download_provider, @publisher,
+       @title, @sort_title, @authors_json, @artists_json,
        @description, @genres_json, @year, @status, @cover_path, @language,
        @monitored, @monitor_mode, @packaging_mode, @total_volumes_hint)
     ON CONFLICT(provider, provider_series_id) DO UPDATE SET
@@ -22,6 +24,9 @@ export function createSeries(s) {
   `).run({
     provider: s.provider,
     provider_series_id: s.providerSeriesId,
+    media_type: s.mediaType ?? 'manga',
+    download_provider: s.downloadProvider ?? s.provider,
+    publisher: s.publisher ?? null,
     title: s.title,
     sort_title: s.sortTitle ?? s.title,
     authors_json: JSON.stringify(s.authors ?? []),

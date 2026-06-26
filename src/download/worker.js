@@ -7,6 +7,7 @@ import {
 import { getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
 import { downloadChapter, chapterStagingDir } from './downloader.js';
+import { downloadArchiveChapter } from './archive-downloader.js';
 import { bindChapter, bindVolume } from '../core/binder.js';
 import { resolveVolumes } from '../core/mapping.js';
 import { notifyImport, notifyError } from '../core/notify.js';
@@ -40,12 +41,15 @@ export async function runOnce({ limit = 200 } = {}) {
     await Promise.all(wanted.map(ch => limiter(async () => {
       const series = getSeries(ch.series_id);
       if (!series) return;
-      const provider = getProvider(series.provider);
+      // Files come from the download/archive provider (= metadata provider for manga).
+      const dlProvider = getProvider(series.download_provider || series.provider);
 
       setChapterState(ch.id, 'downloading', { error: null });
       bumpChapterAttempt(ch.id);
       try {
-        const { dir, pageCount } = await downloadChapter(provider, ch, { concurrency, dataSaver });
+        const { dir, pageCount } = dlProvider.capabilities.archive
+          ? await downloadArchiveChapter(dlProvider, series, ch)            // comics: whole CBZ/ZIP → pages
+          : await downloadChapter(dlProvider, ch, { concurrency, dataSaver }); // manga: page images
         setChapterState(ch.id, 'downloaded', { staging_path: dir, pages: pageCount });
         processed++;
 

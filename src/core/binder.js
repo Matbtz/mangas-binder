@@ -1,4 +1,4 @@
-import { buildEntries, volumeCbzName, chapterCbzName, downloadBuffer } from './packager.js';
+import { buildEntries, volumeCbzName, chapterCbzName, issueCbzName, downloadBuffer } from './packager.js';
 import { buildComicInfoXml } from './comicinfo.js';
 import { chapterStagingDir } from '../download/downloader.js';
 import { writeCbz, destPath } from './library.js';
@@ -12,6 +12,12 @@ import { writeCbz, destPath } from './library.js';
  */
 
 function parseSeries(series) {
+  const mediaType = series.media_type || 'manga';
+  const web = series.provider === 'mangadex'
+    ? `https://mangadex.org/title/${series.provider_series_id}`
+    : series.provider === 'comicvine'
+      ? `https://comicvine.gamespot.com/volume/4050-${series.provider_series_id}/`
+      : '';
   return {
     title: series.title,
     authors: JSON.parse(series.authors_json || '[]'),
@@ -19,22 +25,27 @@ function parseSeries(series) {
     genres: JSON.parse(series.genres_json || '[]'),
     description: series.description || '',
     year: series.year,
-    mangadexId: series.provider === 'mangadex' ? series.provider_series_id : undefined,
+    mediaType,
+    publisher: series.publisher || undefined,
+    web,
   };
 }
 
-function comicInfoFor(series, { volumeNum = '', chapterNum = null, calculated = false } = {}) {
+function comicInfoFor(series, { volumeNum = '', chapterNum = null, title = '', calculated = false } = {}) {
   const s = parseSeries(series);
   return buildComicInfoXml({
     series: s.title,
     volumeNum,
     number: chapterNum,
+    title,
     authors: s.authors,
     artists: s.artists,
     description: s.description,
     genres: s.genres,
     year: s.year,
-    mangadexId: s.mangadexId,
+    web: s.web,
+    publisher: s.publisher,
+    mediaType: s.mediaType,
     isCalculated: calculated,
     language: series.language || 'en',
   });
@@ -51,11 +62,13 @@ async function maybeCover(coverUrl) {
  */
 export async function bindChapter(series, chapter, { coverUrl = null } = {}) {
   const num = chapter.number;
+  const isComic = (series.media_type || 'manga') === 'comic';
   const localChapters = { [num]: chapterStagingDir(series.id, num) };
-  const comicInfoXml = comicInfoFor(series, { chapterNum: num });
+  const comicInfoXml = comicInfoFor(series, { chapterNum: num, title: chapter.title });
   const coverBuffer = await maybeCover(coverUrl);
   const entries = await buildEntries([num], localChapters, { comicInfoXml, coverBuffer });
-  const dest = destPath(series.title, chapterCbzName(series.title, num));
+  const fileName = isComic ? issueCbzName(series.title, num) : chapterCbzName(series.title, num);
+  const dest = destPath(series.title, fileName);
   return writeCbz(entries, dest);
 }
 

@@ -1,35 +1,49 @@
 # mangas-binder
 
-A lightweight, self-hosted **"Sonarr/Radarr for manga"**. Follow series, download
-chapters from configurable sources, bind them into **CBZ volumes with ComicInfo.xml
-+ cover**, and hand them off to a **[Tome](https://github.com/bndct-devops/tome)**
-library for reading.
+A lightweight, self-hosted **"Sonarr/Radarr for manga *and* comics"**. Follow
+series, download chapters/issues from configurable sources, bind them into **CBZ
+files with ComicInfo.xml + cover**, and hand them off to a
+**[Tome](https://github.com/bndct-devops/tome)** (or Komga/Kavita) library for reading.
 
-mangas-binder is the *acquisition + binding* half (the "Sonarr"); Tome is the
-*library + reader*. They talk through a shared folder — mangas-binder drops
-Tome-ready CBZs into Tome's Bindery inbox.
+mangas-binder is the *acquisition + binding* half (the "Sonarr"); the reader is
+the *library* half. They talk through a shared folder — mangas-binder drops
+reader-ready CBZs into the library's inbox.
 
-> ⚠️ **Personal archival tool.** Bulk-downloading from aggregator APIs generally
-> violates their terms of service. mangas-binder rate-limits politely and keeps
-> sources pluggable so you own that choice. Use responsibly.
+| Media | Metadata | Files | Unit → package |
+|-------|----------|-------|----------------|
+| **Manga** | MangaDex (+ MangaUpdates hint) | MangaDex pages | chapter → volume |
+| **Comics** | ComicVine | GetComics (DDL) | issue → collected volume |
+
+Comics work like manga with two differences: metadata comes from **ComicVine** and
+files from **GetComics** (the same source [Kapowarr](https://github.com/Casvt/Kapowarr)
+uses), and the unit is an **issue** packaged into a **collected volume** (rather
+than a chapter into a tankōbon). Comics default to **one CBZ per issue**.
+
+> ⚠️ **Personal archival tool.** Bulk-downloading from aggregator APIs/sites
+> generally violates their terms of service. mangas-binder rate-limits politely and
+> keeps sources pluggable so you own that choice. Use responsibly.
 
 ## Features
 
-- 🔎 **Follow series** from a source (MangaDex built in) via a simple web UI.
-- ⚙️ **Enable/disable sources** — pluggable provider interface.
-- ⬇️ **Downloader** fetches page images with concurrency, retry/backoff, resume.
+- 🔎 **Follow series** — manga from MangaDex, comics from ComicVine — via a web UI.
+- ⚙️ **Enable/disable sources** — pluggable provider interface (metadata vs. files).
+- ⬇️ **Downloader** fetches MangaDex page images *or* whole GetComics archives, with
+  concurrency, retry/backoff, resume. Comic archives are unpacked into the same
+  staging layout so the rest of the pipeline is shared.
 - 📦 **Binds to CBZ** with embedded `ComicInfo.xml` (Series, Number, Volume,
-  authors, genres, summary, `<Manga>Yes</Manga>` → Tome RTL) + volume cover.
-- 🗂️ **Packaging modes** per series: one CBZ **per chapter**, or wait until a
-  **volume is complete** and package the whole volume.
-- ⏱️ **Scheduler** scans every X hours for new chapters and processes the queue.
-- 🧩 **Tome-native** naming/layout so Tome ingests cleanly.
-- 🗺️ **Smart volume mapping** — provider-tagged volumes are authoritative; chapters
-  the source left untagged are assigned to *estimated* volumes (and flagged as such
-  in ComicInfo) so volume packaging still works for scanlations.
+  Publisher, authors, genres, summary; `<Manga>Yes</Manga>` → RTL for manga only)
+  + cover.
+- 🗂️ **Packaging modes** per series: one CBZ **per chapter/issue**, or wait until a
+  **volume is complete** and package the whole volume/collection.
+- ⏱️ **Scheduler** scans every X hours for new chapters/issues and processes the queue.
+- 🧩 **Reader-native** naming/layout (`Series Vol. NN.cbz`, `Series #NNN.cbz`).
+- 🗺️ **Smart volume mapping** — provider-tagged volumes are authoritative; units
+  the source left untagged are assigned to *estimated* volumes (flagged in
+  ComicInfo) so volume packaging still works for scanlations/issue runs.
 - 🔔 **Notifications** via **ntfy** and/or **Discord** when media is added (or on failures).
-- 📚 **Library reconciliation** — scans your existing Tome CBZ library, detects what
-  you already own (down to the chapter), and marks it so it's never re-downloaded.
+- 📚 **Library reconciliation** — scans your existing CBZ library, detects what you
+  already own (down to the chapter/issue, via MangaDex or ComicVine ids), marks it
+  so it's never re-downloaded, and surfaces owned-but-untracked series to follow.
 
 ## Quick start
 
@@ -79,15 +93,30 @@ All settings have env defaults (see `.env.example`) and most are editable live i
 the UI's **Settings** tab. Per-series monitor mode and packaging mode are set when
 following and editable on the series detail page.
 
+### Comics setup (ComicVine + GetComics)
+
+1. Get a free **ComicVine API key** at <https://comicvine.gamespot.com/api> and paste
+   it into **Settings → Sources → ComicVine** (or set `COMICVINE_API_KEY`). ComicVine
+   is the metadata source; it rate-limits ~200 requests/resource/hour, so we throttle.
+2. **GetComics** is enabled by default as the comic *file* source (DDL). You can override
+   its base URL in Settings if the site moves domains (`GETCOMICS_BASE_URL`).
+3. In **Add**, pick **ComicVine** as the source, search a series, and **Follow**. Comics
+   default to one CBZ **per issue**; switch to *collected volume* packaging if you prefer.
+
+> GetComics is a third-party site whose markup changes without notice. If comic
+> downloads stop resolving, the scraping lives in `src/providers/getcomics.js`
+> (`parseSearchResults` / `extractDownloadLinks`) and is the only place to fix.
+> Only **CBZ/ZIP** archives are supported — CBR (RAR) is rejected with a clear error.
+
 ### Library reconciliation (already-owned detection)
 
 mangas-binder scans your CBZ library to avoid re-fetching what you already have:
 
-- **What it reads:** for CBZs it produced, chapter membership is encoded in the page
-  names (`ch0012_p003.jpg`), and the series is matched via the MangaDex id stored in
-  ComicInfo's `<Web>` tag (falling back to the series title). The **volume comes from
-  the existing filename** (`… Vol. 05.cbz`) and is adopted as authoritative — so
-  volume boundaries snap to what's already in Tome.
+- **What it reads:** for CBZs it produced, chapter/issue membership is encoded in the
+  page names (`ch0012_p003.jpg`), and the series is matched via the MangaDex **or
+  ComicVine** id stored in ComicInfo's `<Web>` tag (falling back to the series title).
+  The **volume comes from the existing filename** (`… Vol. 05.cbz`) and is adopted as
+  authoritative — so volume boundaries snap to what's already in your library.
 - **What it does:** marks those chapters `imported` (pointing at the existing file),
   so the downloader/binder skip them entirely.
 - **When:** automatically when you follow a series and on every scheduler cycle;

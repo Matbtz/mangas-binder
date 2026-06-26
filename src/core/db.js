@@ -12,8 +12,11 @@ let db = null;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS series (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-  provider           TEXT NOT NULL,
+  provider           TEXT NOT NULL,                   -- metadata source (mangadex | comicvine)
   provider_series_id TEXT NOT NULL,
+  media_type         TEXT NOT NULL DEFAULT 'manga',   -- manga | comic
+  download_provider  TEXT,                            -- file source (mangadex | getcomics); defaults to provider
+  publisher          TEXT,                            -- comics: publisher (ComicVine)
   title              TEXT NOT NULL,
   sort_title         TEXT,
   authors_json       TEXT DEFAULT '[]',
@@ -26,7 +29,7 @@ CREATE TABLE IF NOT EXISTS series (
   language           TEXT NOT NULL DEFAULT 'en',
   monitored          INTEGER NOT NULL DEFAULT 1,
   monitor_mode       TEXT NOT NULL DEFAULT 'all',     -- all | future | none
-  packaging_mode     TEXT NOT NULL DEFAULT 'volume',  -- volume | chapter
+  packaging_mode     TEXT NOT NULL DEFAULT 'volume',  -- volume | chapter (per-issue for comics)
   total_volumes_hint INTEGER,
   last_scan_at       TEXT,
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
@@ -80,6 +83,19 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts);
 `;
 
+/**
+ * Add columns introduced after the initial schema to pre-existing databases.
+ * SQLite ALTER TABLE ADD COLUMN is idempotent only if we check first, so we
+ * compare against PRAGMA table_info. New installs already have them via SCHEMA.
+ */
+function migrate(database) {
+  const cols = database.prepare('PRAGMA table_info(series)').all().map(c => c.name);
+  const add = (name, ddl) => { if (!cols.includes(name)) database.exec(`ALTER TABLE series ADD COLUMN ${ddl}`); };
+  add('media_type', "media_type TEXT NOT NULL DEFAULT 'manga'");
+  add('download_provider', 'download_provider TEXT');
+  add('publisher', 'publisher TEXT');
+}
+
 export function getDb() {
   if (db) return db;
   mkdirSync(path.dirname(config.dbPath), { recursive: true });
@@ -87,6 +103,7 @@ export function getDb() {
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

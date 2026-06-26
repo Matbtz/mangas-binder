@@ -1,4 +1,4 @@
-import { getProvider } from '../providers/index.js';
+import { getProvider, defaultDownloadProvider } from '../providers/index.js';
 import { provider as mangaupdates } from '../providers/mangaupdates.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
@@ -13,26 +13,40 @@ import { logHistory } from './db.js';
  * total-volume hint from MangaUpdates, persist it, then run an initial refresh
  * to populate its chapter list.
  *
- * @param {string} providerName
+ * The follow (metadata) provider only needs `capabilities.metadata`; the *files*
+ * come from a separate download/archive provider (same as the metadata provider
+ * for manga/MangaDex; GetComics for ComicVine comics).
+ *
+ * @param {string} providerName     metadata provider (mangadex | comicvine)
  * @param {string} providerSeriesId
- * @param {{ monitorMode?, packagingMode?, language? }} opts
+ * @param {{ monitorMode?, packagingMode?, language?, downloadProvider? }} opts
  */
 export async function followSeries(providerName, providerSeriesId, opts = {}) {
   const provider = getProvider(providerName);
   if (!isProviderEnabled(providerName)) throw new Error(`Provider ${providerName} is disabled`);
-  if (!provider.capabilities.download) throw new Error(`Provider ${providerName} cannot download`);
+  if (!provider.capabilities.metadata) throw new Error(`Provider ${providerName} has no metadata`);
+
+  const mediaType = provider.mediaType || 'manga';
+  const downloadProvider = opts.downloadProvider || defaultDownloadProvider(mediaType);
 
   const details = await provider.getSeries(providerSeriesId);
 
+  // Volume-count hint (for estimated grouping) only applies to manga via MangaUpdates.
   let totalVolumesHint = null;
-  if (isProviderEnabled('mangaupdates')) {
+  if (mediaType === 'manga' && isProviderEnabled('mangaupdates')) {
     const mu = await mangaupdates.getTotalVolumesForTitle(details.title).catch(() => null);
     totalVolumesHint = mu?.totalVolumes ?? null;
   }
 
+  // Comics default to per-issue packaging (collected editions aren't deterministic).
+  const defaultPackaging = mediaType === 'comic' ? 'chapter' : getSetting('defaultPackagingMode', 'volume');
+
   const series = createSeries({
     provider: providerName,
     providerSeriesId,
+    mediaType,
+    downloadProvider,
+    publisher: details.publisher ?? null,
     title: details.title,
     authors: details.authors,
     artists: details.artists,
@@ -43,7 +57,7 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
     language: opts.language || getSetting('defaultLanguage', 'en'),
     monitored: true,
     monitorMode: opts.monitorMode || getSetting('defaultMonitorMode', 'all'),
-    packagingMode: opts.packagingMode || getSetting('defaultPackagingMode', 'volume'),
+    packagingMode: opts.packagingMode || defaultPackaging,
     totalVolumesHint,
   });
 

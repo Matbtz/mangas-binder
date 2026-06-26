@@ -21,6 +21,7 @@ import { logHistory } from './db.js';
 const CBZ_PAGE_RE = /^ch(\d+(?:\.\d+)?)_p\d+/i;
 const FILENAME_VOL_RE = /\bvol\.?\s*0*(\d+(?:\.\d+)?)/i;
 const WEB_ID_RE = /mangadex\.org\/title\/([0-9a-f-]{36})/i;
+const COMICVINE_ID_RE = /comicvine\.gamespot\.com\/volume\/4050-(\d+)/i;
 
 function walkCbz(dir, out = []) {
   if (!existsSync(dir)) return out;
@@ -42,7 +43,7 @@ function tagText(xml, tag) {
  * @returns {{ series, mangadexId, volume, chapters: string[] }}
  */
 export function readCbzInfo(filePath) {
-  let series = null, mangadexId = null, chapters = [];
+  let series = null, mangadexId = null, comicvineId = null, chapters = [];
   try {
     const zip = new AdmZip(filePath);
     const entries = zip.getEntries();
@@ -52,6 +53,7 @@ export function readCbzInfo(filePath) {
       series = tagText(xml, 'Series');
       const web = tagText(xml, 'Web');
       mangadexId = web?.match(WEB_ID_RE)?.[1] || null;
+      comicvineId = web?.match(COMICVINE_ID_RE)?.[1] || null;
     }
     const found = new Set();
     for (const e of entries) {
@@ -64,7 +66,14 @@ export function readCbzInfo(filePath) {
   const volMatch = path.basename(filePath).match(FILENAME_VOL_RE);
   const volume = volMatch ? String(parseFloat(volMatch[1])) : null;
   if (!series) series = path.basename(filePath).replace(/\.cbz$/i, '');
-  return { series, mangadexId, volume, chapters };
+  return { series, mangadexId, comicvineId, volume, chapters };
+}
+
+/** The provider id encoded in a CBZ that identifies a given followed series. */
+function providerIdFor(series, info) {
+  if (series.provider === 'mangadex') return info.mangadexId;
+  if (series.provider === 'comicvine') return info.comicvineId;
+  return null;
 }
 
 /**
@@ -77,48 +86,52 @@ export function readCbzInfo(filePath) {
 export function scanLibrary({ seriesId } = {}) {
   const all = listSeries();
 
+  // The provider-specific id a CBZ would carry to identify this series.
+  const providerKeys = (s) => {
+    const keys = [`title:${sanitize(s.title).toLowerCase()}`];
+    keys.push(`${s.provider}:${s.provider_series_id}`);
+    return keys;
+  };
+  // The keys a scanned file could match against (it carries one web id + a title).
+  const fileKeys = (info) => {
+    const keys = [`title:${sanitize(info.series).toLowerCase()}`];
+    if (info.mangadexId) keys.push(`mangadex:${info.mangadexId}`);
+    if (info.comicvineId) keys.push(`comicvine:${info.comicvineId}`);
+    return keys;
+  };
+
   // Build lookup tables for all tracked series (not just the target) so we can
   // exclude them from the untracked suggestions.
-  const allByMangadexId = new Map();
-  const allByTitle = new Map();
-  for (const s of all) {
-    if (s.provider === 'mangadex') allByMangadexId.set(s.provider_series_id, s);
-    allByTitle.set(sanitize(s.title).toLowerCase(), s);
-  }
+  const allByKey = new Map();
+  for (const s of all) for (const k of providerKeys(s)) allByKey.set(k, s);
 
   const targets = seriesId ? [getSeries(seriesId)].filter(Boolean) : all;
-  if (!targets.length && !seriesId) {
-    // No series followed yet — still discover untracked
-  }
-
-  const byMangadexId = new Map(targets
-    .filter(s => s.provider === 'mangadex')
-    .map(s => [s.provider_series_id, s]));
-  const byTitle = new Map(targets.map(s => [sanitize(s.title).toLowerCase(), s]));
+  const byKey = new Map();
+  for (const s of targets) for (const k of providerKeys(s)) byKey.set(k, s);
 
   const files = [...new Set(config.libraryScanDirs.flatMap(d => walkCbz(d)))];
   const chaptersBySeries = new Map(); // seriesId -> Map(number -> row)
   let matchedFiles = 0, markedChapters = 0;
   const perSeries = {};
 
-  // Accumulate untracked: keyed by mangadexId (or sanitized title as fallback)
-  const untrackedMap = new Map(); // key -> { title, mangadexId, volumes: Set, files: [] }
+  // Accumulate untracked: keyed by web id (or sanitized title as fallback)
+  const untrackedMap = new Map(); // key -> { title, mangadexId, comicvineId, volumes: Set, files: [] }
 
   for (const file of files) {
     const info = readCbzInfo(file);
+    const keys = fileKeys(info);
 
-    // Check if this file belongs to any tracked series.
-    const match = (info.mangadexId && byMangadexId.get(info.mangadexId))
-      || byTitle.get(sanitize(info.series).toLowerCase());
+    // Prefer a web-id match over the title fallback (web id is last in keys order).
+    let match = null;
+    for (const k of keys) { if (byKey.has(k)) { match = byKey.get(k); break; } }
 
     if (!match) {
       // Only surface as untracked if not tracked at all (not just outside current target).
-      const isTracked = (info.mangadexId && allByMangadexId.has(info.mangadexId))
-        || allByTitle.has(sanitize(info.series).toLowerCase());
+      const isTracked = keys.some(k => allByKey.has(k));
       if (!isTracked) {
-        const key = info.mangadexId || sanitize(info.series).toLowerCase();
+        const key = info.mangadexId || info.comicvineId || sanitize(info.series).toLowerCase();
         if (!untrackedMap.has(key)) {
-          untrackedMap.set(key, { title: info.series, mangadexId: info.mangadexId, volumes: new Set(), files: [] });
+          untrackedMap.set(key, { title: info.series, mangadexId: info.mangadexId, comicvineId: info.comicvineId, volumes: new Set(), files: [] });
         }
         const entry = untrackedMap.get(key);
         if (info.volume) entry.volumes.add(info.volume);
@@ -158,6 +171,8 @@ export function scanLibrary({ seriesId } = {}) {
   const untracked = [...untrackedMap.values()].map(e => ({
     title: e.title,
     mangadexId: e.mangadexId,
+    comicvineId: e.comicvineId,
+    mediaType: e.comicvineId ? 'comic' : 'manga',
     volumes: [...e.volumes].sort((a, b) => parseFloat(a) - parseFloat(b)),
     fileCount: e.files.length,
   }));

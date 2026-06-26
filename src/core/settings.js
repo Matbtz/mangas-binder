@@ -34,6 +34,17 @@ export function ensureSeeded() {
 
   const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, 1)');
   for (const p of allProviders()) ins.run(p.name);
+
+  // Seed provider config from env on first run (Docker convenience). Existing
+  // values set in the UI are never overwritten.
+  if (process.env.COMICVINE_API_KEY) {
+    const cur = getProviderConfig('comicvine');
+    if (!cur.apikey) setProviderConfig('comicvine', { ...cur, apikey: process.env.COMICVINE_API_KEY });
+  }
+  if (process.env.GETCOMICS_BASE_URL) {
+    const cur = getProviderConfig('getcomics');
+    if (!cur.baseUrl) setProviderConfig('getcomics', { ...cur, baseUrl: process.env.GETCOMICS_BASE_URL });
+  }
   seeded = true;
 }
 
@@ -67,6 +78,12 @@ export function getProviderStates() {
 export function isProviderEnabled(name) {
   const row = getDb().prepare('SELECT enabled FROM providers WHERE name = ?').get(name);
   return row ? !!row.enabled : false;
+}
+
+/** A provider's persisted config object (e.g. ComicVine api key). */
+export function getProviderConfig(name) {
+  const row = getDb().prepare('SELECT config_json FROM providers WHERE name = ?').get(name);
+  return row ? JSON.parse(row.config_json) : {};
 }
 
 export function setProviderEnabled(name, enabled) {
