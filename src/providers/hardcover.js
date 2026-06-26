@@ -13,14 +13,17 @@ export const provider = {
   capabilities: { download: false, metadata: true },
 
   async search(query) {
-    const res = await graphqlQuery(SEARCH_QUERY, { query: `%${query}%` });
-    const books = res?.data?.books || [];
-    return books.map(b => ({
-      id: String(b.id),
-      title: b.title,
-      year: b.release_year ?? null,
-      cover: b.image?.url || null,
-    }));
+    const res = await graphqlQuery(SEARCH_QUERY, { query });
+    const hits = res?.data?.search?.results?.hits || [];
+    return hits.map(h => {
+      const b = h.document || {};
+      return {
+        id: String(b.id),
+        title: b.title || query,
+        year: b.release_year ?? null,
+        cover: b.image?.url || null,
+      };
+    });
   },
 
   async getSeries(id) {
@@ -56,9 +59,9 @@ export const provider = {
     let best = null;
     try {
       const clean = String(title).replace(/(\bvol|\btome|\bch|#)\.?\s*\d+.*/i, '').trim() || title;
-      const res = await graphqlQuery(CLASSIFY_QUERY, { query: `%${clean}%` });
-      const books = res?.data?.books || [];
-      if (books.length > 0) best = books[0];
+      const res = await graphqlQuery(SEARCH_QUERY, { query: clean });
+      const hits = res?.data?.search?.results?.hits || [];
+      if (hits.length > 0) best = hits[0].document;
     } catch { /* if Hardcover search times out or fails, fall back to heuristic */ }
 
     const desc = (best?.description || '').toLowerCase();
@@ -98,9 +101,9 @@ export const provider = {
   },
 
   async testConnection() {
-    const res = await graphqlQuery(CLASSIFY_QUERY, { query: '%batman%' });
-    const books = res?.data?.books || [];
-    return { message: `Reached Hardcover GraphQL, API key valid (${books.length} sample books returned).` };
+    const res = await graphqlQuery(SEARCH_QUERY, { query: 'batman' });
+    const hits = res?.data?.search?.results?.hits || [];
+    return { message: `Reached Hardcover GraphQL, API key valid (${hits.length} sample books returned).` };
   }
 };
 
@@ -114,7 +117,7 @@ function getApiKey() {
 async function graphqlQuery(query, variables = {}) {
   const token = getApiKey();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
+  const timer = setTimeout(() => controller.abort(), 12000);
   try {
     const res = await fetch(ENDPOINT, {
       method: 'POST',
@@ -138,12 +141,8 @@ async function graphqlQuery(query, variables = {}) {
 
 const SEARCH_QUERY = `
 query SearchBooks($query: String!) {
-  books(where: { title: { _ilike: $query } }, limit: 10) {
-    id
-    title
-    slug
-    description
-    release_date
+  search(query: $query) {
+    results
   }
 }
 `;
@@ -154,21 +153,10 @@ query GetBook($id: Int!) {
     id
     title
     description
-    release_date
+    release_year
     contributions {
       author { name }
     }
-  }
-}
-`;
-
-const CLASSIFY_QUERY = `
-query ClassifyBooks($query: String!) {
-  books(where: { title: { _ilike: $query } }, limit: 5) {
-    id
-    title
-    slug
-    description
   }
 }
 `;
