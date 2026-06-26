@@ -1,7 +1,7 @@
 import { getProvider, describeProviders } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
 import { searchVolumes } from '../../providers/comicvine.js';
-import { hardcover } from '../../providers/hardcover.js';
+import { provider as hardcover } from '../../providers/hardcover.js';
 import {
   listSeries, getSeries, updateSeries, deleteSeries,
   listChaptersForSeries, getChapter, setChapterState, bulkSetChapterState,
