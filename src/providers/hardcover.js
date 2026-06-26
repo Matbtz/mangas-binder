@@ -106,7 +106,7 @@ export const provider = {
 
 function getApiKey() {
   const cfg = getProviderConfig('hardcover') || {};
-  const key = cfg.apikey || process.env.HARDCOVER_API_KEY;
+  const key = process.env.HARDCOVER_API_KEY || cfg.apikey;
   if (!key) throw new Error('Hardcover API key not set — configure HARDCOVER_API_KEY or add it in Settings → Sources');
   return String(key).replace(/^bearer\s+/i, '').trim();
 }

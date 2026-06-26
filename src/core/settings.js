@@ -42,15 +42,15 @@ export function ensureSeeded() {
   // values set in the UI are never overwritten.
   if (process.env.COMICVINE_API_KEY) {
     const cur = getProviderConfig('comicvine');
-    if (!cur.apikey) setProviderConfig('comicvine', { ...cur, apikey: process.env.COMICVINE_API_KEY });
+    if (cur.apikey !== process.env.COMICVINE_API_KEY) setProviderConfig('comicvine', { ...cur, apikey: process.env.COMICVINE_API_KEY });
   }
   if (process.env.GETCOMICS_BASE_URL) {
     const cur = getProviderConfig('getcomics');
-    if (!cur.baseUrl) setProviderConfig('getcomics', { ...cur, baseUrl: process.env.GETCOMICS_BASE_URL });
+    if (cur.baseUrl !== process.env.GETCOMICS_BASE_URL) setProviderConfig('getcomics', { ...cur, baseUrl: process.env.GETCOMICS_BASE_URL });
   }
   if (process.env.HARDCOVER_API_KEY) {
     const cur = getProviderConfig('hardcover');
-    if (!cur.apikey) setProviderConfig('hardcover', { ...cur, apikey: process.env.HARDCOVER_API_KEY });
+    if (cur.apikey !== process.env.HARDCOVER_API_KEY) setProviderConfig('hardcover', { ...cur, apikey: process.env.HARDCOVER_API_KEY });
   }
   seeded = true;
 }
