@@ -103,6 +103,7 @@ export async function runOnce({ limit = 200 } = {}) {
       setChapterState(ch.id, 'downloading', { error: null, prog_done: 0, prog_total: null, started_at: new Date().toISOString() });
       bumpChapterAttempt(ch.id);
       debugLog('chapter.started', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} started downloading (attempts: ${ch.attempts ?? 0})` });
+      let primaryNotAvailable = false;
       try {
         const customUrl = ch.download_url;
         const isArchiveUrl = customUrl && (customUrl.startsWith('http') || customUrl.endsWith('.cbz') || customUrl.endsWith('.zip'));
@@ -117,9 +118,6 @@ export async function runOnce({ limit = 200 } = {}) {
           setChapterProgress(ch.id, done, total);
         };
         let dir, pageCount;
-        // Track whether MangaDex flagged the chapter as permanently unavailable in
-        // EN/FR. Used below to skip retries and settle on `not_found` instead.
-        let primaryNotAvailable = false;
         if (useArchive) {
           ({ dir, pageCount } = await downloadArchiveChapter(activeProvider, series, ch, { signal: controller.signal })); // comics: whole CBZ/ZIP → pages
         } else {
