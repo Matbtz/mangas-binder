@@ -539,6 +539,7 @@ async function showDetail(id) {
       } },
     { label: 'Retry all failed', icon: '↻', onClick: async () => { const r = await api(`/series/${id}/retry-failed`, { method:'POST' }); toast(`Re-queued ${r.retried||0} failed`); startLive(); showDetail(id); } },
     { label: 'Cancel all downloads', icon: '✕', danger: true, onClick: async () => { const r = await api(`/series/${id}/cancel`, { method:'POST' }); toast(`Cancelled ${r.cancelled||0}`); showDetail(id); } },
+    { label: 'Delete all files', icon: '🗑', danger: true, onClick: () => openDeleteFilesModal({ seriesId: id, seriesTitle: s.title, scope: 'all', onDeleted: () => showDetail(id) }) },
   ], 'btn sm');
   hero.querySelector('#hd-more-slot').replaceWith(moreMenu);
 
@@ -552,8 +553,20 @@ async function showDetail(id) {
   };
 
   const modes = hero.querySelector('#modes');
+  // Monitor mode: supports 'some' (auto-set when volumes/chapters are individually tracked)
+  const monitorWrap = h('<label class="field">Monitor</label>');
+  const monitorOpts = s.monitorMode === 'some' ? ['some', 'all', 'future', 'none'] : ['all', 'future', 'none'];
+  const monitorSel = h(`<select>${monitorOpts.map(o => `<option value="${o}" ${o === s.monitorMode ? 'selected' : ''}${o === 'some' ? ' style="color:var(--muted)"' : ''}>${o}</option>`).join('')}</select>`);
+  monitorSel.onchange = async () => {
+    const v = monitorSel.value;
+    if (v === 'some') { monitorSel.value = s.monitorMode; return; }
+    await api(`/series/${id}`, { method:'PATCH', body:{ monitorMode: v } });
+    toast('Saved');
+    showDetail(id); // chapter states may have cascaded — full refresh
+  };
+  monitorWrap.appendChild(monitorSel);
   modes.append(
-    field('Monitor',   ['all','future','none'],   s.monitorMode,   async v => { await api(`/series/${id}`,{method:'PATCH',body:{monitorMode:v}});   toast('Saved'); }),
+    monitorWrap,
     field('Packaging', ['volume','chapter'],       s.packagingMode, async v => { await api(`/series/${id}`,{method:'PATCH',body:{packagingMode:v}}); toast('Saved'); }),
     field('Language',  ['en','fr','ja','es','pt'], s.language,      async v => { await api(`/series/${id}`,{method:'PATCH',body:{language:v}});      toast('Saved'); })
   );
@@ -616,6 +629,12 @@ async function showDetail(id) {
       const redl = h('<button class="btn sm icon" title="Re-download (overwrites the CBZ)">⟲</button>');
       redl.onclick = async () => { if (confirm(`Re-download ${chUnit} ${c.number}? This overwrites the existing file.`)) { await api(`/chapters/${c.id}/redownload`, { method:'POST' }); toast('Re-downloading…'); startLive(); liveTick(); } };
       act.append(packageChBtn(c), redl);
+      // Delete individual chapter file (only for real paths, not virtual volume markers)
+      if (c.cbzPath && !c.cbzPath.startsWith('included_in_vol_')) {
+        const delBtn = h('<button class="btn sm danger icon" title="Delete file from disk">🗑</button>');
+        delBtn.onclick = () => openDeleteFilesModal({ seriesId: id, seriesTitle: s.title, scope: 'chapter', chapterId: c.id, onDeleted: () => liveTick() });
+        act.append(delBtn);
+      }
     } else if (c.state === 'downloaded') {
       act.append(packageChBtn(c), cancelChBtn(c));
     } else if (c.state === 'downloading') {
@@ -623,16 +642,18 @@ async function showDetail(id) {
     } else if (c.state === 'bindery') {
       act.append(h('<span class="muted" style="font-size:11px;color:#cbb0f7">In Bindery</span>'));
     } else if (c.state === 'wanted' || c.state === 'queued') {
-      const skip = h('<button class="btn sm" title="Cancel / skip">Skip</button>');
-      skip.onclick = async () => { await api(`/chapters/${c.id}/cancel`, { method:'POST' }); toast(`${chUnit} ${c.number} skipped`); liveTick(); };
+      // Use track endpoint so manual skips flip series to 'some'
+      const skip = h('<button class="btn sm" title="Cancel / skip tracking">Skip</button>');
+      skip.onclick = async () => { await api(`/chapters/${c.id}/track`, { method:'POST', body:{ state:'skipped' } }); toast(`${chUnit} ${c.number} skipped`); liveTick(); };
       act.append(skip);
     } else if (c.state === 'failed') {
       const retry = h('<button class="btn sm primary" title="Retry">↻ Retry</button>');
       retry.onclick = async () => { await api(`/chapters/${c.id}/retry`, { method:'POST' }); toast(`Retrying ${chUnit} ${c.number}…`); startLive(); liveTick(); };
       act.append(retry);
     } else if (c.state === 'skipped') {
+      // Use track endpoint so manual wants flip series to 'some'
       const want = h('<button class="btn sm primary" title="Mark as wanted">➕ Want</button>');
-      want.onclick = async () => { await api(`/chapters/${c.id}/retry`, { method:'POST' }); toast(`${chUnit} ${c.number} wanted`); startLive(); liveTick(); };
+      want.onclick = async () => { await api(`/chapters/${c.id}/track`, { method:'POST', body:{ state:'wanted' } }); toast(`${chUnit} ${c.number} wanted`); startLive(); liveTick(); };
       act.append(want);
     }
     act.append(searchBtn);
@@ -852,6 +873,15 @@ async function showDetail(id) {
       });
     };
     actsContainer.append(searchVolBtn);
+    // Delete volume files button (only for named volumes that have imported chapters)
+    if (vk !== 'none' && imported > 0) {
+      const delVolBtn = h('<button class="btn sm danger icon" title="Delete all local files for this volume">🗑</button>');
+      delVolBtn.onclick = (e) => {
+        e.stopPropagation();
+        openDeleteFilesModal({ seriesId: id, seriesTitle: s.title, scope: 'volume', volume: vk, onDeleted: () => showDetail(id) });
+      };
+      actsContainer.append(delVolBtn);
+    }
 
     // Chapter table (inside collapsible body)
     const tbl = h(`<table class="chapter-table">
@@ -912,7 +942,17 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
   const existing = document.getElementById('manage-files-modal');
   if (existing) existing.remove();
 
-  const chUnit = chapters.length && chapters[0]?.volume !== undefined ? 'issue' : 'chapter';
+  // Pre-compute volume groups for volumes mode
+  const volGroups = new Map(); // vk → { label, chapters, importedCount, existingFile }
+  for (const c of chapters) {
+    const vk = c.volume != null ? String(c.volume) : 'none';
+    if (!volGroups.has(vk)) volGroups.set(vk, { label: vk === 'none' ? 'Unknown Volume' : `Volume ${vk}`, chapters: [], importedCount: 0, existingFile: '' });
+    const g = volGroups.get(vk);
+    g.chapters.push(c);
+    if (c.state === 'imported') g.importedCount++;
+    if (!g.existingFile && c.cbzPath && c.state === 'imported') g.existingFile = c.cbzPath;
+  }
+  const sortedVolKeys = [...volGroups.keys()].sort((a, b) => { if (a === 'none') return 1; if (b === 'none') return -1; return parseFloat(a) - parseFloat(b); });
 
   const modal = h(`<div id="manage-files-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.82);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
     <div style="background:var(--panel);border:1px solid var(--line2);border-radius:16px;width:100%;max-width:1100px;display:flex;flex-direction:column;gap:0;box-shadow:0 20px 60px rgba(0,0,0,0.8);margin:auto">
@@ -923,14 +963,18 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
           <button class="btn sm" id="mf-close">✕ Close</button>
         </div>
       </div>
-      <div style="padding:16px 22px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
-        <label class="field" style="flex:1;min-width:260px">Directory to scan
+      <div style="padding:12px 22px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <label class="field" style="flex:1;min-width:220px">Directory to scan
           <input id="mf-dir" type="text" placeholder="/path/to/your/files" value="${esc(folderPath||'')}" style="background:var(--panel2);border:1px solid var(--line2);color:var(--fg);padding:8px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%;margin-top:4px">
         </label>
         <button class="btn sm" id="mf-browse">📁 Browse</button>
-        <button class="btn sm primary" id="mf-scan">🔍 Scan directory</button>
-        <button class="btn sm acc2" id="mf-auto" disabled title="Auto-fill mappings based on filenames">✨ Auto-match all</button>
-        <button class="btn sm ok" id="mf-apply" disabled>✓ Apply mappings</button>
+        <button class="btn sm primary" id="mf-scan">🔍 Scan</button>
+        <div style="display:flex;gap:0;border:1px solid var(--line2);border-radius:8px;overflow:hidden;align-self:flex-end">
+          <button id="mf-tab-ch" style="background:var(--acc);color:#fff;border:none;padding:6px 14px;font-size:13px;cursor:pointer;font-family:inherit">📄 Chapters</button>
+          <button id="mf-tab-vol" style="background:transparent;color:var(--fg);border:none;border-left:1px solid var(--line2);padding:6px 14px;font-size:13px;cursor:pointer;font-family:inherit">📚 Volumes</button>
+        </div>
+        <button class="btn sm acc2" id="mf-auto" disabled title="Auto-fill mappings based on filenames">✨ Auto-match</button>
+        <button class="btn sm ok" id="mf-apply" disabled>✓ Apply</button>
       </div>
       <div id="mf-file-strip" style="display:none;padding:10px 22px;border-bottom:1px solid var(--line);background:var(--panel2)">
         <span class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Files found</span>
@@ -938,15 +982,7 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
       </div>
       <div style="overflow-y:auto;max-height:60vh">
         <table style="width:100%;border-collapse:collapse">
-          <thead style="position:sticky;top:0;background:var(--panel2);z-index:1">
-            <tr>
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);width:60px">#</th>
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted)">Title</th>
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);width:110px">Status</th>
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted)">Map to file</th>
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);width:40px"></th>
-            </tr>
-          </thead>
+          <thead id="mf-thead" style="position:sticky;top:0;background:var(--panel2);z-index:1"></thead>
           <tbody id="mf-tbody"></tbody>
         </table>
       </div>
@@ -954,102 +990,153 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
   </div>`);
 
   // State
-  let availableFiles = []; // { name, path }
-  let mappings = new Map(); // chapterId → filePath
-  const pendingRow = new Map(); // chapterId → { selectEl, clearBtn }
+  let mode = 'chapters';
+  let availableFiles = [];
+  let mappings    = new Map(); // chapterId → filePath
+  let volMappings = new Map(); // volumeKey → filePath
+  const pendingRow    = new Map(); // chapterId → {selectEl, clearBtn, reasonEl}
+  const volPendingRow = new Map(); // volumeKey → {selectEl, clearBtn, reasonEl}
 
-  const statusEl = modal.querySelector('#mf-status');
-  const autoBtn = modal.querySelector('#mf-auto');
-  const applyBtn = modal.querySelector('#mf-apply');
+  const statusEl  = modal.querySelector('#mf-status');
+  const autoBtn   = modal.querySelector('#mf-auto');
+  const applyBtn  = modal.querySelector('#mf-apply');
   const fileStrip = modal.querySelector('#mf-file-strip');
   const fileListEl = modal.querySelector('#mf-file-list');
-  const tbody = modal.querySelector('#mf-tbody');
-  const dirInput = modal.querySelector('#mf-dir');
+  const tbody     = modal.querySelector('#mf-tbody');
+  const thead     = modal.querySelector('#mf-thead');
+  const dirInput  = modal.querySelector('#mf-dir');
+  const tabChBtn  = modal.querySelector('#mf-tab-ch');
+  const tabVolBtn = modal.querySelector('#mf-tab-vol');
+
+  const TH = 'padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted)';
 
   const updateApplyBtn = () => {
-    applyBtn.disabled = mappings.size === 0;
-    applyBtn.textContent = mappings.size > 0 ? `✓ Apply ${mappings.size} mapping${mappings.size > 1 ? 's' : ''}` : '✓ Apply mappings';
+    const count = mode === 'chapters' ? mappings.size : volMappings.size;
+    applyBtn.disabled = count === 0;
+    applyBtn.textContent = count > 0 ? `✓ Apply ${count} mapping${count > 1 ? 's' : ''}` : '✓ Apply';
   };
 
   const buildFileOptions = (selectedPath = '') => {
     let opts = `<option value="">— not mapped —</option>`;
-    for (const f of availableFiles) {
-      opts += `<option value="${esc(f.path)}" ${f.path === selectedPath ? 'selected' : ''}>${esc(f.name)}</option>`;
-    }
+    for (const f of availableFiles) opts += `<option value="${esc(f.path)}" ${f.path === selectedPath ? 'selected' : ''}>${esc(f.name)}</option>`;
     return opts;
   };
 
+  // --- Chapters mode ---
   const setRowMapping = (chapterId, filePath, reason = '') => {
     mappings.set(chapterId, filePath);
-    const { selectEl, clearBtn, reasonEl } = pendingRow.get(chapterId) || {};
-    if (selectEl) selectEl.value = filePath;
-    if (clearBtn) clearBtn.style.display = filePath ? '' : 'none';
-    if (reasonEl) { reasonEl.textContent = reason ? `✨ ${reason}` : ''; reasonEl.style.color = 'var(--acc)'; }
+    const r = pendingRow.get(chapterId) || {};
+    if (r.selectEl) r.selectEl.value = filePath;
+    if (r.clearBtn) r.clearBtn.style.display = filePath ? '' : 'none';
+    if (r.reasonEl) { r.reasonEl.textContent = reason ? `✨ ${reason}` : ''; r.reasonEl.style.color = 'var(--acc)'; }
     updateApplyBtn();
   };
-
   const clearRowMapping = (chapterId) => {
     mappings.delete(chapterId);
-    const { selectEl, clearBtn, reasonEl } = pendingRow.get(chapterId) || {};
-    if (selectEl) selectEl.value = '';
-    if (clearBtn) clearBtn.style.display = 'none';
-    if (reasonEl) reasonEl.textContent = '';
+    const r = pendingRow.get(chapterId) || {};
+    if (r.selectEl) r.selectEl.value = '';
+    if (r.clearBtn) r.clearBtn.style.display = 'none';
+    if (r.reasonEl) r.reasonEl.textContent = '';
     updateApplyBtn();
   };
 
-  // Build chapter rows
-  const buildRows = () => {
+  const buildChapterRows = () => {
+    thead.innerHTML = `<tr><th style="${TH};width:60px">#</th><th style="${TH}">Title</th><th style="${TH};width:110px">Status</th><th style="${TH}">Map to file</th><th style="${TH};width:40px"></th></tr>`;
     tbody.innerHTML = '';
+    pendingRow.clear();
     for (const c of chapters) {
-      const statusHtml = c.state === 'imported'
-        ? `<span class="status-badge imported" style="font-size:10px">✓ Available</span>`
-        : c.state === 'wanted'
-        ? `<span class="status-badge wanted" style="font-size:10px">● Wanted</span>`
-        : c.state === 'skipped'
-        ? `<span class="status-badge skipped" style="font-size:10px">⏸ Skipped</span>`
+      const statusHtml = c.state === 'imported' ? `<span class="status-badge imported" style="font-size:10px">✓ Available</span>`
+        : c.state === 'wanted' ? `<span class="status-badge wanted" style="font-size:10px">● Wanted</span>`
+        : c.state === 'skipped' ? `<span class="status-badge skipped" style="font-size:10px">⏸ Skipped</span>`
         : `<span class="status-badge queued" style="font-size:10px">${esc(c.state)}</span>`;
-
-      const hasCurrent = mappings.has(c.id);
-      const currentFile = hasCurrent ? mappings.get(c.id) : (c.state === 'imported' && c.cbzPath ? c.cbzPath : '');
-
+      const currentFile = mappings.has(c.id) ? mappings.get(c.id) : (c.state === 'imported' && c.cbzPath ? c.cbzPath : '');
       const tr = h(`<tr data-chid="${c.id}" style="border-bottom:1px solid var(--line)">
         <td style="padding:8px 12px;color:var(--muted);font-weight:600;font-size:13px">${esc(c.number)}</td>
-        <td style="padding:8px 12px;font-size:13px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.title||'')}">${esc(c.title||`Chapter ${c.number}`)}</td>
+        <td style="padding:8px 12px;font-size:13px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.title||'')}">${esc(c.title||`Chapter ${c.number}`)}</td>
         <td style="padding:8px 12px">${statusHtml}</td>
-        <td style="padding:8px 12px">
-          <div style="display:flex;align-items:center;gap:6px">
-            <select style="flex:1;background:var(--panel2);border:1px solid var(--line2);color:var(--fg);padding:5px 8px;border-radius:7px;font-size:12px;font-family:inherit" class="mf-select">${buildFileOptions(currentFile)}</select>
-            <span style="font-size:11px;color:var(--acc);white-space:nowrap" class="mf-reason"></span>
-          </div>
-        </td>
-        <td style="padding:8px 12px">
-          <button class="btn sm icon mf-clear" style="display:${currentFile ? '' : 'none'}" title="Clear mapping">✕</button>
-        </td>
+        <td style="padding:8px 12px"><div style="display:flex;align-items:center;gap:6px">
+          <select style="flex:1;background:var(--panel2);border:1px solid var(--line2);color:var(--fg);padding:5px 8px;border-radius:7px;font-size:12px;font-family:inherit" class="mf-select">${buildFileOptions(currentFile)}</select>
+          <span style="font-size:11px;color:var(--acc);white-space:nowrap" class="mf-reason"></span>
+        </div></td>
+        <td style="padding:8px 12px"><button class="btn sm icon mf-clear" style="display:${currentFile ? '' : 'none'}" title="Clear">✕</button></td>
       </tr>`);
-
-      const selectEl = tr.querySelector('.mf-select');
-      const clearBtn = tr.querySelector('.mf-clear');
-      const reasonEl = tr.querySelector('.mf-reason');
+      const selectEl = tr.querySelector('.mf-select'), clearBtn = tr.querySelector('.mf-clear'), reasonEl = tr.querySelector('.mf-reason');
       pendingRow.set(c.id, { selectEl, clearBtn, reasonEl });
-
-      selectEl.onchange = () => {
-        const v = selectEl.value;
-        if (v) setRowMapping(c.id, v);
-        else clearRowMapping(c.id);
-      };
+      selectEl.onchange = () => { const v = selectEl.value; if (v) setRowMapping(c.id, v); else clearRowMapping(c.id); };
       clearBtn.onclick = () => clearRowMapping(c.id);
-
       tbody.appendChild(tr);
     }
   };
-  buildRows();
 
-  // Browse server-side directories for the directory input
+  // --- Volumes mode ---
+  const setVolMapping = (vk, filePath, reason = '') => {
+    volMappings.set(vk, filePath);
+    const r = volPendingRow.get(vk) || {};
+    if (r.selectEl) r.selectEl.value = filePath;
+    if (r.clearBtn) r.clearBtn.style.display = filePath ? '' : 'none';
+    if (r.reasonEl) { r.reasonEl.textContent = reason ? `✨ ${reason}` : ''; r.reasonEl.style.color = 'var(--acc)'; }
+    updateApplyBtn();
+  };
+  const clearVolMapping = (vk) => {
+    volMappings.delete(vk);
+    const r = volPendingRow.get(vk) || {};
+    if (r.selectEl) r.selectEl.value = '';
+    if (r.clearBtn) r.clearBtn.style.display = 'none';
+    if (r.reasonEl) r.reasonEl.textContent = '';
+    updateApplyBtn();
+  };
+
+  const buildVolumeRows = () => {
+    thead.innerHTML = `<tr><th style="${TH};width:60px">#</th><th style="${TH}">Volume</th><th style="${TH};width:130px">Progress</th><th style="${TH}">Map to file</th><th style="${TH};width:40px"></th></tr>`;
+    tbody.innerHTML = '';
+    volPendingRow.clear();
+    for (const vk of sortedVolKeys) {
+      const { label, chapters: vChaps, importedCount, existingFile } = volGroups.get(vk);
+      const currentFile = volMappings.has(vk) ? volMappings.get(vk) : existingFile;
+      const statusHtml = importedCount === vChaps.length && vChaps.length > 0
+        ? `<span class="status-badge imported" style="font-size:10px">✓ ${importedCount}/${vChaps.length}</span>`
+        : importedCount > 0 ? `<span class="status-badge queued" style="font-size:10px">${importedCount}/${vChaps.length}</span>`
+        : `<span class="status-badge skipped" style="font-size:10px">0/${vChaps.length}</span>`;
+      const tr = h(`<tr data-vk="${esc(vk)}" style="border-bottom:1px solid var(--line)">
+        <td style="padding:8px 12px;color:var(--muted);font-weight:600;font-size:13px">${esc(vk === 'none' ? '?' : vk)}</td>
+        <td style="padding:8px 12px;font-size:13px;font-weight:600">${esc(label)}</td>
+        <td style="padding:8px 12px">${statusHtml}</td>
+        <td style="padding:8px 12px"><div style="display:flex;align-items:center;gap:6px">
+          <select style="flex:1;background:var(--panel2);border:1px solid var(--line2);color:var(--fg);padding:5px 8px;border-radius:7px;font-size:12px;font-family:inherit" class="mf-select">${buildFileOptions(currentFile)}</select>
+          <span style="font-size:11px;color:var(--acc);white-space:nowrap" class="mf-reason"></span>
+        </div></td>
+        <td style="padding:8px 12px"><button class="btn sm icon mf-clear" style="display:${currentFile ? '' : 'none'}" title="Clear">✕</button></td>
+      </tr>`);
+      const selectEl = tr.querySelector('.mf-select'), clearBtn = tr.querySelector('.mf-clear'), reasonEl = tr.querySelector('.mf-reason');
+      volPendingRow.set(vk, { selectEl, clearBtn, reasonEl });
+      selectEl.onchange = () => { const f = selectEl.value; if (f) setVolMapping(vk, f); else clearVolMapping(vk); };
+      clearBtn.onclick = () => clearVolMapping(vk);
+      tbody.appendChild(tr);
+    }
+  };
+
+  const renderTable = () => {
+    if (mode === 'chapters') buildChapterRows();
+    else buildVolumeRows();
+    updateApplyBtn();
+  };
+
+  const switchTab = (newMode) => {
+    mode = newMode;
+    const activeStyle = 'background:var(--acc);color:#fff;border:none;padding:6px 14px;font-size:13px;cursor:pointer;font-family:inherit';
+    const idleStyle = 'background:transparent;color:var(--fg);border:none;padding:6px 14px;font-size:13px;cursor:pointer;font-family:inherit';
+    tabChBtn.style.cssText = mode === 'chapters' ? activeStyle : idleStyle;
+    tabVolBtn.style.cssText = (mode === 'volumes' ? activeStyle : idleStyle) + ';border-left:1px solid var(--line2)';
+    renderTable();
+  };
+  tabChBtn.onclick = () => switchTab('chapters');
+  tabVolBtn.onclick = () => switchTab('volumes');
+
+  renderTable();
+
+  // Browse
   modal.querySelector('#mf-browse').onclick = () => {
-    openFolderPickerModal({
-      defaultPath: dirInput.value.trim() || '/books',
-      onSelect: (p) => { dirInput.value = p; }
-    });
+    openFolderPickerModal({ defaultPath: dirInput.value.trim() || '/books', onSelect: (p) => { dirInput.value = p; } });
   };
 
   // Scan directory
@@ -1063,13 +1150,11 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
       statusEl.textContent = `${availableFiles.length} file(s) found`;
       autoBtn.disabled = availableFiles.length === 0;
       fileStrip.style.display = '';
-      fileListEl.innerHTML = availableFiles.map(f =>
-        `<span class="pill" style="font-size:11px;cursor:default" title="${esc(f.path)}">${esc(f.name)}</span>`
-      ).join('');
-      // Rebuild selects with new file options
-      for (const [cid, { selectEl }] of pendingRow) {
-        const cur = mappings.get(cid) || '';
-        selectEl.innerHTML = buildFileOptions(cur);
+      fileListEl.innerHTML = availableFiles.map(f => `<span class="pill" style="font-size:11px;cursor:default" title="${esc(f.path)}">${esc(f.name)}</span>`).join('');
+      if (mode === 'chapters') {
+        for (const [cid, { selectEl }] of pendingRow) selectEl.innerHTML = buildFileOptions(mappings.get(cid) || '');
+      } else {
+        for (const [vk, { selectEl }] of volPendingRow) selectEl.innerHTML = buildFileOptions(volMappings.get(vk) || '');
       }
     } catch (e) { statusEl.textContent = e.message; toast('Scan failed: ' + e.message); }
   };
@@ -1083,25 +1168,48 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
       autoBtn.disabled = true;
       const res = await api(`/series/${seriesId}/auto-map?dir=${encodeURIComponent(dir)}`);
       let filled = 0;
-      for (const sg of (res.suggestions || [])) {
-        if (!mappings.has(sg.chapterId) || !mappings.get(sg.chapterId)) {
-          setRowMapping(sg.chapterId, sg.filePath, sg.matchReason);
-          filled++;
+      if (mode === 'chapters') {
+        for (const sg of (res.suggestions || [])) {
+          if (!mappings.get(sg.chapterId)) { setRowMapping(sg.chapterId, sg.filePath, sg.matchReason); filled++; }
+        }
+      } else {
+        // Group suggestions by volume: first file seen per volume wins
+        const volFileMap = new Map();
+        for (const sg of (res.suggestions || [])) {
+          const ch = chapters.find(c => c.id === sg.chapterId);
+          if (!ch) continue;
+          const vk = ch.volume != null ? String(ch.volume) : 'none';
+          if (!volFileMap.has(vk)) volFileMap.set(vk, { filePath: sg.filePath, reason: sg.matchReason });
+        }
+        for (const [vk, { filePath, reason }] of volFileMap) {
+          if (!volMappings.get(vk)) { setVolMapping(vk, filePath, reason); filled++; }
         }
       }
-      statusEl.textContent = `Auto-matched ${filled} mapping${filled !== 1 ? 's' : ''} (${res.matchedFiles}/${res.totalFiles} files)`;
+      statusEl.textContent = mode === 'chapters'
+        ? `Auto-matched ${filled} mapping${filled !== 1 ? 's' : ''} (${res.matchedFiles}/${res.totalFiles} files)`
+        : `Auto-matched ${filled} volume${filled !== 1 ? 's' : ''} (${res.matchedFiles}/${res.totalFiles} files)`;
       autoBtn.disabled = false;
     } catch (e) { statusEl.textContent = e.message; autoBtn.disabled = false; }
   };
 
   // Apply mappings
   applyBtn.onclick = async () => {
-    if (mappings.size === 0) return;
+    let entries;
+    if (mode === 'chapters') {
+      if (!mappings.size) return;
+      entries = [...mappings.entries()].map(([chapterId, filePath]) => ({ chapterId, filePath }));
+    } else {
+      if (!volMappings.size) return;
+      entries = [];
+      for (const [vk, filePath] of volMappings) {
+        const grp = volGroups.get(vk);
+        if (grp) for (const c of grp.chapters) entries.push({ chapterId: c.id, filePath });
+      }
+    }
     try {
       applyBtn.disabled = true;
       statusEl.textContent = 'Applying…';
-      const body = { mappings: [...mappings.entries()].map(([chapterId, filePath]) => ({ chapterId, filePath })) };
-      const res = await api(`/series/${seriesId}/map-files`, { method: 'POST', body });
+      const res = await api(`/series/${seriesId}/map-files`, { method: 'POST', body: { mappings: entries } });
       toast(`✓ Applied ${res.applied} file mapping${res.applied !== 1 ? 's' : ''}!`);
       modal.remove();
       if (onApplied) onApplied();
@@ -1110,6 +1218,87 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
 
   modal.querySelector('#mf-close').onclick = () => modal.remove();
   modal.onclick = e => { if (e.target === modal) modal.remove(); };
+  document.body.appendChild(modal);
+}
+
+// --- Delete Files confirmation modal ---
+function openDeleteFilesModal({ seriesId, seriesTitle, scope = 'all', volume = undefined, chapterId = undefined, onDeleted }) {
+  const existing = document.getElementById('delete-files-modal');
+  if (existing) existing.remove();
+
+  const scopeLabel = scope === 'volume' ? `Volume ${volume ?? '?'}` : scope === 'chapter' ? `Chapter #${chapterId}` : 'entire series';
+  const modal = h(`<div id="delete-files-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="background:var(--panel);border:1px solid #a33;border-radius:16px;width:100%;max-width:620px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.9)">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--line)">
+        <h3 style="margin:0;color:#f88;font-size:16px">🗑 Delete Files — ${esc(seriesTitle)}</h3>
+        <p class="muted" style="margin:6px 0 0;font-size:13px">Scope: <strong>${esc(scopeLabel)}</strong></p>
+      </div>
+      <div id="df-body" style="padding:16px 22px;overflow-y:auto;flex:1"><p class="muted">Loading file list…</p></div>
+      <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn sm" id="df-cancel">Cancel</button>
+        <button class="btn sm danger" id="df-confirm" disabled>🗑 Delete files</button>
+      </div>
+    </div>
+  </div>`);
+
+  const dfBody = modal.querySelector('#df-body');
+  const confirmBtn = modal.querySelector('#df-confirm');
+  let confirmedIds = [];
+
+  const close = () => modal.remove();
+  modal.querySelector('#df-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  (async () => {
+    try {
+      const previewBody = { scope };
+      if (scope === 'volume') previewBody.volume = (volume === 'none' || volume == null) ? null : String(volume);
+      if (scope === 'chapter') previewBody.chapterId = chapterId;
+      const res = await api(`/series/${seriesId}/delete-files/preview`, { method: 'POST', body: previewBody });
+      confirmedIds = res.files.map(f => f.chapterId);
+      if (res.files.length === 0) {
+        dfBody.innerHTML = `<p class="muted">No files found on disk for this scope.</p>`;
+        return;
+      }
+      dfBody.innerHTML = `
+        <div style="background:#3a1111;border:1px solid #a33;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+          <strong style="color:#f88">⚠ This cannot be undone</strong>
+          <p style="margin:4px 0 0;font-size:13px;color:#ccc">${res.files.length} file${res.files.length !== 1 ? 's' : ''} will be permanently deleted from disk. Chapter states will be reset based on current monitoring mode.</p>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr>
+            <th style="padding:7px 10px;text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--line)">Vol</th>
+            <th style="padding:7px 10px;text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--line)">Ch#</th>
+            <th style="padding:7px 10px;text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--line)">File</th>
+          </tr></thead>
+          <tbody>${res.files.map(f => `<tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:6px 10px;color:var(--muted)">${esc(f.volume ?? '—')}</td>
+            <td style="padding:6px 10px;color:var(--muted);white-space:nowrap">${esc(f.chapterNumber)}</td>
+            <td style="padding:6px 10px;font-family:monospace;font-size:11px;word-break:break-all;color:#f88">${esc(f.filePath)}</td>
+          </tr>`).join('')}</tbody>
+        </table>`;
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = `🗑 Delete ${res.files.length} file${res.files.length !== 1 ? 's' : ''}`;
+    } catch (e) {
+      dfBody.innerHTML = `<p style="color:var(--warn)">Failed to load file list: ${esc(e.message)}</p>`;
+    }
+  })();
+
+  confirmBtn.onclick = async () => {
+    if (!confirmedIds.length) return;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Deleting…';
+    try {
+      const res = await api(`/series/${seriesId}/delete-files`, { method: 'POST', body: { chapterIds: confirmedIds } });
+      toast(`🗑 Deleted ${res.deleted} file${res.deleted !== 1 ? 's' : ''}`);
+      close();
+      if (onDeleted) onDeleted();
+    } catch (e) {
+      toast('Delete failed: ' + e.message);
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = `🗑 Delete ${confirmedIds.length} file${confirmedIds.length !== 1 ? 's' : ''}`;
+    }
+  };
 
   document.body.appendChild(modal);
 }
@@ -1179,13 +1368,20 @@ async function viewActivity(v) {
     <span class="pill" id="sched-pill">—</span>
     <div class="spacer"></div>
   </div>`);
-  const runBtn = h('<button class="btn sm primary" title="Drain the queue now">▶ Run downloads</button>');
+  const runBtn = h('<button class="btn sm primary" title="Drain the queue now">▶ Run</button>');
   runBtn.onclick = async () => { await api('/downloads/run', { method:'POST' }); toast('Running downloads…'); load(); };
-  const retryBtn = h('<button class="btn sm" title="Re-queue every failed item">↻ Retry all failed</button>');
+  const retryBtn = h('<button class="btn sm" title="Re-queue every failed item">↻ Retry failed</button>');
   retryBtn.onclick = async () => { const r = await api('/downloads/retry-failed', { method:'POST' }); toast(`Re-queued ${r.retried||0} failed`); load(); };
-  const cancelBtn = h('<button class="btn sm danger" title="Cancel everything active">✕ Cancel all</button>');
-  cancelBtn.onclick = async () => { if (confirm('Cancel all active downloads?')) { const r = await api('/downloads/cancel-all', { method:'POST' }); toast(`Cancelled ${r.cancelled||0}`); load(); } };
-  head.querySelector('.spacer').after(runBtn, retryBtn, cancelBtn);
+  let isPaused = false;
+  const pauseBtn = h('<button class="btn sm" title="Pause / resume all downloads">⏸ Pause</button>');
+  pauseBtn.onclick = async () => {
+    await api('/settings', { method:'PATCH', body:{ downloadsPaused: !isPaused } });
+    toast(isPaused ? 'Downloads resumed' : 'Downloads paused');
+    load();
+  };
+  const cancelBtn = h('<button class="btn sm danger" title="Cancel & clear everything in the queue (does not delete files)">✕ Clear queue</button>');
+  cancelBtn.onclick = async () => { if (confirm('Cancel all active downloads and clear the queue?')) { const r = await api('/downloads/cancel-all', { method:'POST' }); toast(`Cancelled ${r.cancelled||0}`); load(); } };
+  head.querySelector('.spacer').after(runBtn, retryBtn, pauseBtn, cancelBtn);
   v.appendChild(head);
 
   const queueWrap = h('<div></div>'); v.appendChild(queueWrap);
@@ -1263,8 +1459,12 @@ async function viewActivity(v) {
       sp.className = `pill ${sc.scanning ? 'acc' : sc.running ? 'ok' : 'warn'}`;
       sp.textContent = sc.scanning ? '↻ scanning…' : sc.running ? `● scheduler on · ${sc.intervalHours}h` : '○ scheduler off';
     }
-    pauseBanner.innerHTML = health.downloadsPaused
-      ? `<div class="card" style="border-color:#a36;background:#3a1f2a"><strong>⏸ Downloads are paused.</strong> <span class="muted">Nothing will download or package until you resume in <a href="#/settings">Settings</a>.</span></div>`
+    isPaused = !!health.downloadsPaused;
+    pauseBtn.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+    pauseBtn.className = `btn sm${isPaused ? ' primary' : ''}`;
+    pauseBtn.title = isPaused ? 'Resume all downloads' : 'Pause all downloads';
+    pauseBanner.innerHTML = isPaused
+      ? `<div class="card" style="border-color:#a36;background:#3a1f2a"><strong>⏸ Downloads are paused.</strong> <span class="muted">Click ▶ Resume in the toolbar to resume.</span></div>`
       : '';
     renderQueue(queue);
     renderHist(history);
