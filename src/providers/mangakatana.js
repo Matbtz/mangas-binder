@@ -128,6 +128,37 @@ export async function searchSeries(title, { signal } = {}) {
 }
 
 /**
+ * Find the best matching URL for a chapter number, handling exact matches
+ * first, and falling back to the latest increment (e.g. 9.2 for 9) if not found.
+ */
+export function resolveChapterUrl(chapters, chapterNumber) {
+  const want = String(parseFloat(chapterNumber));
+  let url = chapters.get(want);
+  if (!url) {
+    let bestKey = null;
+    let bestVal = -1;
+    const wantFloat = parseFloat(want);
+    const isInteger = Number.isInteger(wantFloat);
+    for (const key of chapters.keys()) {
+      const keyFloat = parseFloat(key);
+      const isMatch = isInteger
+        ? (Math.floor(keyFloat) === wantFloat)
+        : (key === want || key.startsWith(want + '.'));
+      if (isMatch) {
+        if (keyFloat > bestVal) {
+          bestVal = keyFloat;
+          bestKey = key;
+        }
+      }
+    }
+    if (bestKey) {
+      url = chapters.get(bestKey);
+    }
+  }
+  return url;
+}
+
+/**
  * Resolve the page images for a chapter on a known MangaKatana series page.
  * @param {string} seriesUrl  MangaKatana series landing URL
  * @param {string|number} chapterNumber
@@ -136,8 +167,7 @@ export async function searchSeries(title, { signal } = {}) {
 export async function findChapterPages(seriesUrl, chapterNumber, { signal } = {}) {
   const { html } = await fetchPage(seriesUrl, { signal });
   const chapters = parseChapterList(html);
-  const want = String(parseFloat(chapterNumber));
-  const chapterUrl = chapters.get(want);
+  const chapterUrl = resolveChapterUrl(chapters, chapterNumber);
   if (!chapterUrl) throw new Error(`MangaKatana has no chapter ${chapterNumber} for this series`);
 
   const { html: chHtml, imageHeaders } = await fetchPage(chapterUrl, { signal });

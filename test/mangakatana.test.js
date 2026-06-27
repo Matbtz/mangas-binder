@@ -11,7 +11,7 @@ process.env.OUTPUT_DIR = path.join(tmp, 'out');
 process.env.STAGING_DIR = path.join(tmp, 'staging');
 
 const { ensureSeeded } = await import('../src/core/settings.js');
-const { parseSearchResults, parseChapterList, parseChapterImages } = await import('../src/providers/mangakatana.js');
+const { parseSearchResults, parseChapterList, parseChapterImages, resolveChapterUrl } = await import('../src/providers/mangakatana.js');
 const { isImageBuffer } = await import('../src/download/downloader.js');
 const { throttle, _resetThrottle } = await import('../src/download/throttle.js');
 const { cookieHeader } = await import('../src/download/flaresolverr.js');
@@ -62,6 +62,29 @@ test('MangaKatana: parseChapterList maps chapter numbers to URLs', () => {
   assert.equal(map.get('1'), 'https://mangakatana.com/manga/dandadan.25806/c1');
   assert.equal(map.get('10'), 'https://mangakatana.com/manga/dandadan.25806/c10');
   assert.equal(map.get('10.5'), 'https://mangakatana.com/manga/dandadan.25806/c10.5');
+});
+
+test('MangaKatana: resolveChapterUrl matches exact and picks latest increment', () => {
+  const map = new Map([
+    ['1', 'url1'],
+    ['9.1', 'url9_1'],
+    ['9.2', 'url9_2'],
+    ['10.1', 'url10_1'],
+    ['10.2', 'url10_2'],
+    ['19', 'url19'],
+    ['19.5', 'url19_5']
+  ]);
+  // Exact matches
+  assert.equal(resolveChapterUrl(map, '1'), 'url1');
+  assert.equal(resolveChapterUrl(map, '19'), 'url19');
+  assert.equal(resolveChapterUrl(map, '19.5'), 'url19_5');
+
+  // Variations / latest increment
+  assert.equal(resolveChapterUrl(map, '9'), 'url9_2');
+  assert.equal(resolveChapterUrl(map, '10'), 'url10_2');
+
+  // Not found
+  assert.equal(resolveChapterUrl(map, '8'), undefined);
 });
 
 test('MangaKatana: parseChapterImages reads inline-script array, ignores chrome/ads', () => {
