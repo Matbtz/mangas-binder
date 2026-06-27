@@ -48,6 +48,20 @@ test('volume mode: packages closed volumes, holds the latest, then closes on com
   assert.ok(existsSync(path.join(tmp, 'out', 'Pipe One', 'Pipe One Vol. 03.cbz')));
 });
 
+test('volume mode: packages a volume when a higher volume is known but not downloaded', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pipe3', title: 'Pipe Three', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume', status: 'ongoing' });
+  // Vol 1 is downloaded
+  seedDownloaded(s.id, '1', '1');
+  seedDownloaded(s.id, '2', '1');
+  // Vol 2 is known (wanted) but NOT downloaded
+  upsertChapter(s.id, { provider: 'mangadex', providerChapterId: 'c3', number: '3', volume: '2' });
+
+  const imported = await packageCompleteVolumes(s.id);
+  assert.equal(imported, 1, 'vol 1 is packaged because vol 2 is known');
+  assert.ok(existsSync(path.join(tmp, 'out', 'Pipe Three', 'Pipe Three Vol. 01.cbz')));
+  assert.ok(!existsSync(path.join(tmp, 'out', 'Pipe Three', 'Pipe Three Vol. 02.cbz')));
+});
+
 test('volume mode: untagged chapters are extrapolated then packaged when closed', async () => {
   const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pipe2', title: 'Pipe Two', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume', status: 'ongoing' });
   // real vol 1 (3 ch) → chsPerVol=3; untagged 4..9 should split into est. vol2 (4-6) and vol3 (7-9)

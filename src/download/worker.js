@@ -253,17 +253,23 @@ export async function packageCompleteVolumes(seriesId) {
   // Assign estimated volumes to any untagged chapters before grouping.
   resolveVolumes(seriesId);
 
-  const chapters = listChaptersForSeries(seriesId)
-    .filter(c => c.state === 'downloaded' || c.state === 'imported');
+  const allChapters = listChaptersForSeries(seriesId);
+  let maxVolume = -Infinity;
+  for (const c of allChapters) {
+    if (c.volume == null || c.volume === '') continue;
+    const v = parseFloat(c.volume);
+    if (!Number.isNaN(v)) {
+      maxVolume = Math.max(maxVolume, v);
+    }
+  }
+
+  const chapters = allChapters.filter(c => c.state === 'downloaded' || c.state === 'imported');
 
   // Group chapters that have a numeric volume.
   const byVolume = new Map();
-  let maxVolume = -Infinity;
   for (const c of chapters) {
     if (c.volume == null || c.volume === '') continue;
-    const v = parseFloat(c.volume);
-    if (Number.isNaN(v)) continue;
-    maxVolume = Math.max(maxVolume, v);
+    if (Number.isNaN(parseFloat(c.volume))) continue;
     if (!byVolume.has(c.volume)) byVolume.set(c.volume, []);
     byVolume.get(c.volume).push(c);
   }
