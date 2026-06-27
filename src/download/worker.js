@@ -77,18 +77,24 @@ export async function runOnce({ limit = 200 } = {}) {
           setChapterProgress(ch.id, done, total);
         };
         let dir, pageCount;
+        // Track whether MangaDex flagged the chapter as permanently unavailable in
+        // EN/FR. Used below to skip retries and settle on `not_found` instead.
+        let primaryNotAvailable = false;
         if (useArchive) {
           ({ dir, pageCount } = await downloadArchiveChapter(activeProvider, series, ch, { signal: controller.signal })); // comics: whole CBZ/ZIP → pages
         } else {
           try {
             ({ dir, pageCount } = await downloadChapter(dlProvider, ch, { concurrency, dataSaver, mangaId: series.provider_series_id, signal: controller.signal, onProgress })); // manga: page images
           } catch (primaryErr) {
+            // Capture "not available in EN/FR" before deciding whether to fallback.
+            if (primaryErr.notAvailable) primaryNotAvailable = true;
             // MangaDex couldn't serve this chapter — fall back to scraping MangaKatana
             // for the same chapter (manga only, when the fallback is enabled).
             if (isAbort(primaryErr) || series.media_type !== 'manga' || !fallbackEnabled()) throw primaryErr;
             logHistory('fallback.attempt', { seriesId: series.id, chapterId: ch.id, message: `MangaDex failed (${primaryErr.message}); trying MangaKatana` });
             ({ dir, pageCount } = await downloadChapterViaFallback(series, ch, { signal: controller.signal, onProgress, concurrency }));
             logHistory('fallback.success', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} via MangaKatana` });
+            primaryNotAvailable = false; // fallback succeeded — chapter is available
           }
         }
         setChapterState(ch.id, 'downloaded', { staging_path: dir, pages: pageCount, prog_done: pageCount, prog_total: pageCount });
@@ -109,6 +115,11 @@ export async function runOnce({ limit = 200 } = {}) {
           setChapterState(ch.id, 'skipped', { error: null, prog_done: null, prog_total: null });
           await cleanupStaging(series.id, ch.number);
           logHistory('chapter.cancelled', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} cancelled` });
+        } else if (primaryNotAvailable) {
+          // MangaDex confirmed no EN/FR translation exists and all fallbacks also
+          // failed. Mark permanently so it doesn't cycle through 5 retry attempts.
+          setChapterState(ch.id, 'not_found', { error: String(err.message || err), prog_done: null, prog_total: null });
+          logHistory('chapter.not_found', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number}: ${err.message || err}` });
         } else {
           failed++;
           const fresh = getChapter(ch.id);

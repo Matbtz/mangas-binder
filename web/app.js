@@ -22,7 +22,7 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 2500);
 }
 
-const STATE_PILL = { imported:'ok', bindery:'queued', downloaded:'acc', downloading:'acc', queued:'', wanted:'warn', failed:'err', skipped:'' };
+const STATE_PILL = { imported:'ok', bindery:'queued', downloaded:'acc', downloading:'acc', queued:'', wanted:'warn', failed:'err', skipped:'', not_found:'' };
 const countsBadges = (c = {}) => Object.entries(c).map(([s,n]) => `<span class="pill ${STATE_PILL[s]||''}">${s} ${n}</span>`).join(' ');
 
 const TABS = ['Library', 'Add', 'Activity', 'Settings'];
@@ -664,6 +664,7 @@ async function showDetail(id) {
       case 'queued':      return `<span class="status-badge queued">⏳ Queued</span>`;
       case 'failed':      return `<span class="status-badge failed" title="${esc(c.error||'')}">✕ Failed</span>`;
       case 'skipped':     return `<span class="status-badge skipped">⏸ Skipped</span>`;
+      case 'not_found':   return `<span class="status-badge skipped" style="color:#a0a0a0" title="${esc(c.error||'No English or French translation available')}">∅ Not Found</span>`;
       default:            return `<span class="status-badge queued">${esc(c.state)}</span>`;
     }
   };
@@ -710,8 +711,8 @@ async function showDetail(id) {
       const retry = h('<button class="btn sm primary" title="Retry">↻ Retry</button>');
       retry.onclick = async () => { await api(`/chapters/${c.id}/retry`, { method:'POST' }); toast(`Retrying ${chUnit} ${c.number}…`); startLive(); liveTick(); };
       act.append(retry);
-    } else if (c.state === 'skipped') {
-      const want = h('<button class="btn sm primary" title="Mark as wanted">➕ Want</button>');
+    } else if (c.state === 'skipped' || c.state === 'not_found') {
+      const want = h(`<button class="btn sm primary" title="${c.state === 'not_found' ? 'Force retry (chapter may not be available in EN/FR)' : 'Mark as wanted'}">➕ Want</button>`);
       want.onclick = async () => {
         want.className = 'btn sm ok';
         want.innerHTML = '✓ Monitored';
@@ -1147,6 +1148,7 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
       const statusHtml = c.state === 'imported' ? `<span class="status-badge imported" style="font-size:10px">✓ Available</span>`
         : c.state === 'wanted' ? `<span class="status-badge wanted" style="font-size:10px">● Wanted</span>`
         : c.state === 'skipped' ? `<span class="status-badge skipped" style="font-size:10px">⏸ Skipped</span>`
+        : c.state === 'not_found' ? `<span class="status-badge skipped" style="font-size:10px;color:#a0a0a0" title="${esc(c.error||'')}">∅ Not Found</span>`
         : `<span class="status-badge queued" style="font-size:10px">${esc(c.state)}</span>`;
       const currentFile = mappings.has(c.id) ? mappings.get(c.id) : (c.state === 'imported' && c.cbzPath ? c.cbzPath : '');
       const tr = h(`<tr data-chid="${c.id}" style="border-bottom:1px solid var(--line)">

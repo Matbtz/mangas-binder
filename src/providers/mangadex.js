@@ -279,7 +279,15 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
     });
   };
 
-  if (cid && (cid.startsWith('agg-') || cid.startsWith('mu-synth-'))) {
+  // Language preference: series lang → English → French.
+  // CONTENT_RATINGS must be included so adult-rated chapters aren't silently filtered.
+  const langFilter = [...new Set([lang, 'en', 'fr'])]
+    .map(l => `translatedLanguage[]=${encodeURIComponent(l)}`)
+    .join('&');
+
+  const isSynthetic = (id) => id?.startsWith('agg-') || id?.startsWith('mu-synth-');
+
+  if (isSynthetic(cid)) {
     const parts = cid.split('-');
     let mUUID = null;
     let num = null;
@@ -292,12 +300,19 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
     }
     if (mUUID && num) {
       try {
-        const res = await apiFetch(`${BASE_URL}/chapter?manga=${mUUID}&chapter=${num}&order[publishAt]=desc`);
+        const res = await apiFetch(
+          `${BASE_URL}/chapter?manga=${mUUID}&chapter=${encodeURIComponent(num)}&order[publishAt]=desc&${CONTENT_RATINGS}&${langFilter}`
+        );
         if (res?.data?.length) {
-          const sorted = sortChapters(res.data);
-          cid = sorted[0].id;
+          cid = sortChapters(res.data)[0].id;
         }
       } catch {}
+    }
+    // Never pass a synthetic ID to the at-home server — it will always 404.
+    if (isSynthetic(cid)) {
+      const err = new Error(`Chapter ${chapterNum ?? num ?? chapterId} is not available on MangaDex in English or French`);
+      err.notAvailable = true;
+      throw err;
     }
   }
 
@@ -305,12 +320,14 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
   try {
     data = await apiFetch(`${BASE_URL}/at-home/server/${cid}`);
   } catch (err) {
+    // A real chapter ID may become stale (server rotation); try a fresh lookup.
     if (mangaId && chapterNum) {
       try {
-        const res = await apiFetch(`${BASE_URL}/chapter?manga=${mangaId}&chapter=${chapterNum}&order[publishAt]=desc`);
+        const res = await apiFetch(
+          `${BASE_URL}/chapter?manga=${mangaId}&chapter=${encodeURIComponent(chapterNum)}&order[publishAt]=desc&${CONTENT_RATINGS}&${langFilter}`
+        );
         if (res?.data?.length) {
-          const sorted = sortChapters(res.data);
-          cid = sorted[0].id;
+          cid = sortChapters(res.data)[0].id;
           data = await apiFetch(`${BASE_URL}/at-home/server/${cid}`);
         }
       } catch {}
