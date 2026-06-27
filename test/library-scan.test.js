@@ -109,3 +109,29 @@ test('scanLibrary ignores hidden directories (.tmp) and identifies single epub f
   assert.ok(novelEntry, 'Single Novel should be discovered');
   assert.equal(novelEntry.isSingleEpub, true, 'should be marked as single epub');
 });
+
+test('scanLibrary prunes missing chapter files and resets state to wanted', async () => {
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: '33333333-3333-3333-3333-333333333333',
+    title: 'Prune Series', authors: ['C'], language: 'en', monitored: true, packagingMode: 'volume',
+  });
+  upsertChapter(s.id, { provider: 'mangadex', number: '10', volume: '2' });
+  const row = listChaptersForSeries(s.id).find(c => c.number === '10');
+  const fakeCbz = path.join(process.env.OUTPUT_DIR, 'Prune Series Vol. 02.cbz');
+  writeFileSync(fakeCbz, Buffer.from('pk'));
+  setChapterState(row.id, 'imported', { cbz_path: fakeCbz });
+
+  let chs = listChaptersForSeries(s.id);
+  assert.equal(chs.find(c => c.number === '10').state, 'imported');
+
+  // Now delete the file on disk outside the app
+  rmSync(fakeCbz);
+
+  // Scan library should notice missing file and revert chapter to wanted
+  await scanLibrary({ seriesId: s.id });
+  chs = listChaptersForSeries(s.id);
+  const pruned = chs.find(c => c.number === '10');
+  assert.equal(pruned.state, 'wanted');
+  assert.equal(pruned.cbz_path, null);
+});
+

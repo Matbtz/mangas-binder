@@ -526,6 +526,30 @@ async function _scanLibrary({ seriesId } = {}) {
     logHistory('library.scanned', { message: `marked ${markedChapters} owned chapter(s) across ${matchedFiles} file(s)` });
   }
 
+  // --- Reconciliation: prune owned chapters whose files no longer exist on disk ---
+  let prunedChapters = 0;
+  const LOCAL_STATES = new Set(['imported', 'downloaded', 'bindery']);
+  for (const match of targets) {
+    const chapters = listChaptersForSeries(match.id);
+    const resetState = match.monitor_mode === 'none' ? 'skipped' : 'wanted';
+    for (const c of chapters) {
+      if (LOCAL_STATES.has(c.state) || c.cbz_path != null) {
+        const p = c.cbz_path || c.staging_path;
+        if (p && !p.startsWith('included_in_vol_') && !existsSync(p)) {
+          setChapterState(c.id, resetState, { cbz_path: null, staging_path: null });
+          prunedChapters++;
+        } else if (!p && LOCAL_STATES.has(c.state)) {
+          setChapterState(c.id, resetState, { cbz_path: null, staging_path: null });
+          prunedChapters++;
+        }
+      }
+    }
+  }
+
+  if (prunedChapters > 0) {
+    logHistory('library.scanned', { message: `pruned ${prunedChapters} missing chapter record(s) from database` });
+  }
+
   // --- Untracked detection: directory-based ---
   // Each immediate subdir is a series candidate. CBZs inside are read only to
   // extract a provider ID and a consensus title (when all CBZs share one series

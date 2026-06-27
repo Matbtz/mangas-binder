@@ -275,21 +275,18 @@ export default async function apiRoutes(app) {
     if (!s) return reply.code(404).send({ error: 'not found' });
     const { scope = 'all', volume, chapterId } = req.body || {};
 
-    let candidates;
+    let candidates = listChaptersForSeries(s.id);
     if (scope === 'volume' && volume !== undefined) {
       const v = volume === null ? null : String(volume);
-      candidates = listChapterFilesForSeries(s.id, { volume: v });
+      candidates = candidates.filter(c => (c.volume === null ? null : String(c.volume)) === v);
     } else if (scope === 'chapter' && chapterId) {
-      candidates = listChapterFilesForSeries(s.id).filter(c => c.id === Number(chapterId));
-    } else {
-      candidates = listChapterFilesForSeries(s.id);
+      candidates = candidates.filter(c => c.id === Number(chapterId));
     }
 
-    // Exclude virtual paths used for "included in volume" tracking markers
+    const LOCAL_STATES = new Set(['imported', 'downloaded', 'bindery']);
     const files = candidates
-      .filter(c => c.cbz_path && !c.cbz_path.startsWith('included_in_vol_'))
-      .map(c => ({ chapterId: c.id, chapterNumber: c.number, volume: c.volume, filePath: c.cbz_path }))
-      .filter(f => existsSync(f.filePath));
+      .filter(c => LOCAL_STATES.has(c.state) || (c.cbz_path && !c.cbz_path.startsWith('included_in_vol_')))
+      .map(c => ({ chapterId: c.id, chapterNumber: c.number, volume: c.volume, filePath: c.cbz_path || '(Missing file)' }));
 
     return { seriesId: s.id, files, total: files.length };
   });
@@ -307,19 +304,20 @@ export default async function apiRoutes(app) {
     // GUARDRAIL: re-fetch all chapters for this series; reject any IDs not in it
     const allSeriesChapters = listChaptersForSeries(s.id);
     const ownedIds = new Set(allSeriesChapters.map(c => c.id));
+    const LOCAL_STATES = new Set(['imported', 'downloaded', 'bindery']);
     const toDelete = chapterIds
       .map(id => Number(id))
       .filter(id => ownedIds.has(id))
       .map(id => allSeriesChapters.find(c => c.id === id))
-      .filter(c => c && c.cbz_path && !c.cbz_path.startsWith('included_in_vol_'));
+      .filter(c => c && (LOCAL_STATES.has(c.state) || (c.cbz_path && !c.cbz_path.startsWith('included_in_vol_'))));
 
-    const defaultState = s.monitor_mode === 'all' ? 'wanted' : 'skipped';
+    const defaultState = s.monitor_mode === 'none' ? 'skipped' : 'wanted';
     let deleted = 0;
     const errors = [];
     for (const c of toDelete) {
       try {
-        if (existsSync(c.cbz_path)) { unlinkSync(c.cbz_path); deleted++; }
-        setChapterState(c.id, defaultState, { cbz_path: null });
+        if (c.cbz_path && existsSync(c.cbz_path)) { unlinkSync(c.cbz_path); deleted++; }
+        setChapterState(c.id, defaultState, { cbz_path: null, staging_path: null });
       } catch (err) {
         errors.push({ chapterId: c.id, error: err.message });
       }
