@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, statSync } from 'fs';
+import { readdirSync, existsSync, statSync, unlinkSync } from 'fs';
 import path from 'path';
 import { getProvider, describeProviders } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
@@ -7,7 +7,7 @@ import { provider as hardcover } from '../../providers/hardcover.js';
 import {
   listSeries, getSeries, updateSeries, deleteSeries,
   listChaptersForSeries, getChapter, setChapterState, bulkSetChapterState,
-  listChaptersInStates, recentHistory,
+  listChaptersInStates, recentHistory, listChapterFilesForSeries,
 } from '../../core/repo.js';
 import { getDb } from '../../core/db.js';
 import {
@@ -93,7 +93,27 @@ export default async function apiRoutes(app) {
   app.patch('/api/series/:id', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
-    return seriesView(updateSeries(s.id, req.body || {}));
+    const body = req.body || {};
+
+    // Cascade chapter states when monitor mode changes
+    if (body.monitorMode && body.monitorMode !== s.monitor_mode) {
+      const chapters = listChaptersForSeries(s.id);
+      if (body.monitorMode === 'none') {
+        // Cancel all active downloads, then skip everything remaining
+        await cancelSeries(s.id);
+        const failedIds = chapters.filter(c => c.state === 'failed').map(c => c.id);
+        if (failedIds.length) bulkSetChapterState(failedIds, 'skipped');
+      } else if (body.monitorMode === 'all') {
+        // Mark skipped/failed chapters as wanted (leave active/owned ones alone)
+        const KEEP = new Set(['wanted', 'queued', 'downloading', 'downloaded', 'imported', 'bindery']);
+        const ids = chapters.filter(c => !KEEP.has(c.state)).map(c => c.id);
+        if (ids.length) bulkSetChapterState(ids, 'wanted');
+        runOnce().catch(() => {});
+      }
+      // 'future', 'some': no cascade on existing chapters
+    }
+
+    return seriesView(updateSeries(s.id, body));
   });
 
   app.delete('/api/series/:id', async (req, reply) => {
@@ -144,22 +164,41 @@ export default async function apiRoutes(app) {
   });
 
   // Bulk-set chapter states for a series (optionally scoped to one volume).
-  // Eligible states: any chapter not imported/downloading/queued.
   app.post('/api/series/:id/set-chapter-states', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const { state, volume } = req.body || {};
     if (!['wanted', 'skipped'].includes(state)) return reply.code(400).send({ error: 'state must be wanted or skipped' });
-    const SKIP = new Set(['imported', 'downloading', 'queued']);
+
     let chapters = listChaptersForSeries(s.id);
     if (volume !== undefined) {
       const v = volume === null ? null : String(volume);
       chapters = chapters.filter(c => (c.volume ?? null) === v);
     }
-    const ids = chapters.filter(c => !SKIP.has(c.state)).map(c => c.id);
-    bulkSetChapterState(ids, state);
-    if (state === 'wanted') runOnce().catch(() => {});
-    return { ok: true, updated: ids.length };
+
+    let updated = 0;
+    if (state === 'skipped') {
+      const ACTIVE = new Set(['wanted', 'queued', 'downloading', 'downloaded']);
+      const OWNED = new Set(['imported', 'bindery']);
+      for (const ch of chapters) {
+        if (OWNED.has(ch.state)) continue;
+        if (ACTIVE.has(ch.state)) { await cancelChapter(ch.id); updated++; }
+        else if (ch.state !== 'skipped') { setChapterState(ch.id, 'skipped'); updated++; }
+      }
+    } else {
+      const KEEP = new Set(['imported', 'bindery', 'downloading', 'queued', 'downloaded', 'wanted']);
+      const ids = chapters.filter(c => !KEEP.has(c.state)).map(c => c.id);
+      if (ids.length) bulkSetChapterState(ids, 'wanted');
+      updated = ids.length;
+      if (ids.length) runOnce().catch(() => {});
+    }
+
+    // Manually adjusting a volume → mark tracking as 'some'
+    if (volume !== undefined && s.monitor_mode !== 'some') {
+      updateSeries(s.id, { monitorMode: 'some' });
+    }
+
+    return { ok: true, updated };
   });
 
   // Cancel all active downloads for a series (in-flight + queued + downloaded).
@@ -195,6 +234,23 @@ export default async function apiRoutes(app) {
     return { ok: true };
   });
 
+  // Explicitly track/un-track a single chapter; sets series monitorMode to 'some'.
+  app.post('/api/chapters/:id/track', async (req, reply) => {
+    const c = getChapter(Number(req.params.id));
+    if (!c) return reply.code(404).send({ error: 'not found' });
+    const { state } = req.body || {};
+    if (!['wanted', 'skipped'].includes(state)) return reply.code(400).send({ error: 'state must be wanted or skipped' });
+    if (state === 'skipped') {
+      await cancelChapter(c.id);
+    } else {
+      setChapterState(c.id, 'wanted', { error: null });
+      runOnce().catch(() => {});
+    }
+    const s = getSeries(c.series_id);
+    if (s && s.monitor_mode !== 'some') updateSeries(s.id, { monitorMode: 'some' });
+    return { ok: true };
+  });
+
   // Cancel a download: aborts it if in-flight, else drops it from the queue.
   // Settles on `skipped` (re-`want` to resume).
   app.post('/api/chapters/:id/cancel', async (req, reply) => {
@@ -210,6 +266,66 @@ export default async function apiRoutes(app) {
     setChapterState(c.id, 'wanted', { error: null, cbz_path: null, staging_path: null, prog_done: null, prog_total: null });
     runOnce().catch(() => {});
     return { ok: true };
+  });
+
+  // --- Delete series files ---
+  // Preview which files on disk would be deleted (dry-run).
+  app.post('/api/series/:id/delete-files/preview', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const { scope = 'all', volume, chapterId } = req.body || {};
+
+    let candidates;
+    if (scope === 'volume' && volume !== undefined) {
+      const v = volume === null ? null : String(volume);
+      candidates = listChapterFilesForSeries(s.id, { volume: v });
+    } else if (scope === 'chapter' && chapterId) {
+      candidates = listChapterFilesForSeries(s.id).filter(c => c.id === Number(chapterId));
+    } else {
+      candidates = listChapterFilesForSeries(s.id);
+    }
+
+    // Exclude virtual paths used for "included in volume" tracking markers
+    const files = candidates
+      .filter(c => c.cbz_path && !c.cbz_path.startsWith('included_in_vol_'))
+      .map(c => ({ chapterId: c.id, chapterNumber: c.number, volume: c.volume, filePath: c.cbz_path }))
+      .filter(f => existsSync(f.filePath));
+
+    return { seriesId: s.id, files, total: files.length };
+  });
+
+  // Actually delete files — caller must pass the explicit chapterIds they confirmed
+  // (prevents deleting more than was previewed).
+  app.post('/api/series/:id/delete-files', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const { chapterIds } = req.body || {};
+    if (!Array.isArray(chapterIds) || chapterIds.length === 0) {
+      return reply.code(400).send({ error: 'chapterIds array required' });
+    }
+
+    // GUARDRAIL: re-fetch all chapters for this series; reject any IDs not in it
+    const allSeriesChapters = listChaptersForSeries(s.id);
+    const ownedIds = new Set(allSeriesChapters.map(c => c.id));
+    const toDelete = chapterIds
+      .map(id => Number(id))
+      .filter(id => ownedIds.has(id))
+      .map(id => allSeriesChapters.find(c => c.id === id))
+      .filter(c => c && c.cbz_path && !c.cbz_path.startsWith('included_in_vol_'));
+
+    const defaultState = s.monitor_mode === 'all' ? 'wanted' : 'skipped';
+    let deleted = 0;
+    const errors = [];
+    for (const c of toDelete) {
+      try {
+        if (existsSync(c.cbz_path)) { unlinkSync(c.cbz_path); deleted++; }
+        setChapterState(c.id, defaultState, { cbz_path: null });
+      } catch (err) {
+        errors.push({ chapterId: c.id, error: err.message });
+      }
+    }
+
+    return { ok: true, deleted, errors };
   });
 
   // --- Queue / history ---

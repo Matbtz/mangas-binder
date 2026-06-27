@@ -265,3 +265,20 @@ export function chapterStateCounts(seriesId) {
 export function recentHistory(limit = 100) {
   return getDb().prepare('SELECT * FROM history ORDER BY id DESC LIMIT ?').all(limit);
 }
+
+/** Chapters that have a cbz_path set, optionally scoped to a specific volume. */
+export function listChapterFilesForSeries(seriesId, { volume } = {}) {
+  if (volume === undefined) {
+    return getDb().prepare(
+      "SELECT * FROM chapters WHERE series_id = ? AND cbz_path IS NOT NULL AND cbz_path != '' ORDER BY CAST(number AS REAL)"
+    ).all(seriesId);
+  }
+  if (volume === null) {
+    return getDb().prepare(
+      "SELECT * FROM chapters WHERE series_id = ? AND cbz_path IS NOT NULL AND cbz_path != '' AND volume IS NULL ORDER BY CAST(number AS REAL)"
+    ).all(seriesId);
+  }
+  return getDb().prepare(
+    "SELECT * FROM chapters WHERE series_id = ? AND cbz_path IS NOT NULL AND cbz_path != '' AND volume = ? ORDER BY CAST(number AS REAL)"
+  ).all(seriesId, String(volume));
+}
