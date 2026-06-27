@@ -185,6 +185,16 @@ export function chaptersInState(state, limit = 100) {
   ).all(state, limit);
 }
 
+/** Chapters ready for the download worker: `wanted` + legacy `queued` state. */
+export function chaptersReadyToDownload(limit = 100) {
+  return getDb().prepare(
+    `SELECT c.* FROM chapters c
+     JOIN series s ON c.series_id = s.id
+     WHERE c.state IN ('wanted', 'queued') AND s.monitored = 1 AND s.monitor_mode != 'none'
+     ORDER BY c.id LIMIT ?`
+  ).all(limit);
+}
+
 /** Chapters in any of the given states (optionally scoped to one series). */
 export function listChaptersInStates(states, { seriesId = null, limit = 100000 } = {}) {
   if (!states.length) return [];
