@@ -1,8 +1,8 @@
 import { rm } from 'fs/promises';
 import { getProvider } from '../providers/index.js';
 import {
-  getSeries, getChapter, chaptersInState, listChaptersForSeries, listChaptersInStates,
-  setChapterState, bumpChapterAttempt, setChapterProgress,
+  getSeries, getChapter, chaptersReadyToDownload, listChaptersForSeries, listChaptersInStates,
+  setChapterState, bumpChapterAttempt, setChapterProgress, resetStaleDownloads,
 } from '../core/repo.js';
 import { getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
@@ -43,7 +43,7 @@ export async function runOnce({ limit = 200 } = {}) {
     const concurrency = getSetting('downloadConcurrency', 4);
     const chapterConcurrency = getSetting('chapterConcurrency', 2);
     const dataSaver = getSetting('dataSaver', false);
-    const wanted = chaptersInState('wanted', limit);
+    const wanted = chaptersReadyToDownload(limit);
     const affectedVolumeSeries = new Set();
     let processed = 0, imported = 0, failed = 0;
 
@@ -175,6 +175,16 @@ export async function cancelSeries(seriesId) {
   const active = listChaptersInStates(['wanted', 'queued', 'downloading', 'downloaded', 'bindery', 'failed'], { seriesId, limit: 100000 });
   for (const ch of active) await cancelChapter(ch.id);
   return { ok: true, cancelled: active.length };
+}
+
+/**
+ * Reset chapters stuck in `downloading` state back to `wanted`, but only when
+ * the worker is idle. Safe to call from the manual "Run" endpoint — it's a
+ * no-op if a run is already in progress (those chapters are legitimately active).
+ */
+export function resetStaleIfIdle() {
+  if (running) return 0;
+  return resetStaleDownloads();
 }
 
 async function cleanupStaging(seriesId, number) {

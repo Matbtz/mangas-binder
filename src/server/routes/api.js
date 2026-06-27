@@ -19,7 +19,7 @@ import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
-import { runOnce, cancelChapter, cancelSeries } from '../../download/worker.js';
+import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle } from '../../download/worker.js';
 import { notify } from '../../core/notify.js';
 import { bus } from '../../core/events.js';
 import { seriesView, chapterView } from '../views.js';
@@ -353,7 +353,9 @@ export default async function apiRoutes(app) {
 
   // --- Global download controls ---
   // Drain the queue right now instead of waiting for the scheduler.
+  // Resets any chapters stuck in `downloading` (worker idle only), then starts.
   app.post('/api/downloads/run', async () => {
+    resetStaleIfIdle();
     runOnce().catch(() => {});
     return { ok: true, started: true };
   });
