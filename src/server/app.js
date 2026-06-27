@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { mkdirSync } from 'fs';
 import { config } from '../core/config.js';
-import { getDb, logHistory } from '../core/db.js';
+import { getDb, logHistory, parisTime } from '../core/db.js';
 import { resetStaleDownloads } from '../core/repo.js';
 import { ensureSeeded } from '../core/settings.js';
 import { startScheduler } from '../scheduler/scheduler.js';
@@ -24,7 +24,12 @@ export async function buildApp() {
   mkdirSync(config.outputDir, { recursive: true });
   mkdirSync(config.stagingDir, { recursive: true });
 
-  const app = Fastify({ logger: { level: process.env.LOG_LEVEL || 'info' } });
+  const app = Fastify({
+    logger: {
+      level: process.env.LOG_LEVEL || 'info',
+      timestamp: () => `,"time":"${parisTime()}"`
+    }
+  });
 
   // Bearer/?token auth — only enforced when AUTH_TOKEN is configured.
   if (config.authToken) {

@@ -133,11 +133,24 @@ export function closeDb() {
   if (db) { db.close(); db = null; }
 }
 
+export function parisTime(date = new Date()) {
+  try {
+    return new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Europe/Paris',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).format(date);
+  } catch {
+    return date.toISOString().replace('T', ' ').slice(0, 19);
+  }
+}
+
 /** Append an audit/history row. Best-effort; never throws into the caller. */
 export function logHistory(event, { seriesId = null, chapterId = null, message = '' } = {}) {
   try {
     getDb()
-      .prepare('INSERT INTO history (series_id, chapter_id, event, message) VALUES (?, ?, ?, ?)')
-      .run(seriesId, chapterId, event, message);
+      .prepare('INSERT INTO history (ts, series_id, chapter_id, event, message) VALUES (?, ?, ?, ?, ?)')
+      .run(parisTime(), seriesId, chapterId, event, message);
   } catch { /* ignore logging failures */ }
 }
