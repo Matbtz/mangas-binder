@@ -15,6 +15,10 @@ import { notifyImport, notifyError } from '../core/notify.js';
 import { pLimit } from './limit.js';
 
 const MAX_ATTEMPTS = 5;
+// Hard deadline per chapter: if a download hasn't finished in this time the
+// worker aborts it and queues a retry. Prevents one slow CDN node from pinning
+// the worker (and leaving chapters in `downloading` for hours).
+const CHAPTER_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 let running = false;
 
 /** chapterId → AbortController for downloads currently in flight (for cancellation). */
@@ -67,6 +71,8 @@ export async function runOnce({ limit = 200 } = {}) {
       const dlProvider = getProvider(series.download_provider || series.provider);
 
       const controller = new AbortController();
+      let timedOut = false;
+      const chapterTimer = setTimeout(() => { timedOut = true; controller.abort(); }, CHAPTER_TIMEOUT_MS);
       inflight.set(ch.id, controller);
       setChapterState(ch.id, 'downloading', { error: null, prog_done: 0, prog_total: null, started_at: new Date().toISOString() });
       bumpChapterAttempt(ch.id);
@@ -117,8 +123,13 @@ export async function runOnce({ limit = 200 } = {}) {
           affectedVolumeSeries.add(series.id);
         }
       } catch (err) {
-        if (isAbort(err)) {
-          // User cancelled: settle on `skipped`, drop partial pages, don't count as a failure.
+        // A genuine user cancellation: the chapter's OWN controller was aborted
+        // (via cancelChapter) and no internal timeout was involved.
+        // Internal AbortErrors — from apiFetch's 20 s timer or the page-level 45 s
+        // timer — are converted to plain Errors (mangadex.js) or arrive with
+        // controller.signal.aborted=false, so they fall through to the retry path.
+        const userCancelled = isAbort(err) && controller.signal.aborted && !timedOut;
+        if (userCancelled) {
           setChapterState(ch.id, 'skipped', { error: null, prog_done: null, prog_total: null });
           await cleanupStaging(series.id, ch.number);
           logHistory('chapter.cancelled', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} cancelled` });
@@ -131,11 +142,15 @@ export async function runOnce({ limit = 200 } = {}) {
           failed++;
           const fresh = getChapter(ch.id);
           const exhausted = (fresh?.attempts ?? 0) >= MAX_ATTEMPTS;
-          setChapterState(ch.id, exhausted ? 'failed' : 'wanted', { error: String(err.message || err), prog_done: null, prog_total: null });
-          logHistory('chapter.failed', { seriesId: series.id, chapterId: ch.id, message: String(err.message || err) });
-          if (exhausted) notifyError(series.title, `Chapter ${ch.number}`, String(err.message || err));
+          const errMsg = timedOut
+            ? `Download timed out after ${CHAPTER_TIMEOUT_MS / 60000} min — will retry`
+            : String(err.message || err);
+          setChapterState(ch.id, exhausted ? 'failed' : 'wanted', { error: errMsg, prog_done: null, prog_total: null });
+          logHistory('chapter.failed', { seriesId: series.id, chapterId: ch.id, message: errMsg });
+          if (exhausted) notifyError(series.title, `Chapter ${ch.number}`, errMsg);
         }
       } finally {
+        clearTimeout(chapterTimer);
         inflight.delete(ch.id);
       }
     })));

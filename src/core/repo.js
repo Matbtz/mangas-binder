@@ -260,8 +260,10 @@ export function bulkSetChapterState(ids, state, { resetAttempts = false } = {}) 
  * Run once at startup. Returns the number of rows reset.
  */
 export function resetStaleDownloads() {
+  // Reset attempts too: stale chapters were aborted by a crash, not a real failure,
+  // so they shouldn't burn through their retry budget.
   const res = getDb().prepare(
-    "UPDATE chapters SET state = 'wanted', prog_done = NULL, prog_total = NULL, started_at = NULL, updated_at = datetime('now') WHERE state = 'downloading'"
+    "UPDATE chapters SET state = 'wanted', attempts = 0, prog_done = NULL, prog_total = NULL, started_at = NULL, updated_at = datetime('now') WHERE state = 'downloading'"
   ).run();
   if (res.changes) publish('chapters', { count: res.changes, state: 'wanted' });
   return res.changes;

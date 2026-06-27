@@ -33,17 +33,24 @@ const HEADERS = { 'User-Agent': 'mangas-binder/2.0 (+https://github.com/Matbtz/m
 
 async function apiFetch(url) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
+  // 20 s covers rate-limited retries (first req + 2 s sleep + retry).
+  const timer = setTimeout(() => controller.abort(), 20000);
   try {
     const res = await fetch(url, { headers: HEADERS, signal: controller.signal });
     if (res.status === 429) {
-      await new Promise(r => setTimeout(r, 2000));
+      const ra = Number(res.headers.get('retry-after')) || 0;
+      await new Promise(r => setTimeout(r, Math.max(ra * 1000, 2000)));
       const retry = await fetch(url, { headers: HEADERS, signal: controller.signal });
       if (!retry.ok) throw new Error(`MangaDex API error ${retry.status}: ${url}`);
       return await retry.json();
     }
     if (!res.ok) throw new Error(`MangaDex API error ${res.status}: ${url}`);
     return await res.json();
+  } catch (err) {
+    // Convert our internal timeout AbortError into a plain Error so the download
+    // worker doesn't confuse it with a user-requested cancellation.
+    if (err?.name === 'AbortError') throw new Error(`MangaDex API request timed out: ${url}`);
+    throw err;
   } finally {
     clearTimeout(timer);
   }

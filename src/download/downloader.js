@@ -65,6 +65,10 @@ function normalizeEntries(pages) {
  * @param {{ concurrency?, onProgress?, signal? }} opts
  * @returns {Promise<{ dir, pageCount }>}
  */
+// Per-page hard deadline. CDN nodes that accept the connection but never finish
+// sending would otherwise block a chapter download slot indefinitely.
+const PAGE_TIMEOUT_MS = 45_000;
+
 export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onProgress, signal } = {}) {
   if (!entries.length) throw new Error('No pages to fetch');
   await mkdir(dir, { recursive: true });
@@ -77,16 +81,29 @@ export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onPro
     const dest = path.join(dir, `${pad(i + 1)}${extFromUrl(entry.url)}`);
     if (existsSync(dest)) { onProgress?.(++done, entries.length); return; }
     const headers = { 'User-Agent': USER_AGENT, ...(entry.headers || {}) };
-    const res = await fetchRetry(entry.url, { headers, signal });
-    if (!res.ok) throw new Error(`Page ${i + 1} HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length === 0) throw new Error(`Page ${i + 1} empty`);
-    if (!isImageBuffer(buf)) throw new Error(`Page ${i + 1} is not a valid image (got ${buf.length} bytes, likely an error/challenge page)`);
-    // Atomic-ish write: temp then rename so a crash never leaves a partial page.
-    const tmp = `${dest}.part`;
-    await writeFile(tmp, buf);
-    await rename(tmp, dest);
-    onProgress?.(++done, entries.length);
+
+    // Per-page timeout controller; forward the chapter-level abort so user-cancel
+    // still propagates instantly without waiting for the page timer to expire.
+    const pageCtrl = new AbortController();
+    const pageTimer = setTimeout(() => pageCtrl.abort(), PAGE_TIMEOUT_MS);
+    const onParentAbort = () => { clearTimeout(pageTimer); pageCtrl.abort(); };
+    signal?.addEventListener('abort', onParentAbort, { once: true });
+
+    try {
+      const res = await fetchRetry(entry.url, { headers, signal: pageCtrl.signal });
+      if (!res.ok) throw new Error(`Page ${i + 1} HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length === 0) throw new Error(`Page ${i + 1} empty`);
+      if (!isImageBuffer(buf)) throw new Error(`Page ${i + 1} is not a valid image (got ${buf.length} bytes, likely an error/challenge page)`);
+      // Atomic-ish write: temp then rename so a crash never leaves a partial page.
+      const tmp = `${dest}.part`;
+      await writeFile(tmp, buf);
+      await rename(tmp, dest);
+      onProgress?.(++done, entries.length);
+    } finally {
+      clearTimeout(pageTimer);
+      signal?.removeEventListener('abort', onParentAbort);
+    }
   })));
 
   const written = (await readdir(dir)).filter(f => !f.endsWith('.part'));
