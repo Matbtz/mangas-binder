@@ -1,7 +1,7 @@
 const BASE_URL = 'https://api.mangaupdates.com/v1';
 
 async function apiFetch(url, options = {}) {
-  const res = await fetch(url, options);
+  const res = await fetch(url, { ...options, signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`MangaUpdates API error ${res.status}: ${url}`);
   return res.json();
 }

@@ -1630,7 +1630,7 @@ async function viewSettings(v) {
   const numKeys = ['scanIntervalHours','downloadConcurrency','chapterConcurrency','refreshConcurrency','seriesRefreshTimeoutSec'];
   // English is the default, French the backup — list them first in that order.
   const enumKeys = { defaultPackagingMode:['volume','chapter'], defaultMonitorMode:['all','future','none'], defaultLanguage:['en','fr','ja','es','pt'] };
-  const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes','mangaFallbackEnabled'];
+  const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes','mangaFallbackEnabled','debugLogs'];
   const textKeys = ['flaresolverrUrl'];
 
   const sc = h('<div class="card"><h2>General</h2></div>');

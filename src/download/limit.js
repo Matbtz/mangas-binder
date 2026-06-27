@@ -51,7 +51,9 @@ export async function fetchRetry(url, { retries = 4, baseDelay = 1000, headers =
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (signal?.aborted) throw abortError();
     try {
-      const res = await withTimeout(fetch(url, { headers, signal }), timeoutMs, `fetch ${url}`);
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
+      const fetchSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      const res = await fetch(url, { headers, signal: fetchSignal });
       if (res.status === 429 || res.status >= 500) {
         const ra = Number(res.headers.get('retry-after'));
         const wait = ra ? ra * 1000 : baseDelay * 2 ** attempt;

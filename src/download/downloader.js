@@ -4,6 +4,13 @@ import path from 'path';
 import { pLimit, fetchRetry, abortError } from './limit.js';
 import { config } from '../core/config.js';
 import { getSetting } from '../core/settings.js';
+import { logHistory } from '../core/db.js';
+
+function debugLog(event, opts = {}) {
+  if (getSetting('debugLogs', false)) {
+    logHistory('debug.' + event, opts);
+  }
+}
 
 const USER_AGENT = 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)';
 
@@ -69,8 +76,9 @@ function normalizeEntries(pages) {
 // sending would otherwise block a chapter download slot indefinitely.
 const PAGE_TIMEOUT_MS = 45_000;
 
-export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onProgress, signal } = {}) {
+export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onProgress, signal, seriesId, chapterId } = {}) {
   if (!entries.length) throw new Error('No pages to fetch');
+  debugLog('downloader.fetch_start', { seriesId, chapterId, message: `Starting fetch of ${entries.length} pages into staging: ${dir}` });
   await mkdir(dir, { recursive: true });
   const limit = pLimit(concurrency);
 
@@ -79,7 +87,11 @@ export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onPro
   await Promise.all(entries.map((entry, i) => limit(async () => {
     if (signal?.aborted) throw abortError();
     const dest = path.join(dir, `${pad(i + 1)}${extFromUrl(entry.url)}`);
-    if (existsSync(dest)) { onProgress?.(++done, entries.length); return; }
+    if (existsSync(dest)) {
+      debugLog('downloader.page_skip', { seriesId, chapterId, message: `Skipping page ${i + 1}/${entries.length} (already exists)` });
+      onProgress?.(++done, entries.length);
+      return;
+    }
     const headers = { 'User-Agent': USER_AGENT, ...(entry.headers || {}) };
 
     // Per-page timeout controller; forward the chapter-level abort so user-cancel
@@ -90,6 +102,7 @@ export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onPro
     signal?.addEventListener('abort', onParentAbort, { once: true });
 
     try {
+      debugLog('downloader.page_fetch_start', { seriesId, chapterId, message: `Fetching page ${i + 1}/${entries.length}: ${entry.url}` });
       const res = await fetchRetry(entry.url, { headers, signal: pageCtrl.signal });
       if (!res.ok) throw new Error(`Page ${i + 1} HTTP ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
@@ -99,7 +112,11 @@ export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onPro
       const tmp = `${dest}.part`;
       await writeFile(tmp, buf);
       await rename(tmp, dest);
+      debugLog('downloader.page_fetch_success', { seriesId, chapterId, message: `Successfully saved page ${i + 1}/${entries.length}` });
       onProgress?.(++done, entries.length);
+    } catch (err) {
+      debugLog('downloader.page_fetch_error', { seriesId, chapterId, message: `Failed page ${i + 1}/${entries.length}: ${err.message || err}` });
+      throw err;
     } finally {
       clearTimeout(pageTimer);
       signal?.removeEventListener('abort', onParentAbort);
@@ -130,6 +147,9 @@ export async function downloadChapter(provider, chapter, opts = {}) {
   const { concurrency = 4, dataSaver = false, onProgress, signal } = opts;
   const dir = chapterStagingDir(chapter.series_id ?? chapter.seriesId, chapter.number);
 
+  const seriesId = chapter.series_id ?? chapter.seriesId;
+  const chapterId = chapter.id;
+  debugLog('downloader.chapter_start', { seriesId, chapterId, message: `Resolving pages for Chapter ${chapter.number}` });
   const targetId = (chapter.download_url && !chapter.download_url.startsWith('http')) ? chapter.download_url : (chapter.providerChapterId ?? chapter.provider_chapter_id);
   const pages = await provider.getChapterPages(targetId, {
     dataSaver,
@@ -139,6 +159,7 @@ export async function downloadChapter(provider, chapter, opts = {}) {
   });
   const entries = normalizeEntries(pages);
   if (!entries.length) throw new Error(`No pages resolved for chapter ${chapter.number}`);
+  debugLog('downloader.chapter_resolved', { seriesId, chapterId, message: `Resolved ${entries.length} pages for Chapter ${chapter.number}` });
 
-  return fetchPagesToStaging(dir, entries, { concurrency, onProgress, signal });
+  return fetchPagesToStaging(dir, entries, { concurrency, onProgress, signal, seriesId, chapterId });
 }

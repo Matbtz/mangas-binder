@@ -26,6 +26,12 @@ let forceStop = false;
 /** chapterId → AbortController for downloads currently in flight (for cancellation). */
 const inflight = new Map();
 
+function debugLog(event, opts = {}) {
+  if (getSetting('debugLogs', false)) {
+    logHistory('debug.' + event, opts);
+  }
+}
+
 export function isRunning() { return running; }
 
 /**
@@ -64,14 +70,17 @@ export async function runOnce({ limit = 200 } = {}) {
     const chapterConcurrency = getSetting('chapterConcurrency', 2);
     const dataSaver = getSetting('dataSaver', false);
     const wanted = chaptersReadyToDownload(limit);
+    debugLog('worker.started', { message: `Worker runOnce started with ${wanted.length} chapters in queue` });
     const affectedVolumeSeries = new Set();
     let processed = 0, imported = 0, failed = 0;
 
     // Pages download in parallel within a chapter (downloadConcurrency); chapters
     // run a few at a time (chapterConcurrency) to stay polite to the source.
     const limiter = pLimit(Math.max(1, chapterConcurrency));
-    await Promise.all(wanted.map(ch => limiter(async () => {
-      const series = getSeries(ch.series_id);
+    await Promise.all(wanted.map(ch => {
+      debugLog('chapter.queued', { seriesId: ch.series_id, chapterId: ch.id, message: `Chapter ${ch.number} queued in concurrency limiter` });
+      return limiter(async () => {
+        const series = getSeries(ch.series_id);
       if (!series || !series.monitored || series.monitor_mode === 'none') {
         setChapterState(ch.id, 'skipped', { error: null });
         return;
@@ -85,6 +94,7 @@ export async function runOnce({ limit = 200 } = {}) {
       }
       // Files come from the download/archive provider (= metadata provider for manga).
       const dlProvider = getProvider(series.download_provider || series.provider);
+      debugLog('chapter.provider', { seriesId: series.id, chapterId: ch.id, message: `Using download provider: ${dlProvider.name}` });
 
       const controller = new AbortController();
       let timedOut = false;
@@ -92,6 +102,7 @@ export async function runOnce({ limit = 200 } = {}) {
       inflight.set(ch.id, controller);
       setChapterState(ch.id, 'downloading', { error: null, prog_done: 0, prog_total: null, started_at: new Date().toISOString() });
       bumpChapterAttempt(ch.id);
+      debugLog('chapter.started', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} started downloading (attempts: ${ch.attempts ?? 0})` });
       try {
         const customUrl = ch.download_url;
         const isArchiveUrl = customUrl && (customUrl.startsWith('http') || customUrl.endsWith('.cbz') || customUrl.endsWith('.zip'));
@@ -127,6 +138,7 @@ export async function runOnce({ limit = 200 } = {}) {
           }
         }
         setChapterState(ch.id, 'downloaded', { staging_path: dir, pages: pageCount, prog_done: pageCount, prog_total: pageCount });
+        debugLog('chapter.finished', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} download finished, staging path: ${dir}` });
         processed++;
 
         if (series.packaging_mode === 'chapter') {
@@ -139,6 +151,7 @@ export async function runOnce({ limit = 200 } = {}) {
           affectedVolumeSeries.add(series.id);
         }
       } catch (err) {
+        debugLog('chapter.error', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} download caught error: ${err.message || err}` });
         // A genuine user cancellation: the chapter's OWN controller was aborted
         // (via cancelChapter) and no internal timeout was involved.
         // Internal AbortErrors — from apiFetch's 20 s timer or the page-level 45 s
@@ -169,13 +182,15 @@ export async function runOnce({ limit = 200 } = {}) {
         clearTimeout(chapterTimer);
         inflight.delete(ch.id);
       }
-    })));
+    });
+  }));
 
     // Volume-mode: try to package any volumes that just became complete.
     for (const seriesId of affectedVolumeSeries) {
       imported += await packageCompleteVolumes(seriesId);
     }
 
+    debugLog('worker.finished', { message: `Worker runOnce finished: processed=${processed}, imported=${imported}, failed=${failed}` });
     return { processed, imported, failed };
   } finally {
     forceStop = false;

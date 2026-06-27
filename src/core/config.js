@@ -64,5 +64,6 @@ export const config = {
     ntfyUrl: process.env.NTFY_URL || '',
     notifyOnImport: process.env.NOTIFY_ON_IMPORT !== 'false',
     notifyOnError: process.env.NOTIFY_ON_ERROR === 'true',
+    debugLogs: process.env.DEBUG_LOGS === 'true',
   },
 };

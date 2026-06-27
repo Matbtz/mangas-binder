@@ -36,6 +36,7 @@ export function ensureSeeded() {
   seedSetting('ntfyUrl', d.ntfyUrl);
   seedSetting('notifyOnImport', d.notifyOnImport);
   seedSetting('notifyOnError', d.notifyOnError);
+  seedSetting('debugLogs', d.debugLogs);
   seedSetting('libraryScanDirs', config.libraryScanDirs.join(', '));
   seedSetting('stagingDir', config.stagingDir);
   seedSetting('outputDir', config.outputDir);
