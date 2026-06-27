@@ -253,7 +253,7 @@ function libProgress(counts = {}) {
   return { owned, denom, total };
 }
 
-let _libState = { q: '', filter: 'all', sort: 'title' };
+let _libState = { q: '', filter: 'all', sort: 'title', selectMode: false, selected: new Set() };
 
 async function viewLibrary(v) {
   const [series, health] = await Promise.all([api('/series'), api('/health')]);
@@ -290,12 +290,31 @@ async function viewLibrary(v) {
         <option value="updated">Recently updated</option>
         <option value="progress">Least complete</option>
       </select>
+      <button class="btn sm${_libState.selectMode ? ' primary' : ''}" id="lib-select">${_libState.selectMode ? '✕ Cancel' : '☑ Select'}</button>
     </div>`);
     toolbar.querySelector('#lib-sort').value = _libState.sort;
     v.appendChild(toolbar);
 
     const grid = h('<div class="poster-grid"></div>');
     v.appendChild(grid);
+
+    const bulkBar = h(`<div class="bulk-bar" style="display:none">
+      <span class="bulk-count"></span>
+      <select id="bulk-mode">
+        <option value="all">All chapters</option>
+        <option value="future">Future only</option>
+        <option value="none">None (pause)</option>
+      </select>
+      <button class="btn sm primary" id="bulk-apply">Set monitoring</button>
+      <button class="btn sm" id="bulk-clear">Deselect all</button>
+    </div>`);
+    v.appendChild(bulkBar);
+
+    const updateBulkBar = () => {
+      const n = _libState.selected.size;
+      bulkBar.style.display = (n > 0 && _libState.selectMode) ? 'flex' : 'none';
+      bulkBar.querySelector('.bulk-count').textContent = `${n} selected`;
+    };
 
     const renderGrid = () => {
       const q = _libState.q.trim().toLowerCase();
@@ -304,7 +323,7 @@ async function viewLibrary(v) {
         const f = _libState.filter;
         if (f === 'manga') return (s.mediaType||'manga') === 'manga';
         if (f === 'comic') return s.mediaType === 'comic';
-        if (f === 'monitored') return s.monitored;
+        if (f === 'monitored') return s.monitored && s.monitorMode !== 'none';
         if (f === 'missing') { const { owned, denom } = libProgress(s.counts); return denom > owned; }
         if (f === 'downloading') return (s.counts?.downloading||0) > 0;
         return true;
@@ -319,7 +338,7 @@ async function viewLibrary(v) {
       });
       grid.innerHTML = '';
       if (!list.length) { grid.appendChild(h('<p class="muted" style="grid-column:1/-1">No series match.</p>')); return; }
-      for (const s of list) grid.appendChild(libPoster(s));
+      for (const s of list) grid.appendChild(libPoster(s, { onSelect: updateBulkBar }));
     };
 
     toolbar.querySelector('#lib-q').oninput = (e) => { _libState.q = e.target.value; renderGrid(); };
@@ -330,6 +349,36 @@ async function viewLibrary(v) {
       renderGrid();
     };
     toolbar.querySelector('#lib-sort').onchange = (e) => { _libState.sort = e.target.value; renderGrid(); };
+
+    toolbar.querySelector('#lib-select').onclick = () => {
+      _libState.selectMode = !_libState.selectMode;
+      if (!_libState.selectMode) _libState.selected.clear();
+      const btn = toolbar.querySelector('#lib-select');
+      btn.classList.toggle('primary', _libState.selectMode);
+      btn.textContent = _libState.selectMode ? '✕ Cancel' : '☑ Select';
+      renderGrid();
+      updateBulkBar();
+    };
+
+    bulkBar.querySelector('#bulk-apply').onclick = async () => {
+      const mode = bulkBar.querySelector('#bulk-mode').value;
+      const ids = [..._libState.selected];
+      if (!ids.length) return;
+      try {
+        await Promise.all(ids.map(id => api(`/series/${id}`, { method: 'PATCH', body: { monitorMode: mode } })));
+        toast(`Updated monitoring for ${ids.length} series`);
+        _libState.selectMode = false;
+        _libState.selected.clear();
+        route();
+      } catch (e) { toast(e.message); }
+    };
+
+    bulkBar.querySelector('#bulk-clear').onclick = () => {
+      _libState.selected.clear();
+      renderGrid();
+      updateBulkBar();
+    };
+
     renderGrid();
   }
 
@@ -377,11 +426,12 @@ async function viewLibrary(v) {
 }
 
 /** Build one Library poster card. */
-function libPoster(s) {
+function libPoster(s, { onSelect } = {}) {
   const { owned, denom } = libProgress(s.counts);
   const downloading = (s.counts?.downloading || 0) > 0;
-  const dotCls = downloading ? 'dl' : (s.monitored ? 'on' : 'off');
-  const statusText = downloading ? 'Downloading' : (s.monitored ? (s.status || 'monitored') : 'unmonitored');
+  const isMonitored = s.monitored && s.monitorMode !== 'none';
+  const dotCls = downloading ? 'dl' : (isMonitored ? 'on' : 'off');
+  const statusText = downloading ? 'Downloading' : (isMonitored ? (s.status || 'monitored') : 'unmonitored');
   const mediaTag = (s.mediaType || 'manga') === 'comic' ? 'Comic' : 'Manga';
   const poster = h(`<div class="poster fade-in">
     <div class="poster-art">
@@ -412,6 +462,16 @@ function libPoster(s) {
     { label: 'Unfollow', icon: '🗑', danger: true, onClick: async () => { if (confirm(`Unfollow ${s.title}?`)) { await api(`/series/${s.id}`, { method: 'DELETE' }); toast('Unfollowed'); route(); } } },
   ]);
   poster.querySelector('.poster-actions').append(openBtn, refreshBtn, more);
+
+  if (_libState.selectMode) {
+    if (_libState.selected.has(s.id)) poster.classList.add('selected');
+    poster.onclick = () => {
+      if (_libState.selected.has(s.id)) { _libState.selected.delete(s.id); poster.classList.remove('selected'); }
+      else { _libState.selected.add(s.id); poster.classList.add('selected'); }
+      if (onSelect) onSelect();
+    };
+  }
+
   return poster;
 }
 
@@ -443,7 +503,7 @@ async function showDetail(id) {
           <span class="status-badge queued">${esc(s.mediaType||'manga')}</span>
           <span class="status-badge ${s.status==='completed'?'imported':'queued'}">${esc(s.status||'ongoing')}</span>
           ${s.publisher ? `<span class="status-badge skipped">${esc(s.publisher)}</span>` : ''}
-          <span class="status-badge ${s.monitored?'imported':'skipped'}">${s.monitored?'🏷 Monitored':'⏸ Unmonitored'}</span>
+          <span class="status-badge ${s.monitored && s.monitorMode !== 'none' ? 'imported' : 'skipped'}">${s.monitored && s.monitorMode !== 'none' ? '🏷 Monitored' : '⏸ Unmonitored'}</span>
           <a href="${s.provider==='mangadex'?`https://mangadex.org/title/${s.providerSeriesId}`:`https://comicvine.gamespot.com/volume/4050-${s.providerSeriesId}/`}" target="_blank" class="status-badge skipped" style="color:var(--acc)">↗ ${esc(s.provider)}</a>
           <span class="status-badge ${s.folderPath?'imported':'skipped'}" style="cursor:pointer" id="folder-pill" title="Click to link local folder">📁 ${esc(s.folderPath||'Default Folder')}</span>
         </div>
