@@ -30,6 +30,8 @@ export function ensureSeeded() {
   seedSetting('dataSaver', d.dataSaver);
   seedSetting('keepLoosePages', d.keepLoosePages);
   seedSetting('extrapolateVolumes', d.extrapolateVolumes);
+  seedSetting('flaresolverrUrl', d.flaresolverrUrl);
+  seedSetting('mangaFallbackEnabled', d.mangaFallbackEnabled);
   seedSetting('discordWebhook', d.discordWebhook);
   seedSetting('ntfyUrl', d.ntfyUrl);
   seedSetting('notifyOnImport', d.notifyOnImport);
@@ -38,8 +40,11 @@ export function ensureSeeded() {
   seedSetting('stagingDir', config.stagingDir);
   seedSetting('outputDir', config.outputDir);
 
-  const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, 1)');
-  for (const p of allProviders()) ins.run(p.name);
+  // Most providers default to enabled; ToS-sensitive scrapers used only as a
+  // fallback (MangaKatana) default to disabled so they're opt-in.
+  const DISABLED_BY_DEFAULT = new Set(['mangakatana']);
+  const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, ?)');
+  for (const p of allProviders()) ins.run(p.name, DISABLED_BY_DEFAULT.has(p.name) ? 0 : 1);
 
   // Seed provider config from env on first run (Docker convenience). Existing
   // values set in the UI are never overwritten.

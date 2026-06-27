@@ -3,6 +3,7 @@ import { provider as mangaupdates } from './mangaupdates.js';
 import { provider as comicvine } from './comicvine.js';
 import { provider as getcomics } from './getcomics.js';
 import { provider as hardcover } from './hardcover.js';
+import { provider as mangakatana } from './mangakatana.js';
 
 /**
  * Provider registry. Every source registers here; the rest of the app only
@@ -12,9 +13,11 @@ import { provider as hardcover } from './hardcover.js';
  * knows which providers *exist* and exposes their static descriptors.
  *
  * Capabilities:
- *   metadata  — can search + describe series/chapters (mangadex, comicvine)
- *   download  — can resolve page-image URLs (mangadex)
- *   archive   — can resolve a whole-archive (CBZ/ZIP) URL per chapter (getcomics)
+ *   metadata    — can search + describe series/chapters (mangadex, comicvine)
+ *   download    — can resolve page-image URLs (mangadex)
+ *   archive     — can resolve a whole-archive (CBZ/ZIP) URL per chapter (getcomics)
+ *   pageFallback— supplies page images by (series, chapterNumber) as a fallback
+ *                 when the primary download provider fails (mangakatana)
  * A series pairs a metadata provider with a download/archive provider; for manga
  * they're the same (mangadex), for comics they differ (comicvine + getcomics).
  */
@@ -24,6 +27,7 @@ const REGISTRY = new Map([
   [comicvine.name, comicvine],
   [getcomics.name, getcomics],
   [hardcover.name, hardcover],
+  [mangakatana.name, mangakatana],
 ]);
 
 /** All registered providers (regardless of enabled state). */

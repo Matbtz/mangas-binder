@@ -21,18 +21,9 @@ import { runOnce, cancelChapter, cancelSeries } from '../../download/worker.js';
 import { notify } from '../../core/notify.js';
 import { bus } from '../../core/events.js';
 import { seriesView, chapterView } from '../views.js';
+import { normTitle, titlesMatch } from '../../core/library.js';
 
 const ACTIVE_STATES = ['wanted', 'queued', 'downloading', 'downloaded', 'failed'];
-
-/** Normalise a title for fuzzy comparison: lowercase, strip punctuation, collapse spaces. */
-function normTitle(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-}
-/** True when two title strings are close enough to be the same series. */
-function titlesMatch(a, b) {
-  const na = normTitle(a), nb = normTitle(b);
-  return na === nb || na.startsWith(nb) || nb.startsWith(na);
-}
 
 /** Fastify plugin: all /api routes. */
 export default async function apiRoutes(app) {

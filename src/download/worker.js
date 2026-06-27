@@ -8,6 +8,7 @@ import { getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
 import { downloadChapter, chapterStagingDir } from './downloader.js';
 import { downloadArchiveChapter } from './archive-downloader.js';
+import { downloadChapterViaFallback, fallbackEnabled } from './fallback.js';
 import { bindChapter, bindVolume } from '../core/binder.js';
 import { resolveVolumes } from '../core/mapping.js';
 import { notifyImport, notifyError } from '../core/notify.js';
@@ -72,9 +73,21 @@ export async function runOnce({ limit = 200 } = {}) {
           lastWrite = now;
           setChapterProgress(ch.id, done, total);
         };
-        const { dir, pageCount } = useArchive
-          ? await downloadArchiveChapter(activeProvider, series, ch, { signal: controller.signal })  // comics: whole CBZ/ZIP → pages
-          : await downloadChapter(dlProvider, ch, { concurrency, dataSaver, mangaId: series.provider_series_id, signal: controller.signal, onProgress }); // manga: page images
+        let dir, pageCount;
+        if (useArchive) {
+          ({ dir, pageCount } = await downloadArchiveChapter(activeProvider, series, ch, { signal: controller.signal })); // comics: whole CBZ/ZIP → pages
+        } else {
+          try {
+            ({ dir, pageCount } = await downloadChapter(dlProvider, ch, { concurrency, dataSaver, mangaId: series.provider_series_id, signal: controller.signal, onProgress })); // manga: page images
+          } catch (primaryErr) {
+            // MangaDex couldn't serve this chapter — fall back to scraping MangaKatana
+            // for the same chapter (manga only, when the fallback is enabled).
+            if (isAbort(primaryErr) || series.media_type !== 'manga' || !fallbackEnabled()) throw primaryErr;
+            logHistory('fallback.attempt', { seriesId: series.id, chapterId: ch.id, message: `MangaDex failed (${primaryErr.message}); trying MangaKatana` });
+            ({ dir, pageCount } = await downloadChapterViaFallback(series, ch, { signal: controller.signal, onProgress, concurrency }));
+            logHistory('fallback.success', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} via MangaKatana` });
+          }
+        }
         setChapterState(ch.id, 'downloaded', { staging_path: dir, pages: pageCount, prog_done: pageCount, prog_total: pageCount });
         processed++;
 
