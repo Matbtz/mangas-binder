@@ -421,6 +421,13 @@ async function showDetail(id) {
   // Secondary actions tucked into a "More" menu to declutter the toolbar.
   const moreMenu = menuButton('⋯ More', [
     { label: 'Link local folder', icon: '📁', onClick: linkFolderAction },
+    { label: 'Manage Files', icon: '🗂', onClick: () => openManageFilesModal({
+        seriesId: id,
+        seriesTitle: s.title,
+        chapters: s.chapters,
+        folderPath: s.folderPath || '',
+        onApplied: () => showDetail(id),
+      }) },
     { label: 'Extrapolate volumes', icon: '🪄', onClick: async () => { toast('Extrapolating volumes…'); await api(`/series/${id}/extrapolate-volumes`, { method:'POST' }); toast('Distributed chapters into volumes!'); showDetail(id); } },
     { label: 'Link / change MangaDex', icon: '🔗', onClick: async () => {
         const input = prompt(`Enter MangaDex Series ID or URL to link with ${s.title}:`, s.provider === 'mangadex' ? s.providerSeriesId : '');
@@ -798,6 +805,204 @@ function field(label, options, value, onChange) {
   sel.onchange = () => onChange(sel.value);
   wrap.appendChild(sel);
   return wrap;
+}
+
+// --- Manage Files modal (Sonarr-style manual file ↔ issue/volume mapping) ----
+function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onApplied }) {
+  const existing = document.getElementById('manage-files-modal');
+  if (existing) existing.remove();
+
+  const chUnit = chapters.length && chapters[0]?.volume !== undefined ? 'issue' : 'chapter';
+
+  const modal = h(`<div id="manage-files-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.82);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:var(--panel);border:1px solid var(--line2);border-radius:16px;width:100%;max-width:1100px;display:flex;flex-direction:column;gap:0;box-shadow:0 20px 60px rgba(0,0,0,0.8);margin:auto">
+      <div style="display:flex;align-items:center;gap:12px;padding:18px 22px;border-bottom:1px solid var(--line)">
+        <span style="font-size:16px;font-weight:700;color:#fff">📂 Manage Files — ${esc(seriesTitle)}</span>
+        <span class="muted" style="font-size:12px" id="mf-status"></span>
+        <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+          <button class="btn sm" id="mf-close">✕ Close</button>
+        </div>
+      </div>
+      <div style="padding:16px 22px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <label class="field" style="flex:1;min-width:260px">Directory to scan
+          <input id="mf-dir" type="text" placeholder="/path/to/your/files" value="${esc(folderPath||'')}" style="background:var(--panel2);border:1px solid var(--line2);color:var(--fg);padding:8px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%;margin-top:4px">
+        </label>
+        <button class="btn sm primary" id="mf-scan">🔍 Scan directory</button>
+        <button class="btn sm acc2" id="mf-auto" disabled title="Auto-fill mappings based on filenames">✨ Auto-match all</button>
+        <button class="btn sm ok" id="mf-apply" disabled>✓ Apply mappings</button>
+      </div>
+      <div id="mf-file-strip" style="display:none;padding:10px 22px;border-bottom:1px solid var(--line);background:var(--panel2)">
+        <span class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Files found</span>
+        <div id="mf-file-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+      </div>
+      <div style="overflow-y:auto;max-height:60vh">
+        <table style="width:100%;border-collapse:collapse">
+          <thead style="position:sticky;top:0;background:var(--panel2);z-index:1">
+            <tr>
+              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);width:60px">#</th>
+              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted)">Title</th>
+              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);width:110px">Status</th>
+              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted)">Map to file</th>
+              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);width:40px"></th>
+            </tr>
+          </thead>
+          <tbody id="mf-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>`);
+
+  // State
+  let availableFiles = []; // { name, path }
+  let mappings = new Map(); // chapterId → filePath
+  const pendingRow = new Map(); // chapterId → { selectEl, clearBtn }
+
+  const statusEl = modal.querySelector('#mf-status');
+  const autoBtn = modal.querySelector('#mf-auto');
+  const applyBtn = modal.querySelector('#mf-apply');
+  const fileStrip = modal.querySelector('#mf-file-strip');
+  const fileListEl = modal.querySelector('#mf-file-list');
+  const tbody = modal.querySelector('#mf-tbody');
+  const dirInput = modal.querySelector('#mf-dir');
+
+  const updateApplyBtn = () => {
+    applyBtn.disabled = mappings.size === 0;
+    applyBtn.textContent = mappings.size > 0 ? `✓ Apply ${mappings.size} mapping${mappings.size > 1 ? 's' : ''}` : '✓ Apply mappings';
+  };
+
+  const buildFileOptions = (selectedPath = '') => {
+    let opts = `<option value="">— not mapped —</option>`;
+    for (const f of availableFiles) {
+      opts += `<option value="${esc(f.path)}" ${f.path === selectedPath ? 'selected' : ''}>${esc(f.name)}</option>`;
+    }
+    return opts;
+  };
+
+  const setRowMapping = (chapterId, filePath, reason = '') => {
+    mappings.set(chapterId, filePath);
+    const { selectEl, clearBtn, reasonEl } = pendingRow.get(chapterId) || {};
+    if (selectEl) selectEl.value = filePath;
+    if (clearBtn) clearBtn.style.display = filePath ? '' : 'none';
+    if (reasonEl) { reasonEl.textContent = reason ? `✨ ${reason}` : ''; reasonEl.style.color = 'var(--acc)'; }
+    updateApplyBtn();
+  };
+
+  const clearRowMapping = (chapterId) => {
+    mappings.delete(chapterId);
+    const { selectEl, clearBtn, reasonEl } = pendingRow.get(chapterId) || {};
+    if (selectEl) selectEl.value = '';
+    if (clearBtn) clearBtn.style.display = 'none';
+    if (reasonEl) reasonEl.textContent = '';
+    updateApplyBtn();
+  };
+
+  // Build chapter rows
+  const buildRows = () => {
+    tbody.innerHTML = '';
+    for (const c of chapters) {
+      const statusHtml = c.state === 'imported'
+        ? `<span class="status-badge imported" style="font-size:10px">✓ Available</span>`
+        : c.state === 'wanted'
+        ? `<span class="status-badge wanted" style="font-size:10px">● Wanted</span>`
+        : c.state === 'skipped'
+        ? `<span class="status-badge skipped" style="font-size:10px">⏸ Skipped</span>`
+        : `<span class="status-badge queued" style="font-size:10px">${esc(c.state)}</span>`;
+
+      const hasCurrent = mappings.has(c.id);
+      const currentFile = hasCurrent ? mappings.get(c.id) : (c.state === 'imported' && c.cbzPath ? c.cbzPath : '');
+
+      const tr = h(`<tr data-chid="${c.id}" style="border-bottom:1px solid var(--line)">
+        <td style="padding:8px 12px;color:var(--muted);font-weight:600;font-size:13px">${esc(c.number)}</td>
+        <td style="padding:8px 12px;font-size:13px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.title||'')}">${esc(c.title||`Chapter ${c.number}`)}</td>
+        <td style="padding:8px 12px">${statusHtml}</td>
+        <td style="padding:8px 12px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <select style="flex:1;background:var(--panel2);border:1px solid var(--line2);color:var(--fg);padding:5px 8px;border-radius:7px;font-size:12px;font-family:inherit" class="mf-select">${buildFileOptions(currentFile)}</select>
+            <span style="font-size:11px;color:var(--acc);white-space:nowrap" class="mf-reason"></span>
+          </div>
+        </td>
+        <td style="padding:8px 12px">
+          <button class="btn sm icon mf-clear" style="display:${currentFile ? '' : 'none'}" title="Clear mapping">✕</button>
+        </td>
+      </tr>`);
+
+      const selectEl = tr.querySelector('.mf-select');
+      const clearBtn = tr.querySelector('.mf-clear');
+      const reasonEl = tr.querySelector('.mf-reason');
+      pendingRow.set(c.id, { selectEl, clearBtn, reasonEl });
+
+      selectEl.onchange = () => {
+        const v = selectEl.value;
+        if (v) setRowMapping(c.id, v);
+        else clearRowMapping(c.id);
+      };
+      clearBtn.onclick = () => clearRowMapping(c.id);
+
+      tbody.appendChild(tr);
+    }
+  };
+  buildRows();
+
+  // Scan directory
+  modal.querySelector('#mf-scan').onclick = async () => {
+    const dir = dirInput.value.trim();
+    if (!dir) { toast('Enter a directory path first'); return; }
+    try {
+      statusEl.textContent = 'Scanning…';
+      const res = await api(`/files/list?dir=${encodeURIComponent(dir)}`);
+      availableFiles = res.files || [];
+      statusEl.textContent = `${availableFiles.length} file(s) found`;
+      autoBtn.disabled = availableFiles.length === 0;
+      fileStrip.style.display = '';
+      fileListEl.innerHTML = availableFiles.map(f =>
+        `<span class="pill" style="font-size:11px;cursor:default" title="${esc(f.path)}">${esc(f.name)}</span>`
+      ).join('');
+      // Rebuild selects with new file options
+      for (const [cid, { selectEl }] of pendingRow) {
+        const cur = mappings.get(cid) || '';
+        selectEl.innerHTML = buildFileOptions(cur);
+      }
+    } catch (e) { statusEl.textContent = e.message; toast('Scan failed: ' + e.message); }
+  };
+
+  // Auto-match
+  autoBtn.onclick = async () => {
+    const dir = dirInput.value.trim();
+    if (!dir) return;
+    try {
+      statusEl.textContent = 'Auto-matching…';
+      autoBtn.disabled = true;
+      const res = await api(`/series/${seriesId}/auto-map?dir=${encodeURIComponent(dir)}`);
+      let filled = 0;
+      for (const sg of (res.suggestions || [])) {
+        if (!mappings.has(sg.chapterId) || !mappings.get(sg.chapterId)) {
+          setRowMapping(sg.chapterId, sg.filePath, sg.matchReason);
+          filled++;
+        }
+      }
+      statusEl.textContent = `Auto-matched ${filled} mapping${filled !== 1 ? 's' : ''} (${res.matchedFiles}/${res.totalFiles} files)`;
+      autoBtn.disabled = false;
+    } catch (e) { statusEl.textContent = e.message; autoBtn.disabled = false; }
+  };
+
+  // Apply mappings
+  applyBtn.onclick = async () => {
+    if (mappings.size === 0) return;
+    try {
+      applyBtn.disabled = true;
+      statusEl.textContent = 'Applying…';
+      const body = { mappings: [...mappings.entries()].map(([chapterId, filePath]) => ({ chapterId, filePath })) };
+      const res = await api(`/series/${seriesId}/map-files`, { method: 'POST', body });
+      toast(`✓ Applied ${res.applied} file mapping${res.applied !== 1 ? 's' : ''}!`);
+      modal.remove();
+      if (onApplied) onApplied();
+    } catch (e) { toast('Failed: ' + e.message); applyBtn.disabled = false; statusEl.textContent = ''; }
+  };
+
+  modal.querySelector('#mf-close').onclick = () => modal.remove();
+  modal.onclick = e => { if (e.target === modal) modal.remove(); };
+
+  document.body.appendChild(modal);
 }
 
 // --- Add -------------------------------------------------------------------

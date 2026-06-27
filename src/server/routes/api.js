@@ -1,3 +1,5 @@
+import { readdirSync, existsSync, statSync } from 'fs';
+import path from 'path';
 import { getProvider, describeProviders } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
 import { searchVolumes } from '../../providers/comicvine.js';
@@ -13,7 +15,7 @@ import {
   setProviderEnabled, setProviderConfig, getProviderConfig, isProviderEnabled,
 } from '../../core/settings.js';
 import { followSeries, refreshSeries } from '../../core/series-service.js';
-import { scanLibrary } from '../../core/library-scan.js';
+import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
@@ -493,6 +495,134 @@ export default async function apiRoutes(app) {
     });
 
     return { untracked: finalUntracked };
+  });
+
+  // --- Manage Files (Sonarr-style manual file mapping) ---
+
+  // List CBZ/EPUB files in a directory for the file picker.
+  app.get('/api/files/list', async (req, reply) => {
+    const dir = String(req.query.dir || '').trim();
+    if (!dir) return reply.code(400).send({ error: 'dir is required' });
+    if (!existsSync(dir)) return reply.code(404).send({ error: 'Directory not found' });
+    let stat;
+    try { stat = statSync(dir); } catch { return reply.code(400).send({ error: 'Cannot stat path' }); }
+    if (!stat.isDirectory()) return reply.code(400).send({ error: 'Not a directory' });
+    const entries = [];
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.name.startsWith('.')) continue;
+      const full = path.join(dir, e.name);
+      const ext = e.name.toLowerCase();
+      if (e.isFile() && (ext.endsWith('.cbz') || ext.endsWith('.epub'))) {
+        entries.push({ name: e.name, path: full });
+      }
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    return { dir, files: entries };
+  });
+
+  // Auto-suggest file→chapter mappings by scanning a directory.
+  app.get('/api/series/:id/auto-map', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const dir = String(req.query.dir || '').trim();
+    if (!dir || !existsSync(dir)) return reply.code(400).send({ error: 'dir not found' });
+
+    const chapters = listChaptersForSeries(s.id);
+    const byNumber = new Map(chapters.map(c => [String(parseFloat(c.number)), c]));
+    const byVolume = new Map();
+    for (const c of chapters) {
+      if (c.volume != null && c.volume !== '') {
+        const vk = String(parseFloat(c.volume));
+        if (!byVolume.has(vk)) byVolume.set(vk, []);
+        byVolume.get(vk).push(c);
+      }
+    }
+
+    const suggestions = []; // { chapterId, chapterNumber, chapterTitle, filePath, matchReason }
+    const usedFiles = new Set();
+    const usedChapters = new Set();
+
+    const files = [];
+    try {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name.startsWith('.')) continue;
+        const ext = e.name.toLowerCase();
+        if (e.isFile() && (ext.endsWith('.cbz') || ext.endsWith('.epub')))
+          files.push(path.join(dir, e.name));
+      }
+    } catch { return reply.code(400).send({ error: 'Cannot read directory' }); }
+    files.sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true }));
+
+    for (const filePath of files) {
+      const info = await readCbzInfo(filePath);
+
+      // 1. Try issue number matching (comics: "#10 v10.cbz" → chapter 10)
+      if (info.issueNum && byNumber.has(info.issueNum) && !usedChapters.has(info.issueNum)) {
+        const ch = byNumber.get(info.issueNum);
+        suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `issue #${info.issueNum}` });
+        usedFiles.add(filePath); usedChapters.add(info.issueNum);
+        continue;
+      }
+
+      // 2. Try volume matching → mark all chapters in that volume
+      if (info.volume) {
+        const volChaps = byVolume.get(String(parseFloat(info.volume)));
+        if (volChaps && volChaps.length > 0) {
+          for (const ch of volChaps) {
+            if (!usedChapters.has(ch.number)) {
+              suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `vol ${info.volume}` });
+              usedChapters.add(ch.number);
+            }
+          }
+          usedFiles.add(filePath);
+          continue;
+        }
+      }
+
+      // 3. Bare-number fallback: extract last number from filename as volume
+      const base = path.basename(filePath).replace(/\.(cbz|epub)$/i, '');
+      const bareM = base.match(/(?:^|[-_\s])0*(\d{1,4}(?:\.\d+)?)(?:$|[-_\s\.])/);
+      if (bareM) {
+        const vNum = String(parseFloat(bareM[1]));
+        const volChaps = byVolume.get(vNum);
+        if (volChaps && volChaps.length > 0) {
+          for (const ch of volChaps) {
+            if (!usedChapters.has(ch.number)) {
+              suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `bare #${vNum}` });
+              usedChapters.add(ch.number);
+            }
+          }
+          usedFiles.add(filePath);
+          continue;
+        }
+        // Try as chapter number
+        if (byNumber.has(vNum) && !usedChapters.has(vNum)) {
+          const ch = byNumber.get(vNum);
+          suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `bare ch ${vNum}` });
+          usedFiles.add(filePath); usedChapters.add(vNum);
+        }
+      }
+    }
+
+    return { seriesId: s.id, suggestions, totalFiles: files.length, matchedFiles: usedFiles.size };
+  });
+
+  // Apply bulk file→chapter mappings (mark chapters as imported with the given path).
+  app.post('/api/series/:id/map-files', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const { mappings = [] } = req.body || {};
+    if (!Array.isArray(mappings) || mappings.length === 0) return reply.code(400).send({ error: 'mappings array required' });
+
+    let applied = 0;
+    for (const { chapterId, filePath } of mappings) {
+      const ch = getChapter(Number(chapterId));
+      if (!ch || ch.series_id !== s.id) continue;
+      if (!filePath || !existsSync(filePath)) continue;
+      setChapterState(ch.id, 'imported', { cbz_path: filePath, calculated: ch.calculated || 0, language: s.language || 'en' });
+      applied++;
+    }
+    return { ok: true, applied };
   });
 
   // --- Notifications ---
