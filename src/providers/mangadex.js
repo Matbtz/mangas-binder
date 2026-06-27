@@ -6,6 +6,29 @@ const BASE_URL = 'https://api.mangadex.org';
 // Include all content ratings so adult-tagged manga chapters are not silently filtered
 const CONTENT_RATINGS = 'contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic';
 
+/**
+ * Score a chapter language for ranking within a set of candidates.
+ *
+ * Priority:
+ *  - If series language is 'fr': French > English > others (user explicitly chose French-first)
+ *  - Otherwise (including 'en' or any accidentally-stored exotic language): English > French > series lang
+ *
+ * This means a series stored with language='es' or 'vi' due to a past misconfiguration
+ * will still prefer English chapters, effectively self-healing on the next refresh.
+ */
+function langScore(seriesLang, candidateLang) {
+  if (seriesLang === 'fr') {
+    if (candidateLang === 'fr') return 4;
+    if (candidateLang === 'en') return 3;
+    return 1;
+  }
+  // For 'en' or any non-standard series language: English is always top priority
+  if (candidateLang === 'en') return 4;
+  if (candidateLang === 'fr') return 3;
+  if (candidateLang === seriesLang) return 2;
+  return 1;
+}
+
 const HEADERS = { 'User-Agent': 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)' };
 
 async function apiFetch(url) {
@@ -205,24 +228,14 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
   for (const [number, candidates] of candidatesByChapter.entries()) {
     candidates.sort((a, b) => {
       // 1. Language priority
-      const getLangScore = (l) => {
-        if (l === lang) return 4;
-        if (l === 'en') return 3;
-        if (l === 'fr') return 2;
-        return 1;
-      };
-      const scoreA = getLangScore(a.lang);
-      const scoreB = getLangScore(b.lang);
-      if (scoreA !== scoreB) {
-        return scoreB - scoreA;
-      }
+      const scoreA = langScore(lang, a.lang);
+      const scoreB = langScore(lang, b.lang);
+      if (scoreA !== scoreB) return scoreB - scoreA;
 
       // 2. Pages > 0 priority (avoid empty/broken chapters)
       const pagesA = a.pages || 0;
       const pagesB = b.pages || 0;
-      if ((pagesA > 0) !== (pagesB > 0)) {
-        return pagesA > 0 ? -1 : 1;
-      }
+      if ((pagesA > 0) !== (pagesB > 0)) return pagesA > 0 ? -1 : 1;
 
       // 3. Keep original order
       return 0;
@@ -260,23 +273,30 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
  */
 export async function getChapterPages(chapterId, { dataSaver = false, mangaId = null, chapterNum = null, lang = 'en' } = {}) {
   let cid = chapterId;
+  // Language filter for fallback /chapter lookups — mirrors the same chain used in listChapters
+  // so synthetic/failed chapter IDs never pull content from unexpected languages.
+  const langQs = [...new Set([lang, 'en', 'fr'])]
+    .map(l => `translatedLanguage[]=${encodeURIComponent(l)}`)
+    .join('&');
   const sortChapters = (list) => {
     return [...list].sort((a, b) => {
-      // Series language wins, then English (default), then French (backup).
-      const getLangScore = (l) => {
-        if (l === lang) return 4;
-        if (l === 'en') return 3;
-        if (l === 'fr') return 2;
-        return 1;
-      };
-      const scoreA = getLangScore(a.attributes?.translatedLanguage);
-      const scoreB = getLangScore(b.attributes?.translatedLanguage);
+      const scoreA = langScore(lang, a.attributes?.translatedLanguage);
+      const scoreB = langScore(lang, b.attributes?.translatedLanguage);
       if (scoreA !== scoreB) return scoreB - scoreA;
       const pagesA = a.attributes?.pages || 0;
       const pagesB = b.attributes?.pages || 0;
       if ((pagesA > 0) !== (pagesB > 0)) return pagesA > 0 ? -1 : 1;
       return 0;
     });
+  };
+  // After sorting, only accept the winner if it's English or French.
+  // If only a non-preferred language is available, return null so the caller can
+  // skip setting cid and let the error path trigger the MangaKatana fallback.
+  const pickIfPreferred = (sorted) => {
+    if (!sorted.length) return null;
+    const winner = sorted[0];
+    const wl = winner.attributes?.translatedLanguage;
+    return (wl === 'en' || wl === 'fr') ? winner : null;
   };
 
   if (cid && (cid.startsWith('agg-') || cid.startsWith('mu-synth-'))) {
@@ -292,10 +312,14 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
     }
     if (mUUID && num) {
       try {
-        const res = await apiFetch(`${BASE_URL}/chapter?manga=${mUUID}&chapter=${num}&order[publishAt]=desc`);
+        const res = await apiFetch(
+          `${BASE_URL}/chapter?manga=${mUUID}&chapter=${num}&${CONTENT_RATINGS}&${langQs}&order[publishAt]=desc`
+        );
         if (res?.data?.length) {
-          const sorted = sortChapters(res.data);
-          cid = sorted[0].id;
+          const winner = pickIfPreferred(sortChapters(res.data));
+          if (winner) cid = winner.id;
+          // If no en/fr chapter found, leave cid as the synthetic ID so the
+          // at-home fetch below fails and the MangaKatana fallback can take over.
         }
       } catch {}
     }
@@ -307,11 +331,15 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
   } catch (err) {
     if (mangaId && chapterNum) {
       try {
-        const res = await apiFetch(`${BASE_URL}/chapter?manga=${mangaId}&chapter=${chapterNum}&order[publishAt]=desc`);
+        const res = await apiFetch(
+          `${BASE_URL}/chapter?manga=${mangaId}&chapter=${chapterNum}&${CONTENT_RATINGS}&${langQs}&order[publishAt]=desc`
+        );
         if (res?.data?.length) {
-          const sorted = sortChapters(res.data);
-          cid = sorted[0].id;
-          data = await apiFetch(`${BASE_URL}/at-home/server/${cid}`);
+          const winner = pickIfPreferred(sortChapters(res.data));
+          if (winner) {
+            cid = winner.id;
+            data = await apiFetch(`${BASE_URL}/at-home/server/${cid}`);
+          }
         }
       } catch {}
     }
