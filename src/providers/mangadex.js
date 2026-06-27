@@ -156,9 +156,20 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
 
   const candidatesByChapter = new Map();
 
+  // Build a language filter: always request the target language; add 'en' as
+  // a fallback when the target is something else (avoids a total blackout when
+  // a chapter only exists in English).  The aggregate (fetched above without a
+  // filter) already provides cross-language volume data for every chapter, so
+  // restricting the feed to 1–2 languages is safe and dramatically reduces the
+  // payload for long-running series (One Piece in every language = 20,000+ entries
+  // vs ~1,100 in English only).
+  const langFilter = [...new Set([lang, 'en'])]
+    .map(l => `translatedLanguage[]=${encodeURIComponent(l)}`)
+    .join('&');
+
   while (offset < total) {
     const url = `${BASE_URL}/manga/${cleanId}/feed`
-      + `?order[chapter]=asc&limit=${limit}&offset=${offset}&${CONTENT_RATINGS}`;
+      + `?order[chapter]=asc&limit=${limit}&offset=${offset}&${CONTENT_RATINGS}&${langFilter}`;
     const data = await apiFetch(url);
     total = data.total ?? 0;
 
