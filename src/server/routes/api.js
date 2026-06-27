@@ -19,7 +19,7 @@ import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
-import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle } from '../../download/worker.js';
+import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning } from '../../download/worker.js';
 import { notify } from '../../core/notify.js';
 import { bus } from '../../core/events.js';
 import { seriesView, chapterView } from '../views.js';
@@ -78,9 +78,9 @@ export default async function apiRoutes(app) {
   app.get('/api/series', async () => listSeries().map(s => seriesView(s)));
 
   app.post('/api/series', async (req, reply) => {
-    const { provider = 'mangadex', providerSeriesId, monitorMode, packagingMode, language } = req.body || {};
+    const { provider = 'mangadex', providerSeriesId, monitorMode, monitorFromVolume, packagingMode, language } = req.body || {};
     if (!providerSeriesId) return reply.code(400).send({ error: 'providerSeriesId is required' });
-    const series = await followSeries(provider, providerSeriesId, { monitorMode, packagingMode, language });
+    const series = await followSeries(provider, providerSeriesId, { monitorMode, monitorFromVolume, packagingMode, language });
     return reply.code(201).send(seriesView(series));
   });
 
@@ -96,7 +96,10 @@ export default async function apiRoutes(app) {
     const body = req.body || {};
 
     // Cascade chapter states when monitor mode changes
-    if (body.monitorMode && body.monitorMode !== s.monitor_mode) {
+    const modeChanged = body.monitorMode && body.monitorMode !== s.monitor_mode;
+    const fromVolumeChanged = body.monitorMode === 'from' && body.monitorFromVolume != null &&
+      parseFloat(body.monitorFromVolume) !== s.monitor_from_volume;
+    if (modeChanged || fromVolumeChanged) {
       const chapters = listChaptersForSeries(s.id);
       if (body.monitorMode === 'none') {
         // Cancel all active downloads, then skip everything remaining
@@ -111,6 +114,21 @@ export default async function apiRoutes(app) {
         const ids = chapters.filter(c => !KEEP.has(c.state)).map(c => c.id);
         if (ids.length) bulkSetChapterState(ids, 'wanted', { resetAttempts: true });
         runOnce().catch(() => {});
+      } else if (body.monitorMode === 'from' || (body.monitorMode == null && s.monitor_mode === 'from')) {
+        // Apply threshold: chapters >= fromVolume → wanted, others → skipped.
+        // Imported/bindery chapters are never downgraded.
+        const threshold = parseFloat(body.monitorFromVolume ?? s.monitor_from_volume ?? 1);
+        const OWNED = new Set(['imported', 'bindery']);
+        const wantIds = [], skipIds = [];
+        for (const c of chapters) {
+          if (OWNED.has(c.state)) continue;
+          const chVol = c.volume != null ? parseFloat(c.volume) : null;
+          const meetsThreshold = chVol != null && chVol >= threshold;
+          if (meetsThreshold && (c.state === 'skipped' || c.state === 'failed')) wantIds.push(c.id);
+          if (!meetsThreshold && !['skipped'].includes(c.state)) skipIds.push(c.id);
+        }
+        if (skipIds.length) { await cancelSeries(s.id); bulkSetChapterState(skipIds, 'skipped'); }
+        if (wantIds.length) { bulkSetChapterState(wantIds, 'wanted', { resetAttempts: true }); runOnce().catch(() => {}); }
       }
       // 'future', 'some': no cascade on existing chapters
     }
@@ -355,6 +373,12 @@ export default async function apiRoutes(app) {
   // Drain the queue right now instead of waiting for the scheduler.
   // Resets any chapters stuck in `downloading` (worker idle only), then starts.
   app.post('/api/downloads/run', async () => {
+    if (isRunning()) {
+      // Worker is alive but possibly stuck on slow CDN nodes. Abort every
+      // in-flight download so they requeue as `wanted`, then restart fresh.
+      const aborted = abortStuckInFlight();
+      if (aborted > 0) await new Promise(r => setTimeout(r, 500));
+    }
     resetStaleIfIdle();
     runOnce().catch(() => {});
     return { ok: true, started: true };

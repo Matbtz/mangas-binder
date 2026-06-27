@@ -20,7 +20,7 @@ import { logHistory } from './db.js';
  *
  * @param {string} providerName     metadata provider (mangadex | comicvine)
  * @param {string} providerSeriesId
- * @param {{ monitorMode?, packagingMode?, language?, downloadProvider? }} opts
+ * @param {{ monitorMode?, monitorFromVolume?, packagingMode?, language?, downloadProvider? }} opts
  */
 export async function followSeries(providerName, providerSeriesId, opts = {}) {
   const provider = getProvider(providerName);
@@ -59,6 +59,7 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
     language: opts.language || getSetting('defaultLanguage', 'en'),
     monitored: true,
     monitorMode: opts.monitorMode || getSetting('defaultMonitorMode', 'all'),
+    monitorFromVolume: opts.monitorFromVolume ?? null,
     packagingMode: opts.packagingMode || defaultPackaging,
     totalVolumesHint,
   });
@@ -93,6 +94,8 @@ export async function refreshSeries(seriesId) {
   const firstScan = !series.last_scan_at;
   const futureOnly = series.monitor_mode === 'future';
   const noneMode = series.monitor_mode === 'none';
+  const fromMode = series.monitor_mode === 'from';
+  const fromVolume = fromMode && series.monitor_from_volume != null ? parseFloat(series.monitor_from_volume) : null;
 
   // Backfill a missing cover from the source so the poster grid isn't blank
   // (best-effort; an extra fetch only when we have nothing to show).
@@ -151,7 +154,17 @@ export async function refreshSeries(seriesId) {
 
   let added = 0;
   for (const ch of chapters) {
-    const initialState = (noneMode || (futureOnly && firstScan)) ? 'skipped' : 'wanted';
+    let initialState;
+    if (noneMode || (futureOnly && firstScan)) {
+      initialState = 'skipped';
+    } else if (fromMode && fromVolume != null) {
+      // Skip chapters whose volume is below the threshold; null-volume chapters
+      // are skipped too until a refresh assigns them a real volume number.
+      const chVol = ch.volume != null ? parseFloat(ch.volume) : null;
+      initialState = (chVol != null && chVol >= fromVolume) ? 'wanted' : 'skipped';
+    } else {
+      initialState = 'wanted';
+    }
     const inserted = upsertChapter(seriesId, {
       provider: series.provider,
       providerChapterId: ch.id,

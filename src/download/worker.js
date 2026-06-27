@@ -20,9 +20,25 @@ const MAX_ATTEMPTS = 5;
 // the worker (and leaving chapters in `downloading` for hours).
 const CHAPTER_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 let running = false;
+/** Set during force-recovery (Run button while stuck) to distinguish from user-cancel. */
+let forceStop = false;
 
 /** chapterId → AbortController for downloads currently in flight (for cancellation). */
 const inflight = new Map();
+
+export function isRunning() { return running; }
+
+/**
+ * Abort every in-flight download so the worker loop can drain quickly and be
+ * restarted. Sets forceStop so the catch block doesn't treat the aborts as
+ * user cancellations (chapters requeue as `wanted`, not `skipped`).
+ */
+export function abortStuckInFlight() {
+  forceStop = true;
+  let count = 0;
+  for (const ctrl of inflight.values()) { ctrl.abort(); count++; }
+  return count;
+}
 
 /** True if the error came from a user-requested cancellation rather than a real failure. */
 const isAbort = (err) => err?.name === 'AbortError';
@@ -128,7 +144,7 @@ export async function runOnce({ limit = 200 } = {}) {
         // Internal AbortErrors — from apiFetch's 20 s timer or the page-level 45 s
         // timer — are converted to plain Errors (mangadex.js) or arrive with
         // controller.signal.aborted=false, so they fall through to the retry path.
-        const userCancelled = isAbort(err) && controller.signal.aborted && !timedOut;
+        const userCancelled = isAbort(err) && controller.signal.aborted && !timedOut && !forceStop;
         if (userCancelled) {
           setChapterState(ch.id, 'skipped', { error: null, prog_done: null, prog_total: null });
           await cleanupStaging(series.id, ch.number);
@@ -162,6 +178,7 @@ export async function runOnce({ limit = 200 } = {}) {
 
     return { processed, imported, failed };
   } finally {
+    forceStop = false;
     running = false;
   }
 }

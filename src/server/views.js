@@ -22,6 +22,7 @@ export function seriesView(row, { withCounts = true } = {}) {
     language: row.language,
     monitored: !!row.monitored,
     monitorMode: row.monitor_mode,
+    monitorFromVolume: row.monitor_from_volume ?? null,
     packagingMode: row.packaging_mode,
     totalVolumesHint: row.total_volumes_hint,
     lastScanAt: row.last_scan_at,
