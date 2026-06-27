@@ -203,6 +203,7 @@ export function setChapterState(id, state, extra = {}) {
     staging_path: 'staging_path', cbz_path: 'cbz_path', error: 'error',
     volume: 'volume', pages: 'pages', calculated: 'calculated', download_url: 'download_url',
     language: 'language', prog_done: 'prog_done', prog_total: 'prog_total', started_at: 'started_at',
+    attempts: 'attempts',
   })) {
     if (extra[k] !== undefined) { cols.push(`${col} = ?`); vals.push(extra[k]); }
   }
@@ -223,11 +224,12 @@ export function bumpChapterAttempt(id) {
   getDb().prepare('UPDATE chapters SET attempts = attempts + 1 WHERE id = ?').run(id);
 }
 
-export function bulkSetChapterState(ids, state) {
+export function bulkSetChapterState(ids, state, { resetAttempts = false } = {}) {
   if (!ids.length) return 0;
   const db = getDb();
+  const attemptsClause = resetAttempts ? ', attempts = 0' : '';
   const stmt = db.prepare(
-    "UPDATE chapters SET state = ?, error = NULL, updated_at = datetime('now') WHERE id = ?"
+    `UPDATE chapters SET state = ?, error = NULL${attemptsClause}, updated_at = datetime('now') WHERE id = ?`
   );
   // node:sqlite (DatabaseSync) has no .transaction() helper; wrap manually.
   db.exec('BEGIN');
