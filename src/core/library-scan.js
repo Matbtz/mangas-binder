@@ -37,7 +37,12 @@ import { getSetting } from './settings.js';
  */
 
 const CBZ_PAGE_RE = /^ch(\d+(?:\.\d+)?)_p\d+/i;
+// Long form: "Vol. 07", "Volume 7", "Tome 3". Strips leading zeros.
 const FILENAME_VOL_RE = /\b(?:vol(?:ume)?|tome)\.?\s*0*(\d+(?:\.\d+)?)/i;
+// Short form: "v07", "v101" — common for downloaded manga/comics.
+const FILENAME_SHORT_VOL_RE = /\bv(\d{1,4}(?:\.\d+)?)\b/;
+// Issue number for comics: "#10", "# 10", "#010"
+const FILENAME_ISSUE_RE = /#\s*0*(\d+(?:\.\d+)?)\b/;
 const WEB_ID_RE = /mangadex\.org\/title\/([0-9a-f-]{36})/i;
 const COMICVINE_ID_RE = /comicvine\.gamespot\.com\/volume\/4050-(\d+)/i;
 
@@ -139,11 +144,19 @@ export async function readCbzInfo(filePath) {
     chapters = [...found];
   } catch { /* unreadable/corrupt CBZ — skip */ }
 
-  const volMatch = path.basename(filePath).match(FILENAME_VOL_RE);
-  const volume = volMatch ? String(parseFloat(volMatch[1])) : null;
+  const base = path.basename(filePath);
+  const issueMatch = base.match(FILENAME_ISSUE_RE);
+  const issueNum = issueMatch ? String(parseFloat(issueMatch[1])) : null;
+  const volMatch = base.match(FILENAME_VOL_RE);
+  // Only fall back to "v07" short form when no issue number is present — in files like
+  // "Series #10 v10.cbz" the vN suffix is a version tag, not a volume number.
+  const shortVolMatch = !volMatch && !issueNum && base.match(FILENAME_SHORT_VOL_RE);
+  const volume = volMatch ? String(parseFloat(volMatch[1]))
+               : shortVolMatch ? String(parseFloat(shortVolMatch[1]))
+               : null;
   const hasSeriesTag = !!series;
-  if (!series) series = path.basename(filePath).replace(/\.(cbz|epub)$/i, '');
-  const info = { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, chapters, isEpub };
+  if (!series) series = base.replace(/\.(cbz|epub)$/i, '');
+  const info = { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, issueNum, chapters, isEpub };
 
   if (st) {
     if (cbzInfoCache.size >= CBZ_CACHE_MAX) cbzInfoCache.clear();
@@ -203,6 +216,9 @@ async function _scanLibrary({ seriesId } = {}) {
   // The provider-specific id a CBZ would carry to identify this series.
   const providerKeys = (s) => {
     const keys = [`title:${sanitize(s.title).toLowerCase()}`];
+    // Also add a year-stripped variant so "Series (2024)" matches a folder named "Series"
+    const noYear = s.title.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+    if (noYear !== s.title) keys.push(`title:${sanitize(noYear).toLowerCase()}`);
     keys.push(`${s.provider}:${s.provider_series_id}`);
     return keys;
   };
@@ -305,8 +321,21 @@ async function _scanLibrary({ seriesId } = {}) {
           setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
           row.state = 'imported';
           markedChapters++;
+          matchedCount++;
           perSeries[match.title] = (perSeries[match.title] || 0) + 1;
         }
+      }
+    }
+    // Issue-number matching for comics: "#10 v10.cbz" → chapter number "10".
+    // Tried before bare-number fallback so explicit #N wins over ambiguous bare digit.
+    if (matchedCount === 0 && info.issueNum) {
+      const row = index.get(info.issueNum);
+      if (row && row.state !== 'imported') {
+        setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+        row.state = 'imported';
+        markedChapters++;
+        matchedCount++;
+        perSeries[match.title] = (perSeries[match.title] || 0) + 1;
       }
     }
     // When matching was via directory fallback and no "Vol N" keyword appears in the
@@ -331,7 +360,11 @@ async function _scanLibrary({ seriesId } = {}) {
 
   // --- Folder-based reconciliation: chapter image directories ---
   const seriesByTitle = new Map();
-  for (const s of targets) seriesByTitle.set(sanitize(s.title).toLowerCase(), s);
+  for (const s of targets) {
+    seriesByTitle.set(sanitize(s.title).toLowerCase(), s);
+    const noYear = s.title.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+    if (noYear !== s.title) seriesByTitle.set(sanitize(noYear).toLowerCase(), s);
+  }
 
   for (const scanDir of scanDirs) {
     if (!existsSync(scanDir)) continue;
