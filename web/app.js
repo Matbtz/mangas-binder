@@ -125,19 +125,23 @@ const ACTIVE_STATES = ['downloading', 'wanted', 'queued', 'downloaded', 'bindery
 const hasActive = (counts = {}) => ACTIVE_STATES.some(s => (counts[s] || 0) > 0);
 
 /** Close any open dropdown menu. */
-function closeMenus() { document.querySelectorAll('.menu').forEach(m => m.remove()); }
+let _openMenuWrap = null;
+function closeMenus() { document.querySelectorAll('.menu').forEach(m => m.remove()); _openMenuWrap = null; }
 document.addEventListener('click', () => closeMenus());
 
-/** A button that toggles a dropdown of { label, icon?, danger?, onClick } items. */
+/**
+ * A button that toggles a dropdown. The menu is portalled to document.body with
+ * position:fixed so it renders above overflow:hidden ancestors (e.g. .hero-card).
+ */
 function menuButton(label, items, btnCls = 'btn sm icon') {
   const wrap = h('<span class="menu-wrap"></span>');
   const btn = h(`<button class="${btnCls}">${label}</button>`);
   wrap.appendChild(btn);
   btn.onclick = (e) => {
     e.stopPropagation();
-    const existing = wrap.querySelector('.menu');
+    const wasOpen = _openMenuWrap === wrap;
     closeMenus();
-    if (existing) return;
+    if (wasOpen) return;
     const menu = h('<div class="menu"></div>');
     for (const it of items.filter(Boolean)) {
       const mb = h(`<button><span>${it.icon || '•'}</span><span>${esc(it.label)}</span></button>`);
@@ -145,7 +149,14 @@ function menuButton(label, items, btnCls = 'btn sm icon') {
       mb.onclick = (ev) => { ev.stopPropagation(); closeMenus(); it.onClick(); };
       menu.appendChild(mb);
     }
-    wrap.appendChild(menu);
+    // Portal to body so overflow:hidden on ancestors doesn't clip the menu.
+    const rect = btn.getBoundingClientRect();
+    menu.style.position = 'fixed';
+    menu.style.top = (rect.bottom + 6) + 'px';
+    menu.style.right = (window.innerWidth - rect.right) + 'px';
+    menu.style.zIndex = '300';
+    document.body.appendChild(menu);
+    _openMenuWrap = wrap;
   };
   return wrap;
 }
