@@ -800,7 +800,9 @@ async function showDetail(id) {
       fillChapterActions(tr.querySelector('.act-cell'), c);
       tb.appendChild(tr);
     }
-    body.appendChild(tbl);
+    const tblWrap = h('<div class="table-wrap"></div>');
+    tblWrap.appendChild(tbl);
+    body.appendChild(tblWrap);
     sec.appendChild(volHead);
     sec.appendChild(body);
     v.appendChild(sec);
@@ -1149,7 +1151,7 @@ async function viewActivity(v) {
 
   const renderHist = (history) => {
     histWrap.innerHTML = '';
-    const hi = h(`<div class="card"><div class="section-head"><h2>History</h2><div class="line"></div></div><table><thead><tr><th style="width:160px">When</th><th style="width:180px">Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div>`);
+    const hi = h(`<div class="card"><div class="section-head"><h2>History</h2><div class="line"></div></div><div class="table-wrap"><table><thead><tr><th style="width:160px">When</th><th style="width:180px">Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div></div>`);
     const tb = $('tbody', hi);
     for (const e of history) tb.appendChild(h(`<tr><td class="muted" style="font-size:12px">${esc(e.ts)}</td><td><span class="pill">${esc(e.event)}</span></td><td>${esc(e.message||'')}</td></tr>`));
     if (!history.length) tb.appendChild(h('<tr><td colspan="3" class="muted">Nothing yet.</td></tr>'));
@@ -1235,7 +1237,7 @@ async function viewSettings(v) {
 
   const mkFolderRow = (label, key, placeholder, hint) => {
     const row = h(`<label class="field">${label}${hint ? `<span class="muted" style="font-size:11px;margin-left:6px">${hint}</span>` : ''}</label>`);
-    const inp = h(`<input value="${esc(settings[key] ?? '')}" placeholder="${placeholder}" style="min-width:400px">`);
+    const inp = h(`<input value="${esc(settings[key] ?? '')}" placeholder="${placeholder}" class="input-w-full">`);
     inp.dataset.fkey = key; row.appendChild(inp); lform.appendChild(row);
     return inp;
   };
@@ -1264,7 +1266,7 @@ async function viewSettings(v) {
     const row = h(`<label class="field">${label}</label>`);
     let inp;
     if (type==='bool') { inp = h(`<select style="width:160px"><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(settings[k] ?? false); }
-    else inp = h(`<input value="${esc(settings[k]??'')}" placeholder="(disabled)" style="min-width:320px">`);
+    else inp = h(`<input value="${esc(settings[k]??'')}" placeholder="(disabled)" class="input-w-full">`);
     inp.dataset.nkey = k; row.appendChild(inp); nform.appendChild(row);
   }
   const nrow = h('<div class="row"></div>');
@@ -1317,7 +1319,7 @@ async function viewSettings(v) {
       const cfgForm = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:8px;margin-top:8px"></div>');
       for (const [key, label, type] of fields) {
         const f = h(`<label class="field" style="font-size:12px">${label}</label>`);
-        const inp = h(`<input type="${type==='password'?'password':'text'}" value="${esc(p.config?.[key]??'')}" placeholder="(not set)" style="min-width:320px">`);
+        const inp = h(`<input type="${type==='password'?'password':'text'}" value="${esc(p.config?.[key]??'')}" placeholder="(not set)" class="input-w-full">`);
         inp.dataset.cfg = key; f.appendChild(inp); cfgForm.appendChild(f);
       }
       const csave = h('<button class="btn sm primary" style="align-self:flex-start">Save</button>');
