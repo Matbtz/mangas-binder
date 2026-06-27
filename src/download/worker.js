@@ -56,6 +56,13 @@ export async function runOnce({ limit = 200 } = {}) {
         setChapterState(ch.id, 'skipped', { error: null });
         return;
       }
+      // Guard: if a chapter reached wanted state with exhausted attempts (e.g. from a
+      // crash loop), settle it as failed instead of burning a slot to immediately fail.
+      if ((ch.attempts ?? 0) >= MAX_ATTEMPTS) {
+        setChapterState(ch.id, 'failed', { error: 'Exhausted retries — use retry to reset' });
+        failed++;
+        return;
+      }
       // Files come from the download/archive provider (= metadata provider for manga).
       const dlProvider = getProvider(series.download_provider || series.provider);
 

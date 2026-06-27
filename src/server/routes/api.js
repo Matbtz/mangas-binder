@@ -106,9 +106,10 @@ export default async function apiRoutes(app) {
         if (unownedIds.length) bulkSetChapterState(unownedIds, 'skipped');
       } else if (body.monitorMode === 'all') {
         // Mark skipped/failed chapters as wanted (leave active/owned ones alone)
+        // Reset attempts so previously-failed chapters get a fresh start.
         const KEEP = new Set(['wanted', 'queued', 'downloading', 'downloaded', 'imported', 'bindery']);
         const ids = chapters.filter(c => !KEEP.has(c.state)).map(c => c.id);
-        if (ids.length) bulkSetChapterState(ids, 'wanted');
+        if (ids.length) bulkSetChapterState(ids, 'wanted', { resetAttempts: true });
         runOnce().catch(() => {});
       }
       // 'future', 'some': no cascade on existing chapters
@@ -189,7 +190,7 @@ export default async function apiRoutes(app) {
     } else {
       const KEEP = new Set(['imported', 'bindery', 'downloading', 'queued', 'downloaded', 'wanted']);
       const ids = chapters.filter(c => !KEEP.has(c.state)).map(c => c.id);
-      if (ids.length) bulkSetChapterState(ids, 'wanted');
+      if (ids.length) bulkSetChapterState(ids, 'wanted', { resetAttempts: true });
       updated = ids.length;
       if (ids.length) runOnce().catch(() => {});
     }
@@ -214,7 +215,7 @@ export default async function apiRoutes(app) {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const ids = listChaptersForSeries(s.id).filter(c => c.state === 'failed').map(c => c.id);
-    bulkSetChapterState(ids, 'wanted');
+    bulkSetChapterState(ids, 'wanted', { resetAttempts: true });
     if (ids.length) runOnce().catch(() => {});
     return { ok: true, retried: ids.length };
   });
@@ -223,7 +224,7 @@ export default async function apiRoutes(app) {
   app.post('/api/chapters/:id/retry', async (req, reply) => {
     const c = getChapter(Number(req.params.id));
     if (!c) return reply.code(404).send({ error: 'not found' });
-    setChapterState(c.id, 'wanted', { error: null });
+    setChapterState(c.id, 'wanted', { error: null, attempts: 0 });
     runOnce().catch(() => {});
     return { ok: true };
   });
@@ -244,7 +245,7 @@ export default async function apiRoutes(app) {
     if (state === 'skipped') {
       await cancelChapter(c.id);
     } else {
-      setChapterState(c.id, 'wanted', { error: null });
+      setChapterState(c.id, 'wanted', { error: null, attempts: 0 });
       runOnce().catch(() => {});
     }
     const s = getSeries(c.series_id);
@@ -264,7 +265,7 @@ export default async function apiRoutes(app) {
   app.post('/api/chapters/:id/redownload', async (req, reply) => {
     const c = getChapter(Number(req.params.id));
     if (!c) return reply.code(404).send({ error: 'not found' });
-    setChapterState(c.id, 'wanted', { error: null, cbz_path: null, staging_path: null, prog_done: null, prog_total: null });
+    setChapterState(c.id, 'wanted', { error: null, attempts: 0, cbz_path: null, staging_path: null, prog_done: null, prog_total: null });
     runOnce().catch(() => {});
     return { ok: true };
   });
@@ -313,12 +314,13 @@ export default async function apiRoutes(app) {
       .filter(c => c && (LOCAL_STATES.has(c.state) || (c.cbz_path && !c.cbz_path.startsWith('included_in_vol_'))));
 
     const defaultState = s.monitor_mode === 'none' ? 'skipped' : 'wanted';
+    const resetExtra = defaultState === 'wanted' ? { cbz_path: null, staging_path: null, attempts: 0 } : { cbz_path: null, staging_path: null };
     let deleted = 0;
     const errors = [];
     for (const c of toDelete) {
       try {
         if (c.cbz_path && existsSync(c.cbz_path)) { unlinkSync(c.cbz_path); deleted++; }
-        setChapterState(c.id, defaultState, { cbz_path: null, staging_path: null });
+        setChapterState(c.id, defaultState, resetExtra);
       } catch (err) {
         errors.push({ chapterId: c.id, error: err.message });
       }
@@ -359,7 +361,7 @@ export default async function apiRoutes(app) {
   // Re-queue every failed chapter across all series.
   app.post('/api/downloads/retry-failed', async () => {
     const ids = listChaptersInStates(['failed'], { limit: 1000 }).map(c => c.id);
-    bulkSetChapterState(ids, 'wanted');
+    bulkSetChapterState(ids, 'wanted', { resetAttempts: true });
     if (ids.length) runOnce().catch(() => {});
     return { ok: true, retried: ids.length };
   });
@@ -507,7 +509,7 @@ export default async function apiRoutes(app) {
     const { url } = req.body || {};
     if (!url) return reply.code(400).send({ error: 'url required' });
 
-    setChapterState(ch.id, 'wanted', { download_url: url, error: null });
+    setChapterState(ch.id, 'wanted', { download_url: url, error: null, attempts: 0 });
     runOnce().catch(() => {});
     return { ok: true };
   });
@@ -522,7 +524,7 @@ export default async function apiRoutes(app) {
     if (chapters.length > 0) {
       const sorted = [...chapters].sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
       const first = sorted[0];
-      setChapterState(first.id, 'wanted', { download_url: url, error: null });
+      setChapterState(first.id, 'wanted', { download_url: url, error: null, attempts: 0 });
       for (let i = 1; i < sorted.length; i++) {
         setChapterState(sorted[i].id, 'imported', { cbz_path: `included_in_vol_${volKey}` });
       }
