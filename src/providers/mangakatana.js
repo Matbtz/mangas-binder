@@ -2,6 +2,7 @@ import { getProviderConfig } from '../core/settings.js';
 import { fetchRetry } from '../download/limit.js';
 import { throttle } from '../download/throttle.js';
 import { solve as flareSolve, cookieHeader, isEnabled as flareEnabled } from '../download/flaresolverr.js';
+import { logHistory } from '../core/db.js';
 
 /**
  * MangaKatana — a page-image *fallback* source for manga.
@@ -37,14 +38,18 @@ function throttleMs() {
 async function fetchPage(url, { signal } = {}) {
   await throttle('mangakatana', throttleMs());
   if (flareEnabled()) {
-    const { html, cookies, userAgent } = await flareSolve(url, { signal });
-    const imageHeaders = {
-      'User-Agent': userAgent || BROWSER_UA,
-      Referer: `${SITE}/`,
-    };
-    const cookie = cookieHeader(cookies);
-    if (cookie) imageHeaders.Cookie = cookie;
-    return { html, imageHeaders };
+    try {
+      const { html, cookies, userAgent } = await flareSolve(url, { signal });
+      const imageHeaders = {
+        'User-Agent': userAgent || BROWSER_UA,
+        Referer: `${SITE}/`,
+      };
+      const cookie = cookieHeader(cookies);
+      if (cookie) imageHeaders.Cookie = cookie;
+      return { html, imageHeaders };
+    } catch (solveErr) {
+      logHistory('flaresolverr.error', { message: `FlareSolverr failed to solve ${url}: ${solveErr.message}. Falling back to direct fetch.` });
+    }
   }
   // No FlareSolverr: best-effort plain fetch (likely 403 if Cloudflare is active).
   const res = await fetchRetry(url, {
