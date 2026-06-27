@@ -985,9 +985,10 @@ async function viewSettings(v) {
   phead.append(prow, pStatus); dlc.appendChild(phead); v.appendChild(dlc);
 
   const numKeys = ['scanIntervalHours','downloadConcurrency','chapterConcurrency','refreshConcurrency','seriesRefreshTimeoutSec'];
-  const enumKeys = { defaultPackagingMode:['volume','chapter'], defaultMonitorMode:['all','future','none'] };
-  const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes'];
-  const textKeys = ['defaultLanguage'];
+  // English is the default, French the backup — list them first in that order.
+  const enumKeys = { defaultPackagingMode:['volume','chapter'], defaultMonitorMode:['all','future','none'], defaultLanguage:['en','fr','ja','es','pt'] };
+  const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes','mangaFallbackEnabled'];
+  const textKeys = ['flaresolverrUrl'];
 
   const sc = h('<div class="card"><h2>General</h2></div>');
   const form = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:10px"></div>');
@@ -1067,8 +1068,9 @@ async function viewSettings(v) {
   const PROVIDER_CONFIG = {
     comicvine: [['apikey', 'ComicVine API key (comicvine.gamespot.com/api)', 'password']],
     getcomics: [['baseUrl', 'GetComics base URL (optional override)', 'text']],
+    mangakatana: [['throttleMs', 'Request throttle in ms (min delay between requests, default 1000)', 'text']],
   };
-  const capLabel = (c) => c.archive ? 'archive' : c.download ? 'download' : 'metadata';
+  const capLabel = (c) => c.archive ? 'archive' : c.download ? 'download' : c.pageFallback ? 'fallback' : 'metadata';
 
   const pc = h('<div class="card"><h2>Sources</h2></div>');
   for (const p of providers) {

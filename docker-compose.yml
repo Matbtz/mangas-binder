@@ -10,22 +10,37 @@ services:
       SCAN_INTERVAL_HOURS: "6"
       DOWNLOAD_CONCURRENCY: "4"
       DEFAULT_PACKAGING_MODE: volume  # volume | chapter
-      DEFAULT_LANGUAGE: en
+      DEFAULT_LANGUAGE: en            # default language (French is used as a backup)
       # Comics & Books: Hardcover triage key + ComicVine key.
       HARDCOVER_API_KEY: ${HARDCOVER_API_KEY:-}
       COMICVINE_API_KEY: ${COMICVINE_API_KEY:-}
       GETCOMICS_BASE_URL: ${GETCOMICS_BASE_URL:-}
       AUTH_TOKEN: ${AUTH_TOKEN:-}
       LIBRARY_SCAN_DIRS: "/bindery,/books"   # scan both output and Tome's library
+      # MangaKatana fallback (page source when MangaDex@Home fails). MangaKatana is
+      # behind Cloudflare, so route it through a FlareSolverr container reachable on
+      # a shared Docker network (see proxy-net below). Empty = disabled.
+      FLARESOLVERR_URL: ${FLARESOLVERR_URL:-http://flaresolverr:8191/v1}
+      MANGA_FALLBACK_ENABLED: ${MANGA_FALLBACK_ENABLED:-false}
     volumes:
       - /home/mat/Documents/data:/data              # keep DB local (SQLite + NAS = bad perf)
       - /media/documents/bindery:/bindery           # NAS — finished CBZs land here
       - /media/documents/books:/books:ro            # NAS — Tome's library, read-only for scan
     ports:
       - "8787:8787"
+    networks:
+      - default
+      - proxy-net          # shared with the FlareSolverr container (reach it by name)
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
     restart: unless-stopped
+
+networks:
+  # FlareSolverr already runs in this external network; we join it so the app can
+  # reach http://flaresolverr:8191/v1 by container name. Create it once with:
+  #   docker network create proxy-net
+  proxy-net:
+    external: true

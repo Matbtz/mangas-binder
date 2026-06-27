@@ -17,7 +17,17 @@
  *   listChapters(id, { lang })     -> [{ id, number, volume|null, title,
  *                                        lang, publishedAt, pages|null }]
  *   getChapterPages(chapterId, opts)-> [imageUrl, ...]   (download providers only)
+ *                                      OR [{ url, headers? }, ...] when a source
+ *                                      needs per-request headers (Referer, Cookie,
+ *                                      User-Agent). The downloader merges those
+ *                                      headers over its default User-Agent.
  *   getVolumeCovers(id)            -> Map<volumeString, coverUrl>
+ *
+ * Capability flags beyond { download, metadata }:
+ *   archive      — resolves a whole CBZ/ZIP per chapter (getcomics)
+ *   pageFallback — supplies page images for a chapter identified by (series,
+ *                  chapterNumber) rather than a provider chapter id; used only as
+ *                  a fallback when the primary download provider fails (mangakatana)
  *
  * Chapter `number` and `volume` are strings ("12", "12.5") to preserve
  * decimal chapters; `volume` is null when the source has no assignment.

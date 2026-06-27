@@ -11,7 +11,7 @@ reader-ready CBZs into the library's inbox.
 
 | Media | Metadata | Files | Unit → package |
 |-------|----------|-------|----------------|
-| **Manga** | MangaDex (+ MangaUpdates hint) | MangaDex pages | chapter → volume |
+| **Manga** | MangaDex (+ MangaUpdates hint) | MangaDex pages (MangaKatana fallback) | chapter → volume |
 | **Comics** | ComicVine | GetComics (DDL) | issue → collected volume |
 
 Comics work like manga with two differences: metadata comes from **ComicVine** and
@@ -110,6 +110,41 @@ Each source has a **Test** button in **Settings → Sources** that does a live r
 > downloads stop resolving, the scraping lives in `src/providers/getcomics.js`
 > (`parseSearchResults` / `extractDownloadLinks`) and is the only place to fix.
 > Only **CBZ/ZIP** archives are supported — CBR (RAR) is rejected with a clear error.
+
+### Language (English default, French backup)
+
+The default language is **English** (`DEFAULT_LANGUAGE`, editable in Settings). When a
+chapter isn't available in the series' language or in English, **French** is used as a
+last-resort backup rather than the chapter being skipped. The preference order is
+*series language → English → French → anything else*, applied both when listing chapters
+and when picking which scanlation to download.
+
+### MangaKatana fallback (page source when MangaDex fails)
+
+MangaDex@Home occasionally can't serve a chapter (timeouts, missing pages). When enabled,
+mangas-binder falls back to scraping **MangaKatana** for that same chapter — series are
+still *followed* via MangaDex (keeping its volume + MangaUpdates data); MangaKatana only
+supplies the missing page images. Matching is by title, cached per series.
+
+MangaKatana is behind **Cloudflare**, so it requires a **FlareSolverr** container to clear
+the challenge. FlareSolverr returns the solved HTML plus the `cf_clearance` cookie and
+User-Agent, which we reuse for the image-CDN requests.
+
+To enable:
+1. Run FlareSolverr (e.g. `ghcr.io/flaresolverr/flaresolverr`) and put it on a Docker
+   network shared with mangas-binder. The provided `docker-compose.yml` joins the external
+   `proxy-net` network and defaults `FLARESOLVERR_URL=http://flaresolverr:8191/v1`
+   (create it once with `docker network create proxy-net`). If not co-networked, point
+   `FLARESOLVERR_URL` at the host, e.g. `http://<host-ip>:8191/v1`.
+2. In **Settings → Sources**, enable **MangaKatana** (it's opt-in / disabled by default,
+   being a ToS-sensitive scraper) and optionally set its request **throttle** (ms).
+3. Turn on **manga fallback** (`MANGA_FALLBACK_ENABLED` / the `mangaFallbackEnabled`
+   setting). Use the **Test** button to confirm MangaKatana is reachable through FlareSolverr.
+
+> MangaKatana is a third-party site whose markup changes without notice. The scraping lives
+> in `src/providers/mangakatana.js` (`parseSearchResults` / `parseChapterList` /
+> `parseChapterImages`) and is the only place to fix. Downloaded pages are validated by
+> magic bytes, so a Cloudflare challenge page served as an "image" is rejected and retried.
 
 ### Library reconciliation (already-owned detection)
 

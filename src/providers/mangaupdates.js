@@ -6,6 +6,49 @@ async function apiFetch(url, options = {}) {
   return res.json();
 }
 
+/**
+ * Fetch the chapter→volume mapping for a series via the MangaUpdates releases
+ * endpoint.  Each release record carries both `chapter` and `volume` fields,
+ * giving us precise official volume boundaries that the MangaDex aggregate often
+ * lacks for English simulpub series (e.g. Dandadan, One Piece).
+ *
+ * Returns a Map: chapterNumber(string) → volumeNumber(string)
+ * Only entries where both fields are valid numbers are included.
+ *
+ * We cap at 100 pages (10 000 releases) to avoid runaway calls on very long
+ * series; in practice even One Piece fits comfortably within that limit.
+ */
+export async function fetchChapterVolumeMap(seriesId) {
+  const map = new Map();
+  const perPage = 100;
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore && page <= 100) {
+    const data = await apiFetch(`${BASE_URL}/releases/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ series_id: Number(seriesId), per_page: perPage, page }),
+    });
+
+    const results = data.results || [];
+    for (const r of results) {
+      const rec = r.record || {};
+      const ch = rec.chapter ? String(parseFloat(rec.chapter)) : null;
+      const vol = rec.volume ? String(parseFloat(rec.volume)) : null;
+      if (ch && vol && !Number.isNaN(parseFloat(ch)) && !Number.isNaN(parseFloat(vol))) {
+        if (!map.has(ch)) map.set(ch, vol); // first/earliest entry wins
+      }
+    }
+
+    hasMore = results.length === perPage;
+    page++;
+    if (hasMore) await new Promise(r => setTimeout(r, 200));
+  }
+
+  return map;
+}
+
 export async function searchMangaUpdates(title) {
   const data = await apiFetch(`${BASE_URL}/series/search`, {
     method: 'POST',

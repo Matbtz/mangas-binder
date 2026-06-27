@@ -52,6 +52,13 @@ export const config = {
     keepLoosePages: process.env.KEEP_LOOSE_PAGES === 'true',
     // Assign untagged chapters to estimated volumes (uses extrapolate.js).
     extrapolateVolumes: process.env.EXTRAPOLATE_VOLUMES !== 'false',
+    // FlareSolverr endpoint (Cloudflare/anti-bot solver) for scraping providers
+    // like MangaKatana. Empty = disabled. In Docker, point at the container on a
+    // shared network, e.g. http://flaresolverr:8191/v1
+    flaresolverrUrl: process.env.FLARESOLVERR_URL || '',
+    // When true (and MangaKatana is enabled), failed MangaDex page downloads fall
+    // back to scraping MangaKatana for the same chapter.
+    mangaFallbackEnabled: process.env.MANGA_FALLBACK_ENABLED === 'true',
     // Notifications (empty = disabled). ntfyUrl is a full topic URL, e.g. https://ntfy.sh/my-topic
     discordWebhook: process.env.DISCORD_WEBHOOK || '',
     ntfyUrl: process.env.NTFY_URL || '',

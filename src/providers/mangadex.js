@@ -27,7 +27,9 @@ async function apiFetch(url) {
 }
 
 export async function searchManga(title) {
-  const url = `${BASE_URL}/manga?title=${encodeURIComponent(title)}&limit=5&availableTranslatedLanguage[]=en`;
+  // English is the default; French is the backup, so a French-only series is still
+  // discoverable on the Add tab.
+  const url = `${BASE_URL}/manga?title=${encodeURIComponent(title)}&limit=5&availableTranslatedLanguage[]=en&availableTranslatedLanguage[]=fr`;
   const data = await apiFetch(url);
   return (data.data || []).map(m => ({
     id: m.id,
@@ -156,9 +158,24 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
 
   const candidatesByChapter = new Map();
 
+  // Build a language filter: always request the target language; add 'en' as
+  // a fallback when the target is something else (avoids a total blackout when
+  // a chapter only exists in English).  The aggregate (fetched above without a
+  // filter) already provides cross-language volume data for every chapter, so
+  // restricting the feed to 1–2 languages is safe and dramatically reduces the
+  // payload for long-running series (One Piece in every language = 20,000+ entries
+  // vs ~1,100 in English only).
+  // Language fallback chain: the series' own language first, then English (the
+  // default), then French (the backup).  A chapter that exists only in French is
+  // therefore still picked up rather than filtered out.  Scoring below keeps the
+  // preference order so French is only chosen when nothing better is available.
+  const langFilter = [...new Set([lang, 'en', 'fr'])]
+    .map(l => `translatedLanguage[]=${encodeURIComponent(l)}`)
+    .join('&');
+
   while (offset < total) {
     const url = `${BASE_URL}/manga/${cleanId}/feed`
-      + `?order[chapter]=asc&limit=${limit}&offset=${offset}&${CONTENT_RATINGS}`;
+      + `?order[chapter]=asc&limit=${limit}&offset=${offset}&${CONTENT_RATINGS}&${langFilter}`;
     const data = await apiFetch(url);
     total = data.total ?? 0;
 
@@ -239,13 +256,15 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
  * GET /at-home/server/{id} -> { baseUrl, chapter: { hash, data[], dataSaver[] } }
  * Page URL = {baseUrl}/{quality}/{hash}/{filename}
  * @param {string} chapterId
- * @param {{ dataSaver?: boolean }} opts
+ * @param {{ dataSaver?: boolean, lang?: string }} opts
  */
-export async function getChapterPages(chapterId, { dataSaver = false, mangaId = null, chapterNum = null } = {}) {
+export async function getChapterPages(chapterId, { dataSaver = false, mangaId = null, chapterNum = null, lang = 'en' } = {}) {
   let cid = chapterId;
   const sortChapters = (list) => {
     return [...list].sort((a, b) => {
+      // Series language wins, then English (default), then French (backup).
       const getLangScore = (l) => {
+        if (l === lang) return 4;
         if (l === 'en') return 3;
         if (l === 'fr') return 2;
         return 1;

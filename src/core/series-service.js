@@ -1,5 +1,5 @@
 import { getProvider, defaultDownloadProvider } from '../providers/index.js';
-import { provider as mangaupdates } from '../providers/mangaupdates.js';
+import { provider as mangaupdates, fetchChapterVolumeMap } from '../providers/mangaupdates.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
   upsertChapter, chapterStateCounts,
@@ -125,6 +125,27 @@ export async function refreshSeries(seriesId) {
           }
         }
       }
+
+      // Backfill volume numbers that MangaDex left null using MangaUpdates' release
+      // records.  Each release record carries the chapter number AND the volume it
+      // belongs to, giving authoritative boundaries for series where the MangaDex
+      // aggregate is sparse (e.g. Dandadan, One Piece English simulpubs).
+      // We only fill chapters that currently lack a volume — never overwrite a
+      // real provider-tagged assignment.
+      const hasNullVol = chapters.some(c => !c.volume);
+      if (hasNullVol && mu?.seriesId) {
+        try {
+          const muVolMap = await fetchChapterVolumeMap(mu.seriesId);
+          if (muVolMap.size > 0) {
+            for (const ch of chapters) {
+              if (!ch.volume) {
+                const v = muVolMap.get(String(parseFloat(ch.number)));
+                if (v) ch.volume = v;
+              }
+            }
+          }
+        } catch { /* non-fatal — proceed without MU volume data */ }
+      }
     } catch {}
   }
 
@@ -146,5 +167,10 @@ export async function refreshSeries(seriesId) {
 
   touchSeriesScan(seriesId);
   if (added > 0) logHistory('series.new_chapters', { seriesId, message: `${added} new chapter(s)` });
+  // Assign estimated volume numbers to chapters the provider left untagged (e.g.
+  // English MangaDex scanlations with no volume, or ComicVine issues). This runs
+  // synchronously because it's a fast DB-only pass and ensures volume data is ready
+  // before the library scan that follows.
+  resolveVolumes(seriesId);
   return { added, counts: chapterStateCounts(seriesId) };
 }
