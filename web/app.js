@@ -615,16 +615,31 @@ async function showDetail(id) {
   const modes = hero.querySelector('#modes');
   // Monitor mode: supports 'some' (auto-set when volumes/chapters are individually tracked)
   const monitorWrap = h('<label class="field">Monitor</label>');
-  const monitorOpts = s.monitorMode === 'some' ? ['some', 'all', 'future', 'none'] : ['all', 'future', 'none'];
-  const monitorSel = h(`<select>${monitorOpts.map(o => `<option value="${o}" ${o === s.monitorMode ? 'selected' : ''}${o === 'some' ? ' style="color:var(--muted)"' : ''}>${o}</option>`).join('')}</select>`);
+  const monitorOpts = s.monitorMode === 'some' ? ['some', 'all', 'future', 'from', 'none'] : ['all', 'future', 'from', 'none'];
+  const monitorSel = h(`<select>${monitorOpts.map(o => `<option value="${o}" ${o === s.monitorMode ? 'selected' : ''}${o === 'some' ? ' style="color:var(--muted)"' : ''}>${o === 'from' ? 'from vol.' : o}</option>`).join('')}</select>`);
+  // Volume number input shown only when 'from' mode is active
+  const fromVolInput = h(`<input type="number" min="1" step="1" style="width:4em;margin-left:6px" placeholder="vol #" value="${s.monitorFromVolume ?? ''}">`);
+  fromVolInput.style.display = s.monitorMode === 'from' ? '' : 'none';
+  const saveFromVol = async () => {
+    const vol = parseFloat(fromVolInput.value);
+    if (!vol || vol < 1) return;
+    await api(`/series/${id}`, { method:'PATCH', body:{ monitorMode: 'from', monitorFromVolume: vol } });
+    toast('Saved');
+    showDetail(id);
+  };
+  fromVolInput.onchange = saveFromVol;
+  fromVolInput.onkeydown = e => { if (e.key === 'Enter') saveFromVol(); };
   monitorSel.onchange = async () => {
     const v = monitorSel.value;
     if (v === 'some') { monitorSel.value = s.monitorMode; return; }
+    fromVolInput.style.display = v === 'from' ? '' : 'none';
+    if (v === 'from') { fromVolInput.focus(); return; } // wait for user to enter volume
     await api(`/series/${id}`, { method:'PATCH', body:{ monitorMode: v } });
     toast('Saved');
     showDetail(id); // chapter states may have cascaded — full refresh
   };
   monitorWrap.appendChild(monitorSel);
+  monitorWrap.appendChild(fromVolInput);
   modes.append(
     monitorWrap,
     field('Packaging', ['volume','chapter'],       s.packagingMode, async v => { await api(`/series/${id}`,{method:'PATCH',body:{packagingMode:v}}); toast('Saved'); }),
