@@ -161,6 +161,89 @@ function menuButton(label, items, btnCls = 'btn sm icon') {
   return wrap;
 }
 
+// --- Folder picker ---------------------------------------------------------
+/**
+ * Opens a server-side directory browser modal.
+ * defaultPath is the starting path (e.g. /books or the series' current folderPath).
+ * onSelect(path) is called when the user confirms a selection.
+ */
+function openFolderPickerModal({ defaultPath = '/books', title = '📁 Choose Folder', onSelect }) {
+  const existing = document.getElementById('folder-picker-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="folder-picker-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px">
+    <div style="background:var(--panel);border:1px solid var(--line2);border-radius:16px;width:100%;max-width:480px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 18px 48px rgba(0,0,0,0.65);overflow:hidden">
+      <div style="padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+        <strong style="color:#fff;font-size:15px">${esc(title)}</strong>
+        <button class="btn sm icon" id="fp-close">✕</button>
+      </div>
+      <div style="padding:12px 18px 0;flex-shrink:0">
+        <div style="display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;margin-bottom:10px">
+          <span style="color:var(--muted);font-size:14px">📍</span>
+          <input id="fp-path-input" type="text" value="${esc(defaultPath)}" style="flex:1;background:none;border:none;color:var(--acc);font-size:13px;font-family:inherit;outline:none;min-width:0" spellcheck="false">
+          <button class="btn sm" id="fp-go">Go</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding-bottom:8px">
+          <button class="btn sm icon" id="fp-up" disabled>↑ Up</button>
+          <span id="fp-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+      </div>
+      <div id="fp-list" style="flex:1;overflow-y:auto;padding:0 10px 12px 18px;display:flex;flex-direction:column;gap:2px;min-height:100px"></div>
+      <div style="padding:12px 18px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0">
+        <button class="btn sm" id="fp-cancel">Cancel</button>
+        <button class="btn sm primary" id="fp-select">✓ Select folder</button>
+      </div>
+    </div>
+  </div>`);
+
+  const close = () => modal.remove();
+  modal.querySelector('#fp-close').onclick = close;
+  modal.querySelector('#fp-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  const pathInput = modal.querySelector('#fp-path-input');
+  const listEl = modal.querySelector('#fp-list');
+  const statusEl = modal.querySelector('#fp-status');
+  const upBtn = modal.querySelector('#fp-up');
+
+  const browseTo = async (dir) => {
+    statusEl.textContent = 'Loading…';
+    listEl.innerHTML = '';
+    upBtn.disabled = true;
+    try {
+      const data = await api(`/files/dirs?path=${encodeURIComponent(dir)}`);
+      pathInput.value = data.path;
+      upBtn.disabled = !data.parent;
+      upBtn.onclick = () => { if (data.parent) browseTo(data.parent); };
+      statusEl.textContent = data.dirs.length ? `${data.dirs.length} folder${data.dirs.length !== 1 ? 's' : ''}` : 'No subfolders';
+      if (!data.dirs.length) {
+        listEl.appendChild(h('<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">No subfolders in this directory</div>'));
+        return;
+      }
+      for (const d of data.dirs) {
+        const item = h(`<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;transition:background .12s">
+          <span style="font-size:16px;flex-shrink:0">📁</span>
+          <span style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)">${esc(d.name)}</span>
+        </div>`);
+        item.onmouseenter = () => { item.style.background = 'var(--panel2)'; };
+        item.onmouseleave = () => { item.style.background = ''; };
+        item.onclick = () => browseTo(d.path);
+        listEl.appendChild(item);
+      }
+    } catch (e) {
+      statusEl.textContent = '';
+      listEl.appendChild(h(`<div style="padding:24px;text-align:center;color:var(--warn);font-size:13px">⚠ ${esc(e.message)}</div>`));
+    }
+  };
+
+  modal.querySelector('#fp-go').onclick = () => browseTo(pathInput.value.trim() || defaultPath);
+  pathInput.onkeydown = e => { if (e.key === 'Enter') browseTo(pathInput.value.trim() || defaultPath); };
+  modal.querySelector('#fp-select').onclick = () => { close(); onSelect(pathInput.value.trim() || defaultPath); };
+
+  document.body.appendChild(modal);
+  browseTo(defaultPath);
+}
+
 // --- Library ---------------------------------------------------------------
 /** Library "progress": imported chapters over the chapters we intend to own (excludes skipped). */
 function libProgress(counts = {}) {
@@ -394,16 +477,20 @@ async function showDetail(id) {
     toast('Running downloads…');
     startLive();
   };
-  const linkFolderAction = async () => {
-    const input = prompt(`Enter local folder path where files for "${s.title}" are stored:`, s.folderPath || '');
-    if (input !== null) {
-      const folderPath = input.trim() || null;
-      toast('Linking folder & scanning library…');
-      await api(`/series/${id}`, { method:'PATCH', body:{ folderPath } });
-      await api(`/series/${id}/scan-library`, { method:'POST' });
-      toast('Folder linked and scanned!');
-      showDetail(id);
-    }
+  const linkFolderAction = () => {
+    openFolderPickerModal({
+      defaultPath: s.folderPath || '/books',
+      title: `📁 Link Folder — ${s.title}`,
+      onSelect: async (folderPath) => {
+        toast('Linking folder & scanning library…');
+        try {
+          await api(`/series/${id}`, { method:'PATCH', body:{ folderPath } });
+          await api(`/series/${id}/scan-library`, { method:'POST' });
+          toast('Folder linked and scanned!');
+          showDetail(id);
+        } catch (e) { toast(e.message); }
+      }
+    });
   };
   hero.querySelector('#folder-pill').onclick = linkFolderAction;
 
@@ -840,6 +927,7 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
         <label class="field" style="flex:1;min-width:260px">Directory to scan
           <input id="mf-dir" type="text" placeholder="/path/to/your/files" value="${esc(folderPath||'')}" style="background:var(--panel2);border:1px solid var(--line2);color:var(--fg);padding:8px 12px;border-radius:8px;font-size:13px;font-family:inherit;width:100%;margin-top:4px">
         </label>
+        <button class="btn sm" id="mf-browse">📁 Browse</button>
         <button class="btn sm primary" id="mf-scan">🔍 Scan directory</button>
         <button class="btn sm acc2" id="mf-auto" disabled title="Auto-fill mappings based on filenames">✨ Auto-match all</button>
         <button class="btn sm ok" id="mf-apply" disabled>✓ Apply mappings</button>
@@ -955,6 +1043,14 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
     }
   };
   buildRows();
+
+  // Browse server-side directories for the directory input
+  modal.querySelector('#mf-browse').onclick = () => {
+    openFolderPickerModal({
+      defaultPath: dirInput.value.trim() || '/books',
+      onSelect: (p) => { dirInput.value = p; }
+    });
+  };
 
   // Scan directory
   modal.querySelector('#mf-scan').onclick = async () => {

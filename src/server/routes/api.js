@@ -499,6 +499,26 @@ export default async function apiRoutes(app) {
 
   // --- Manage Files (Sonarr-style manual file mapping) ---
 
+  // Browse server-side directories for the folder picker UI.
+  app.get('/api/files/dirs', async (req, reply) => {
+    const requested = String(req.query.path || '/books').trim() || '/';
+    const dir = path.resolve(requested);
+    const parent = path.dirname(dir);
+    if (!existsSync(dir)) return reply.code(404).send({ error: `Directory not found: ${dir}` });
+    let st;
+    try { st = statSync(dir); } catch { return reply.code(400).send({ error: 'Cannot stat path' }); }
+    if (!st.isDirectory()) return reply.code(400).send({ error: 'Not a directory' });
+    const dirs = [];
+    try {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name.startsWith('.')) continue;
+        if (e.isDirectory()) dirs.push({ name: e.name, path: path.join(dir, e.name) });
+      }
+    } catch { /* permission denied — return empty list */ }
+    dirs.sort((a, b) => a.name.localeCompare(b.name));
+    return { path: dir, parent: dir !== parent ? parent : null, dirs };
+  });
+
   // List CBZ/EPUB files in a directory for the file picker.
   app.get('/api/files/list', async (req, reply) => {
     const dir = String(req.query.dir || '').trim();
