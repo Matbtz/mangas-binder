@@ -299,7 +299,9 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
     return (wl === 'en' || wl === 'fr') ? winner : null;
   };
 
-  if (cid && (cid.startsWith('agg-') || cid.startsWith('mu-synth-'))) {
+  const isSynthetic = (id) => id?.startsWith('agg-') || id?.startsWith('mu-synth-');
+
+  if (isSynthetic(cid)) {
     const parts = cid.split('-');
     let mUUID = null;
     let num = null;
@@ -313,15 +315,19 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
     if (mUUID && num) {
       try {
         const res = await apiFetch(
-          `${BASE_URL}/chapter?manga=${mUUID}&chapter=${num}&${CONTENT_RATINGS}&${langQs}&order[publishAt]=desc`
+          `${BASE_URL}/chapter?manga=${mUUID}&chapter=${encodeURIComponent(num)}&${CONTENT_RATINGS}&${langQs}&order[publishAt]=desc`
         );
         if (res?.data?.length) {
           const winner = pickIfPreferred(sortChapters(res.data));
           if (winner) cid = winner.id;
-          // If no en/fr chapter found, leave cid as the synthetic ID so the
-          // at-home fetch below fails and the MangaKatana fallback can take over.
         }
       } catch {}
+    }
+    // Never pass a synthetic ID to the at-home server — it will always 404.
+    if (isSynthetic(cid)) {
+      const err = new Error(`Chapter ${chapterNum ?? num ?? chapterId} is not available on MangaDex in English or French`);
+      err.notAvailable = true;
+      throw err;
     }
   }
 
@@ -329,10 +335,11 @@ export async function getChapterPages(chapterId, { dataSaver = false, mangaId = 
   try {
     data = await apiFetch(`${BASE_URL}/at-home/server/${cid}`);
   } catch (err) {
+    // A real chapter ID may become stale (server rotation); try a fresh lookup.
     if (mangaId && chapterNum) {
       try {
         const res = await apiFetch(
-          `${BASE_URL}/chapter?manga=${mangaId}&chapter=${chapterNum}&${CONTENT_RATINGS}&${langQs}&order[publishAt]=desc`
+          `${BASE_URL}/chapter?manga=${mangaId}&chapter=${encodeURIComponent(chapterNum)}&${CONTENT_RATINGS}&${langQs}&order[publishAt]=desc`
         );
         if (res?.data?.length) {
           const winner = pickIfPreferred(sortChapters(res.data));
