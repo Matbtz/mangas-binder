@@ -52,7 +52,10 @@ export async function runOnce({ limit = 200 } = {}) {
     const limiter = pLimit(Math.max(1, chapterConcurrency));
     await Promise.all(wanted.map(ch => limiter(async () => {
       const series = getSeries(ch.series_id);
-      if (!series) return;
+      if (!series || !series.monitored || series.monitor_mode === 'none') {
+        setChapterState(ch.id, 'skipped', { error: null });
+        return;
+      }
       // Files come from the download/archive provider (= metadata provider for manga).
       const dlProvider = getProvider(series.download_provider || series.provider);
 
@@ -140,20 +143,18 @@ export async function cancelChapter(id) {
   if (!ch) return { ok: false, error: 'not found' };
   const controller = inflight.get(id);
   if (controller) {
-    controller.abort();            // the runOnce loop settles state → skipped + cleanup
-    return { ok: true, aborted: true };
+    controller.abort();
   }
-  if (['wanted', 'queued', 'downloading', 'downloaded'].includes(ch.state)) {
-    // `downloading` with no controller = stale (e.g. server restarted mid-download).
+  if (['wanted', 'queued', 'downloading', 'downloaded', 'bindery', 'failed'].includes(ch.state)) {
     setChapterState(id, 'skipped', { error: null, prog_done: null, prog_total: null });
     await cleanupStaging(ch.series_id, ch.number);
   }
-  return { ok: true, aborted: false };
+  return { ok: true, aborted: !!controller };
 }
 
 /** Cancel every active (queued/in-flight/downloaded) chapter for a series. */
 export async function cancelSeries(seriesId) {
-  const active = listChaptersInStates(['wanted', 'queued', 'downloading', 'downloaded'], { seriesId });
+  const active = listChaptersInStates(['wanted', 'queued', 'downloading', 'downloaded', 'bindery', 'failed'], { seriesId, limit: 100000 });
   for (const ch of active) await cancelChapter(ch.id);
   return { ok: true, cancelled: active.length };
 }

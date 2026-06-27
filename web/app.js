@@ -702,18 +702,27 @@ async function showDetail(id) {
     } else if (c.state === 'bindery') {
       act.append(h('<span class="muted" style="font-size:11px;color:#cbb0f7">In Bindery</span>'));
     } else if (c.state === 'wanted' || c.state === 'queued') {
-      // Use track endpoint so manual skips flip series to 'some'
+      const mon = h('<button class="btn sm ok" title="Monitored" style="cursor:default">✓ Monitored</button>');
       const skip = h('<button class="btn sm" title="Cancel / skip tracking">Skip</button>');
       skip.onclick = async () => { await api(`/chapters/${c.id}/track`, { method:'POST', body:{ state:'skipped' } }); toast(`${chUnit} ${c.number} skipped`); liveTick(); };
-      act.append(skip);
+      act.append(mon, skip);
     } else if (c.state === 'failed') {
       const retry = h('<button class="btn sm primary" title="Retry">↻ Retry</button>');
       retry.onclick = async () => { await api(`/chapters/${c.id}/retry`, { method:'POST' }); toast(`Retrying ${chUnit} ${c.number}…`); startLive(); liveTick(); };
       act.append(retry);
     } else if (c.state === 'skipped') {
-      // Use track endpoint so manual wants flip series to 'some'
       const want = h('<button class="btn sm primary" title="Mark as wanted">➕ Want</button>');
-      want.onclick = async () => { await api(`/chapters/${c.id}/track`, { method:'POST', body:{ state:'wanted' } }); toast(`${chUnit} ${c.number} wanted`); startLive(); liveTick(); };
+      want.onclick = async () => {
+        want.className = 'btn sm ok';
+        want.innerHTML = '✓ Monitored';
+        want.title = 'Monitored';
+        want.style.cursor = 'default';
+        want.onclick = null;
+        await api(`/chapters/${c.id}/track`, { method:'POST', body:{ state:'wanted' } });
+        toast(`${chUnit} ${c.number} wanted`);
+        startLive();
+        liveTick();
+      };
       act.append(want);
     }
     act.append(searchBtn);
@@ -727,6 +736,22 @@ async function showDetail(id) {
       if (badge) { badge.textContent = `${owned}/${total}`; badge.className = `progress-badge ${complete?'complete':owned>0?'partial':''}`; badge.setAttribute('data-volbadge', vk); }
       const bar = v.querySelector(`[data-volbar="${vk}"]`);
       if (bar) bar.innerHTML = progressBar(owned, total);
+      const wb = v.querySelector(`[data-volwant="${vk}"]`);
+      if (wb && !complete) {
+        const missing = cs.filter(c => !['imported', 'bindery', 'downloaded'].includes(c.state));
+        const isMonitored = missing.length > 0 && missing.every(c => ['wanted', 'queued', 'downloading'].includes(c.state));
+        if (isMonitored) {
+          wb.className = 'btn sm ok';
+          wb.innerHTML = '✓ Monitored';
+          wb.title = 'Volume is monitored';
+          wb.style.cursor = 'default';
+        } else {
+          wb.className = 'btn sm primary';
+          wb.innerHTML = '➕ Want';
+          wb.title = 'Mark missing chapters in volume as wanted';
+          wb.style.cursor = 'pointer';
+        }
+      }
     }
   };
   const updateHeroProgress = (counts) => {
@@ -914,10 +939,24 @@ async function showDetail(id) {
     } else if (isComplete) {
       actsContainer.append(h('<span class="status-badge imported" style="padding:5px 10px">✓ Available</span>'));
     } else {
-      const wantBtn = h('<button class="btn sm primary" title="Mark missing chapters in volume as wanted">➕ Want</button>');
-      wantBtn.onclick = () => setStates('wanted', vk);
+      const missing = chaps.filter(c => !['imported', 'bindery', 'downloaded'].includes(c.state));
+      const isMonitored = missing.length > 0 && missing.every(c => ['wanted', 'queued', 'downloading'].includes(c.state));
+      const wantBtn = h(`<button class="btn sm ${isMonitored ? 'ok' : 'primary'}" data-volwant="${vk}" style="${isMonitored ? 'cursor:default' : 'cursor:pointer'}" title="${isMonitored ? 'Volume is monitored' : 'Mark missing chapters in volume as wanted'}">${isMonitored ? '✓ Monitored' : '➕ Want'}</button>`);
+      wantBtn.onclick = () => {
+        wantBtn.className = 'btn sm ok';
+        wantBtn.innerHTML = '✓ Monitored';
+        wantBtn.title = 'Volume is monitored';
+        wantBtn.style.cursor = 'default';
+        setStates('wanted', vk);
+      };
       const skipBtn = h('<button class="btn sm" title="Skip remaining in volume">⏸ Skip</button>');
-      skipBtn.onclick = () => setStates('skipped', vk);
+      skipBtn.onclick = () => {
+        wantBtn.className = 'btn sm primary';
+        wantBtn.innerHTML = '➕ Want';
+        wantBtn.title = 'Mark missing chapters in volume as wanted';
+        wantBtn.style.cursor = 'pointer';
+        setStates('skipped', vk);
+      };
       actsContainer.append(wantBtn, skipBtn);
     }
     const searchVolBtn = h('<button class="btn sm" title="Manual Search for Volume">🔍</button>');

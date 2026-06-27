@@ -178,12 +178,15 @@ export function listChaptersForSeries(seriesId) {
 
 export function chaptersInState(state, limit = 100) {
   return getDb().prepare(
-    'SELECT * FROM chapters WHERE state = ? ORDER BY id LIMIT ?'
+    `SELECT c.* FROM chapters c
+     JOIN series s ON c.series_id = s.id
+     WHERE c.state = ? AND s.monitored = 1 AND s.monitor_mode != 'none'
+     ORDER BY c.id LIMIT ?`
   ).all(state, limit);
 }
 
 /** Chapters in any of the given states (optionally scoped to one series). */
-export function listChaptersInStates(states, { seriesId = null, limit = 500 } = {}) {
+export function listChaptersInStates(states, { seriesId = null, limit = 100000 } = {}) {
   if (!states.length) return [];
   const placeholders = states.map(() => '?').join(',');
   const where = seriesId == null ? '' : ' AND series_id = ?';

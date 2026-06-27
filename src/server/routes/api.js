@@ -101,8 +101,9 @@ export default async function apiRoutes(app) {
       if (body.monitorMode === 'none') {
         // Cancel all active downloads, then skip everything remaining
         await cancelSeries(s.id);
-        const failedIds = chapters.filter(c => c.state === 'failed').map(c => c.id);
-        if (failedIds.length) bulkSetChapterState(failedIds, 'skipped');
+        const OWNED = new Set(['imported']);
+        const unownedIds = chapters.filter(c => !OWNED.has(c.state) && c.state !== 'skipped').map(c => c.id);
+        if (unownedIds.length) bulkSetChapterState(unownedIds, 'skipped');
       } else if (body.monitorMode === 'all') {
         // Mark skipped/failed chapters as wanted (leave active/owned ones alone)
         const KEEP = new Set(['wanted', 'queued', 'downloading', 'downloaded', 'imported', 'bindery']);

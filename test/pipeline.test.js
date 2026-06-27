@@ -131,4 +131,27 @@ test('staging & bindery lifecycle: packaging moves to bindery, scan imports and 
   assert.ok(!existsSync(sDir), 'staging folder should have been pruned after import');
 });
 
+test('unmonitored series are excluded from download queue and cancelSeries cancels wanted chapters', async () => {
+  const { chaptersInState, updateSeries } = await import('../src/core/repo.js');
+  const { cancelSeries } = await import('../src/download/worker.js');
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: 'unmonitored-queue-test',
+    title: 'Unmonitored Series', authors: ['A'], language: 'en', monitored: true, monitorMode: 'all', packagingMode: 'volume'
+  });
+  upsertChapter(s.id, { provider: 'mangadex', number: '100', volume: '10' });
+  let wanted = chaptersInState('wanted');
+  assert.ok(wanted.some(c => c.series_id === s.id), 'should be in wanted list when monitored');
+
+  // Set monitorMode to none
+  updateSeries(s.id, { monitorMode: 'none' });
+  wanted = chaptersInState('wanted');
+  assert.ok(!wanted.some(c => c.series_id === s.id), 'should be excluded from wanted list when monitor_mode is none');
+
+  // Also verify cancelSeries reverts remaining active chapters
+  await cancelSeries(s.id);
+  const ch = listChaptersForSeries(s.id).find(c => c.number === '100');
+  assert.equal(ch.state, 'skipped', 'cancelSeries should mark wanted chapter as skipped');
+});
+
+
 
