@@ -1559,9 +1559,22 @@ async function viewActivity(v) {
 
   const renderHist = (history) => {
     histWrap.innerHTML = '';
+    const formatParis = (ts) => {
+      if (!ts) return '';
+      try {
+        const d = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z');
+        if (isNaN(d.getTime())) return ts;
+        return new Intl.DateTimeFormat('sv-SE', {
+          timeZone: 'Europe/Paris',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hour12: false
+        }).format(d);
+      } catch { return ts; }
+    };
     const hi = h(`<div class="card"><div class="section-head"><h2>History</h2><div class="line"></div></div><div class="table-wrap"><table><thead><tr><th style="width:160px">When</th><th style="width:180px">Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div></div>`);
     const tb = $('tbody', hi);
-    for (const e of history) tb.appendChild(h(`<tr><td class="muted" style="font-size:12px">${esc(e.ts)}</td><td><span class="pill">${esc(e.event)}</span></td><td>${esc(e.message||'')}</td></tr>`));
+    for (const e of history) tb.appendChild(h(`<tr><td class="muted" style="font-size:12px">${esc(formatParis(e.ts))}</td><td><span class="pill">${esc(e.event)}</span></td><td>${esc(e.message||'')}</td></tr>`));
     if (!history.length) tb.appendChild(h('<tr><td colspan="3" class="muted">Nothing yet.</td></tr>'));
     histWrap.appendChild(hi);
   };

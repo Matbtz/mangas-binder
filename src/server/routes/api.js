@@ -7,7 +7,7 @@ import { provider as hardcover } from '../../providers/hardcover.js';
 import {
   listSeries, getSeries, updateSeries, deleteSeries,
   listChaptersForSeries, getChapter, setChapterState, bulkSetChapterState,
-  listChaptersInStates, recentHistory, listChapterFilesForSeries,
+  listChaptersInStates, recentHistory, listChapterFilesForSeries, resetStaleDownloads,
 } from '../../core/repo.js';
 import { getDb } from '../../core/db.js';
 import {
@@ -374,14 +374,21 @@ export default async function apiRoutes(app) {
   // Resets any chapters stuck in `downloading` (worker idle only), then starts.
   app.post('/api/downloads/run', async () => {
     if (isRunning()) {
-      // Worker is alive but possibly stuck on slow CDN nodes. Abort every
-      // in-flight download so they requeue as `wanted`, then restart fresh.
       const aborted = abortStuckInFlight();
       if (aborted > 0) await new Promise(r => setTimeout(r, 500));
     }
+    const active = listChaptersInStates(['downloading'], { limit: 10000 });
+    for (const ch of active) {
+      await cancelChapter(ch.id);
+    }
+    if (active.length > 0) {
+      const placeholders = active.map(() => '?').join(',');
+      getDb().prepare(`UPDATE chapters SET state = 'wanted', attempts = 0, prog_done = NULL, prog_total = NULL, started_at = NULL WHERE id IN (${placeholders})`).run(...active.map(c => c.id));
+    }
     resetStaleIfIdle();
+    await new Promise(r => setTimeout(r, 100));
     runOnce().catch(() => {});
-    return { ok: true, started: true };
+    return { ok: true, started: true, requeued: active.length };
   });
 
   // Re-queue every failed chapter across all series.

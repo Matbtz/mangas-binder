@@ -46,12 +46,12 @@ export function withTimeout(promise, ms, label = 'operation') {
  * immediately without burning retries.
  * @returns {Promise<Response>}
  */
-export async function fetchRetry(url, { retries = 4, baseDelay = 1000, headers = {}, signal } = {}) {
+export async function fetchRetry(url, { retries = 4, baseDelay = 1000, headers = {}, signal, timeoutMs = 15000 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (signal?.aborted) throw abortError();
     try {
-      const res = await fetch(url, { headers, signal });
+      const res = await withTimeout(fetch(url, { headers, signal }), timeoutMs, `fetch ${url}`);
       if (res.status === 429 || res.status >= 500) {
         const ra = Number(res.headers.get('retry-after'));
         const wait = ra ? ra * 1000 : baseDelay * 2 ** attempt;
