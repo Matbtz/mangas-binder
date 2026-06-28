@@ -870,10 +870,8 @@ export default async function apiRoutes(app) {
       results
     };
 
-    if (scope !== 'bindery') {
-      const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
-      writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
-    }
+    const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
+    writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     return report;
   });
 
