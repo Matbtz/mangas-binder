@@ -133,11 +133,21 @@ export default async function apiRoutes(app) {
     const { title } = req.body;
     if (!title) return reply.code(400).send({ error: 'Title required' });
 
+    const cfg = getProviderConfig('hardcover') || {};
+    const key = process.env.HARDCOVER_API_KEY || cfg.apikey;
+    if (!key) {
+      return reply.code(400).send({ error: 'Hardcover API key not configured. Add it in Settings -> Sources.' });
+    }
+    const token = String(key).replace(/^bearer\s+/i, '').replace(/\s+/g, '').trim();
+
     try {
       const q = `query($title: String!) { mangas(where: {title: {_ilike: $title}}, limit: 1) { image { url } } }`;
       const resp = await fetch('https://api.hardcover.app/v1/graphql', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': process.env.HARDCOVER_API_KEY ? `Bearer ${process.env.HARDCOVER_API_KEY}` : '' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({ query: q, variables: { title: `%${title}%` } })
       });
       const data = await resp.json();
@@ -147,7 +157,7 @@ export default async function apiRoutes(app) {
         logHistory('cover_updated', { seriesId: id, message: 'Fetched cover from Hardcover' });
         return { success: true, coverUrl };
       } else {
-        return reply.code(404).send({ error: 'Cover not found on Hardcover' });
+        return { success: false, error: 'Cover not found on Hardcover' };
       }
     } catch (err) {
       console.error('Hardcover error:', err);
