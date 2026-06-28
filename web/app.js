@@ -1828,6 +1828,98 @@ async function viewAdd(v) {
   $('#q', card).addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
 }
 
+function openBinderyAuditModal() {
+  const existing = document.getElementById('bindery-audit-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="bindery-audit-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:16px;width:100%;max-width:640px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.9)">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center">
+        <h3 style="margin:0;color:#fff;font-size:16px">📦 Bindery Integrity Audit</h3>
+        <button class="btn sm icon" id="ba-close" style="margin-left:auto">✕</button>
+      </div>
+      <div id="ba-body" style="padding:16px 22px;overflow-y:auto;flex:1">
+        <p class="muted">Running integrity audit on bindery files…</p>
+      </div>
+      <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn sm" id="ba-copy" style="display:none">📋 Copy Report</button>
+        <button class="btn sm primary" id="ba-cancel">Close</button>
+      </div>
+    </div>
+  </div>`);
+
+  const baBody = modal.querySelector('#ba-body');
+  const copyBtn = modal.querySelector('#ba-copy');
+  const close = () => modal.remove();
+  modal.querySelector('#ba-close').onclick = close;
+  modal.querySelector('#ba-cancel').onclick = close;
+
+  let reportText = '';
+  copyBtn.onclick = () => {
+    const temp = document.createElement('textarea');
+    temp.value = reportText;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand('copy');
+    document.body.removeChild(temp);
+    toast('Copied report to clipboard!');
+  };
+
+  (async () => {
+    try {
+      const res = await api('/audit-cbz-integrity?scope=bindery', { method: 'POST' });
+      baBody.innerHTML = '';
+      
+      const lines = [];
+      lines.push('=== mangas-binder Bindery Integrity Report ===\n');
+      lines.push(`Audited ${res.filesAudited} files. Found ${res.issuesFound} issues.`);
+      lines.push('');
+      
+      if (!res.results || !res.results.length) {
+        lines.push('No file integrity issues detected inside the bindery! All packages look correct.');
+        baBody.appendChild(h(`<div style="text-align:center;padding:24px 0">
+          <div style="font-size:40px;margin-bottom:10px">✓</div>
+          <strong style="color:#7ecc7e">No issues found</strong>
+          <p class="muted" style="font-size:13px;margin:6px 0 0">All files currently in the bindery are structurally sound and match database mappings.</p>
+        </div>`));
+      } else {
+        const list = h('<div style="display:flex;flex-direction:column;gap:12px"></div>');
+        for (const s of res.results) {
+          const sCard = h(`<div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 16px">
+            <strong style="color:#fff;font-size:14px">${esc(s.seriesTitle)}</strong>
+            <div class="issues-list" style="display:flex;flex-direction:column;gap:6px;margin-top:8px"></div>
+          </div>`);
+          const il = sCard.querySelector('.issues-list');
+          
+          lines.push(`Series: "${s.seriesTitle}" (ID: ${s.seriesId})`);
+          for (const f of s.files) {
+            lines.push(`  File: "${f.basename}"`);
+            const fRow = h(`<div style="font-size:12px;font-family:monospace;word-break:break-all;color:var(--warn)">
+              <div style="color:#888;margin-bottom:3px">${esc(f.basename)}</div>
+            </div>`);
+            for (const issue of f.issues) {
+              lines.push(`    ⚠️  ${issue}`);
+              fRow.appendChild(h(`<div style="margin-left:10px;margin-top:2px">⚠️ ${esc(issue)}</div>`));
+            }
+            il.appendChild(fRow);
+          }
+          lines.push('');
+          list.appendChild(sCard);
+        }
+        lines.push(`=== Audit complete. Found ${res.issuesFound} issues. ===`);
+        baBody.appendChild(list);
+      }
+      
+      reportText = lines.join('\n');
+      copyBtn.style.display = 'inline-block';
+    } catch (e) {
+      baBody.innerHTML = `<p style="color:var(--warn)">Failed to run integrity audit: ${esc(e.message)}</p>`;
+    }
+  })();
+
+  document.body.appendChild(modal);
+}
+
 // --- Activity --------------------------------------------------------------
 async function viewActivity(v) {
   v.innerHTML = '';
@@ -2017,8 +2109,18 @@ async function viewActivity(v) {
       }
     } else if (currentTab === 'bindery') {
       const bin = data.bindery;
+
+      const headerRow = h('<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-shrink:0"></div>');
+      const auditBtn = h('<button class="btn sm" style="background:#8957e5;color:#fff">📦 Audit Bindery Files</button>');
+      headerRow.appendChild(auditBtn);
+      tabContent.appendChild(headerRow);
+
+      auditBtn.onclick = () => {
+        openBinderyAuditModal();
+      };
+
       if (!bin.length) {
-        tabContent.appendChild(h('<div class="empty"><div class="big">📦</div><div>Bindery is empty</div><p class="muted">No packages currently ready in the bindery.</p></div>'));
+        tabContent.appendChild(h('<div class="empty" style="margin-top:20px"><div class="big">📦</div><div>Bindery is empty</div><p class="muted">No packages currently ready in the bindery.</p></div>'));
       } else {
         const list = h('<div class="q-list"></div>');
         for (const c of bin) {

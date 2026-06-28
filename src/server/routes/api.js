@@ -447,20 +447,28 @@ export default async function apiRoutes(app) {
       });
     }
 
+     const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
     const binderyRows = getDb().prepare(`
       SELECT c.*, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type
       FROM chapters c JOIN series s ON s.id = c.series_id
-      WHERE c.state = 'bindery'
+      WHERE c.state = 'bindery' OR (c.state = 'imported' AND c.cbz_path IS NOT NULL AND c.cbz_path NOT LIKE 'included_in_vol_%')
       ORDER BY c.updated_at DESC
-      LIMIT 200
+      LIMIT 1000
     `).all();
-    const bindery = binderyRows.map(r => ({
-      ...chapterView(r),
-      seriesTitle: r.series_title,
-      seriesCover: r.series_cover || null,
-      seriesMediaType: r.series_media_type || 'manga',
-      packagedAt: r.updated_at,
-    }));
+    const bindery = binderyRows
+      .filter(r => {
+        if (r.state === 'bindery') return true;
+        const normPath = path.normalize(r.cbz_path).toLowerCase();
+        return normPath.startsWith(outputDirNormalized);
+      })
+      .slice(0, 200)
+      .map(r => ({
+        ...chapterView(r),
+        seriesTitle: r.series_title,
+        seriesCover: r.series_cover || null,
+        seriesMediaType: r.series_media_type || 'manga',
+        packagedAt: r.updated_at,
+      }));
 
     const failedRows = getDb().prepare(`
       SELECT c.*, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type
@@ -591,16 +599,34 @@ export default async function apiRoutes(app) {
   });
 
   app.post('/api/audit-cbz-integrity', async (req, reply) => {
+    const { scope } = req.query || {};
     const seriesList = listSeries();
     const results = [];
     let filesAudited = 0;
     let issuesFound = 0;
 
+    const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
+
     for (const s of seriesList) {
       const chapters = listChaptersForSeries(s.id);
       const byCbz = new Map();
       for (const c of chapters) {
-        if (c.state === 'imported' && c.cbz_path && !c.cbz_path.startsWith('included_in_vol_')) {
+        if (!c.cbz_path || c.cbz_path.startsWith('included_in_vol_')) continue;
+
+        let isBinderyFile = false;
+        if (c.state === 'bindery') {
+          isBinderyFile = true;
+        } else if (c.state === 'imported') {
+          const normPath = path.normalize(c.cbz_path).toLowerCase();
+          if (normPath.startsWith(outputDirNormalized)) {
+            isBinderyFile = true;
+          }
+        }
+
+        if (scope === 'bindery' && !isBinderyFile) continue;
+
+        // Ensure we only audit imported or bindery states
+        if (c.state === 'imported' || c.state === 'bindery') {
           if (!byCbz.has(c.cbz_path)) byCbz.set(c.cbz_path, []);
           byCbz.get(c.cbz_path).push(c);
         }
@@ -684,8 +710,10 @@ export default async function apiRoutes(app) {
       results
     };
 
-    const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
-    writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+    if (scope !== 'bindery') {
+      const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
+      writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+    }
     return report;
   });
 
