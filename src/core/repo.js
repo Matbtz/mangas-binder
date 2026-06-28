@@ -79,6 +79,7 @@ const SERIES_PATCH_COLS = {
   downloadProvider: v => v,
   mediaType: v => v,
   title: v => v,
+  description: v => v,
 };
 const SERIES_COL_NAMES = {
   monitored: 'monitored', monitorMode: 'monitor_mode', monitorFromVolume: 'monitor_from_volume',
@@ -86,6 +87,7 @@ const SERIES_COL_NAMES = {
   language: 'language', totalVolumesHint: 'total_volumes_hint', coverPath: 'cover_path', folderPath: 'folder_path',
   provider: 'provider', providerSeriesId: 'provider_series_id',
   downloadProvider: 'download_provider', mediaType: 'media_type', title: 'title',
+  description: 'description',
 };
 
 export function updateSeries(id, patch) {

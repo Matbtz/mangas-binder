@@ -107,11 +107,17 @@ function initials(title) {
   return ((w[0]?.[0] || '') + (w[1]?.[0] || '')).toUpperCase() || '?';
 }
 /** Fallback gradient+initials layer, plus the cover <img> on top when available. */
-function coverArt(coverPath, title) {
+function coverArt(seriesId, coverPath, title) {
+  if (arguments.length === 2) {
+    title = coverPath;
+    coverPath = seriesId;
+    seriesId = null;
+  }
   const hue = hueFromString(title || '');
   const fb = `<div class="poster-fallback" style="background:linear-gradient(150deg,hsl(${hue},42%,34%),hsl(${(hue + 45) % 360},45%,20%))">${esc(initials(title))}</div>`;
   if (!coverPath) return fb;
-  return `${fb}<img src="${esc(coverPath)}" alt="${esc(title)}" loading="lazy" onerror="this.remove()">`;
+  const src = seriesId ? `/api/series/${seriesId}/cover?t=${encodeURIComponent(coverPath)}` : coverPath;
+  return `${fb}<img src="${esc(src)}" alt="${esc(title)}" loading="lazy" onerror="this.remove()">`;
 }
 /** Determinate bar when total>0, else indeterminate. */
 function progressBar(done, total, extraCls = '') {
@@ -435,7 +441,7 @@ function libPoster(s, { onSelect } = {}) {
   const mediaTag = (s.mediaType || 'manga') === 'comic' ? 'Comic' : 'Manga';
   const poster = h(`<div class="poster fade-in">
     <div class="poster-art">
-      ${coverArt(s.coverPath, s.title)}
+      ${coverArt(s.id, s.coverPath, s.title)}
       <div class="poster-corner"><span class="poster-tag">${mediaTag}</span></div>
       <div class="poster-overlay"><div class="poster-actions"></div></div>
     </div>
@@ -489,7 +495,7 @@ async function showDetail(id) {
   const hero = h(`<div class="hero-card">
     <div class="hero-poster-container">
       <div class="hero-poster" id="hero-poster" title="Click to set cover URL">
-        ${coverArt(s.coverPath, s.title)}
+        ${coverArt(s.id, s.coverPath, s.title)}
         <div class="hero-poster-edit">✎ Set Cover</div>
       </div>
     </div>
@@ -587,6 +593,7 @@ async function showDetail(id) {
         onApplied: () => showDetail(id),
       }) },
     { label: 'Extrapolate volumes', icon: '🪄', onClick: () => openExtrapolateModal({ seriesId: id, seriesTitle: s.title, onApplied: () => showDetail(id) }) },
+    { label: 'Edit metadata', icon: '✍', onClick: () => openEditMetadataModal({ seriesId: id, title: s.title, description: s.description, coverPath: s.coverPath, onApplied: () => showDetail(id) }) },
     { label: 'Define volumes manually', icon: '📋', onClick: () => openVolumeDefinitionsModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
     { label: 'Link / change MangaDex', icon: '🔗', onClick: async () => {
         const input = prompt(`Enter MangaDex Series ID or URL to link with ${s.title}:`, s.provider === 'mangadex' ? s.providerSeriesId : '');
@@ -604,14 +611,13 @@ async function showDetail(id) {
   ], 'btn sm');
   hero.querySelector('#hd-more-slot').replaceWith(moreMenu);
 
-  hero.querySelector('#hero-poster').onclick = async () => {
-    const url = prompt('Enter image URL for cover art:', s.coverPath || '');
-    if (url !== null) {
-      await api(`/series/${id}`, { method:'PATCH', body:{ coverPath: url.trim() || null } });
-      toast('Cover updated');
-      showDetail(id);
-    }
-  };
+  hero.querySelector('#hero-poster').onclick = () => openEditMetadataModal({
+    seriesId: id,
+    title: s.title,
+    description: s.description,
+    coverPath: s.coverPath,
+    onApplied: () => showDetail(id)
+  });
 
   const modes = hero.querySelector('#modes');
   // Monitor mode: supports 'some' (auto-set when volumes/chapters are individually tracked)
@@ -1463,6 +1469,76 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
   fetchPreview();
 }
 
+// --- Edit Metadata modal ---
+function openEditMetadataModal({ seriesId, title, description, coverPath, onApplied }) {
+  const existing = document.getElementById('edit-metadata-modal');
+  if (existing) existing.remove();
+
+  const INP = 'background:var(--bg2);border:1px solid var(--line);color:#fff;padding:8px 12px;border-radius:6px;font-family:inherit;font-size:13px;width:100%;box-sizing:border-box';
+  const TXT = 'background:var(--bg2);border:1px solid var(--line);color:#fff;padding:8px 12px;border-radius:6px;font-family:inherit;font-size:13px;width:100%;height:120px;resize:vertical;box-sizing:border-box';
+
+  const modal = h(`<div id="edit-metadata-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px">
+    <div style="background:var(--panel);border:1px solid var(--line2);border-radius:16px;width:100%;max-width:500px;display:flex;flex-direction:column;box-shadow:0 18px 48px rgba(0,0,0,0.65);overflow:hidden">
+      <div style="padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+        <strong style="color:#fff;font-size:15px">✍ Edit Series Metadata</strong>
+        <button class="btn sm icon" id="em-close">✕</button>
+      </div>
+      <div style="padding:18px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;max-height:65vh">
+        <div>
+          <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Title</label>
+          <input id="em-title-input" type="text" value="${esc(title || '')}" style="${INP}">
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Cover Image URL</label>
+          <input id="em-cover-input" type="text" value="${esc(coverPath || '')}" style="${INP}">
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Description</label>
+          <textarea id="em-desc-input" style="${TXT}">${esc(description || '')}</textarea>
+        </div>
+      </div>
+      <div style="padding:12px 18px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0">
+        <button class="btn sm" id="em-cancel">Cancel</button>
+        <button class="btn sm primary" id="em-save">✓ Save Changes</button>
+      </div>
+    </div>
+  </div>`);
+
+  const close = () => modal.remove();
+  modal.querySelector('#em-close').onclick = close;
+  modal.querySelector('#em-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  modal.querySelector('#em-save').onclick = async () => {
+    const saveBtn = modal.querySelector('#em-save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    const newTitle = modal.querySelector('#em-title-input').value.trim();
+    const newCover = modal.querySelector('#em-cover-input').value.trim();
+    const newDesc = modal.querySelector('#em-desc-input').value.trim();
+
+    try {
+      await api(`/series/${seriesId}`, {
+        method: 'PATCH',
+        body: {
+          title: newTitle || undefined,
+          coverPath: newCover || null,
+          description: newDesc || null,
+        }
+      });
+      toast('Metadata updated successfully!');
+      close();
+      if (onApplied) onApplied();
+    } catch (e) {
+      toast('Failed to save metadata: ' + e.message);
+      saveBtn.disabled = false;
+      saveBtn.textContent = '✓ Save Changes';
+    }
+  };
+
+  document.body.appendChild(modal);
+}
+
 // --- Manual Volume Definitions modal ---
 function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied }) {
   const existing = document.getElementById('vol-def-modal');
@@ -1730,7 +1806,7 @@ async function viewActivity(v) {
   const queueWrap = h('<div></div>'); v.appendChild(queueWrap);
   const histWrap = h('<div></div>'); v.appendChild(histWrap);
 
-  const qThumb = (c) => `<div class="q-thumb">${coverArt(c.seriesCover, c.seriesTitle || ('#' + c.seriesId))}</div>`;
+  const qThumb = (c) => `<div class="q-thumb">${coverArt(c.seriesId, c.seriesCover, c.seriesTitle || ('#' + c.seriesId))}</div>`;
   const unit = (c) => (c.seriesMediaType === 'comic' ? 'Issue' : 'Ch.');
 
   const qRow = (c) => {
