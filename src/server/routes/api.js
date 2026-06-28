@@ -605,13 +605,14 @@ export default async function apiRoutes(app) {
     const { volumes = [] } = req.body || {};
     if (!Array.isArray(volumes) || !volumes.length) return reply.code(400).send({ error: 'volumes array required' });
     const db = getDb();
-    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
+    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
     let totalChanges = 0;
     for (const { volume, from, to } of volumes) {
       if (!volume || from == null || to == null) continue;
       const res = upd.run(String(volume), s.id, Number(from), Number(to));
       totalChanges += res.changes;
     }
+    await refreshSeries(s.id);
     return { ok: true, changes: totalChanges };
   });
   app.post('/api/series/:id/custom-volume', async (req, reply) => {
@@ -620,8 +621,9 @@ export default async function apiRoutes(app) {
     const { volume, from, to } = req.body || {};
     if (!volume || from == null || to == null) return reply.code(400).send({ error: 'invalid range' });
     const db = getDb();
-    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
+    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
     const res = upd.run(String(volume), s.id, Number(from), Number(to));
+    await refreshSeries(s.id);
     return { ok: true, changes: res.changes };
   });
   app.get('/api/series/:id/audit-volumes', async (req, reply) => {
