@@ -1,4 +1,4 @@
-import { writeFile, mkdir, readdir, rename } from 'fs/promises';
+import { writeFile, mkdir, readdir, rename, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { pLimit, fetchRetry, abortError } from './limit.js';
@@ -122,6 +122,14 @@ export async function fetchPagesToStaging(dir, entries, { concurrency = 4, onPro
       signal?.removeEventListener('abort', onParentAbort);
     }
   })));
+
+  const expectedNames = new Set(entries.map((entry, i) => `${pad(i + 1)}${extFromUrl(entry.url)}`));
+  const allFiles = await readdir(dir);
+  for (const f of allFiles) {
+    if (!f.endsWith('.part') && !expectedNames.has(f)) {
+      try { await rm(path.join(dir, f), { force: true }); } catch {}
+    }
+  }
 
   const written = (await readdir(dir)).filter(f => !f.endsWith('.part'));
   if (written.length < entries.length) {

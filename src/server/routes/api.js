@@ -21,7 +21,8 @@ import { resolveVolumes } from '../../core/mapping.js';
 import { getVolumeStats, extrapolateVolumes } from '../../core/extrapolate.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
-import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning } from '../../download/worker.js';
+import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning, packageCompleteVolumes } from '../../download/worker.js';
+import { chapterStagingDir } from '../../download/downloader.js';
 import { notify } from '../../core/notify.js';
 import { bus } from '../../core/events.js';
 import { seriesView, chapterView } from '../views.js';
@@ -422,6 +423,10 @@ export default async function apiRoutes(app) {
           }
           deleted++;
         }
+        try {
+          const sDir = chapterStagingDir(c.series_id, c.number);
+          rmSync(sDir, { recursive: true, force: true });
+        } catch {}
         setChapterState(c.id, defaultState, resetExtra);
       } catch (err) {
         errors.push({ chapterId: c.id, error: err.message });
@@ -606,7 +611,9 @@ export default async function apiRoutes(app) {
     if (!cbzPath) return reply.code(400).send({ error: 'cbzPath required' });
 
     const db = getDb();
-    const chapters = db.prepare('SELECT * FROM chapters WHERE cbz_path = ?').all(cbzPath);
+    const targetNormalized = path.normalize(cbzPath).toLowerCase();
+    const allChapters = db.prepare('SELECT * FROM chapters WHERE cbz_path IS NOT NULL').all();
+    const chapters = allChapters.filter(c => path.normalize(c.cbz_path).toLowerCase() === targetNormalized);
 
     if (chapters.length > 0) {
       const s = getSeries(chapters[0].series_id);
@@ -615,7 +622,6 @@ export default async function apiRoutes(app) {
 
       // Delete the file if it exists and is under outputDir (safety guardrail)
       const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
-      const targetNormalized = path.normalize(cbzPath).toLowerCase();
       if (targetNormalized.startsWith(outputDirNormalized) && existsSync(cbzPath)) {
         try {
           const st = statSync(cbzPath);
@@ -629,14 +635,17 @@ export default async function apiRoutes(app) {
         }
       }
 
-      // Reset the chapters
+      // Reset the chapters and completely wipe their staging folders so redownload starts fresh
       for (const c of chapters) {
+        try {
+          const sDir = chapterStagingDir(c.series_id, c.number);
+          rmSync(sDir, { recursive: true, force: true });
+        } catch {}
         setChapterState(c.id, defaultState, resetExtra);
       }
     } else {
       // If not in database but file exists, delete it anyway if in output directory
       const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
-      const targetNormalized = path.normalize(cbzPath).toLowerCase();
       if (targetNormalized.startsWith(outputDirNormalized) && existsSync(cbzPath)) {
         try {
           unlinkSync(cbzPath);
@@ -917,6 +926,10 @@ export default async function apiRoutes(app) {
             const chNum = match[1];
             const row = db.prepare('SELECT id FROM chapters WHERE series_id = ? AND number = ?').get(s.seriesId, chNum);
             if (row) {
+              try {
+                const sDir = chapterStagingDir(s.seriesId, chNum);
+                rmSync(sDir, { recursive: true, force: true });
+              } catch {}
               setChapterState(row.id, defaultState, resetExtra);
               fixedCount++;
             }
