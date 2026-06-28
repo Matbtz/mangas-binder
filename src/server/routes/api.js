@@ -1,5 +1,6 @@
-import { readdirSync, existsSync, statSync, unlinkSync, rmSync } from 'fs';
+import { readdirSync, existsSync, statSync, unlinkSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
+import { config } from '../../core/config.js';
 import { getProvider, describeProviders } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
 import { searchVolumes } from '../../providers/comicvine.js';
@@ -241,6 +242,7 @@ export default async function apiRoutes(app) {
       updateSeries(s.id, { monitorMode: 'some' });
     }
 
+    await autoPackageCompleteVolumes(s.id);
     return { ok: true, updated };
   });
 
@@ -588,6 +590,118 @@ export default async function apiRoutes(app) {
     return { ok: true, results };
   });
 
+  app.post('/api/audit-cbz-integrity', async (req, reply) => {
+    const seriesList = listSeries();
+    const results = [];
+    let filesAudited = 0;
+    let issuesFound = 0;
+
+    for (const s of seriesList) {
+      const chapters = listChaptersForSeries(s.id);
+      const byCbz = new Map();
+      for (const c of chapters) {
+        if (c.state === 'imported' && c.cbz_path && !c.cbz_path.startsWith('included_in_vol_')) {
+          if (!byCbz.has(c.cbz_path)) byCbz.set(c.cbz_path, []);
+          byCbz.get(c.cbz_path).push(c);
+        }
+      }
+
+      const seriesResults = {
+        seriesId: s.id,
+        seriesTitle: s.title,
+        files: []
+      };
+
+      for (const [filePath, dbChapters] of byCbz.entries()) {
+        filesAudited++;
+        const fileIssues = [];
+        let fileSize = 0;
+        let fileExists = false;
+
+        if (!existsSync(filePath)) {
+          fileIssues.push(`File does not exist on disk: "${filePath}"`);
+          issuesFound++;
+        } else {
+          fileExists = true;
+          try {
+            const st = statSync(filePath);
+            fileSize = st.size;
+            if (st.size === 0) {
+              fileIssues.push(`CBZ file is empty (0 bytes)`);
+              issuesFound++;
+            } else {
+              const info = await readCbzInfo(filePath);
+              if (!info || !info.chapters || info.chapters.length === 0) {
+                fileIssues.push(`CBZ archive is unreadable, corrupt, or contains no chapters`);
+                issuesFound++;
+              } else {
+                const dbChNums = new Set(dbChapters.map(c => String(parseFloat(c.number))));
+                const cbzChNums = new Set(info.chapters.map(num => String(parseFloat(num))));
+
+                // 1. Missing in CBZ
+                for (const num of dbChNums) {
+                  if (!cbzChNums.has(num)) {
+                    fileIssues.push(`Chapter ${num} is registered in database but missing inside the CBZ`);
+                    issuesFound++;
+                  }
+                }
+
+                // 2. Extra in CBZ
+                for (const num of cbzChNums) {
+                  if (!dbChNums.has(num)) {
+                    fileIssues.push(`Chapter ${num} is present inside the CBZ but not mapped in database`);
+                    issuesFound++;
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            fileIssues.push(`Error reading CBZ file: ${err.message}`);
+            issuesFound++;
+          }
+        }
+
+        if (fileIssues.length > 0) {
+          seriesResults.files.push({
+            path: filePath,
+            basename: path.basename(filePath),
+            size: fileSize,
+            exists: fileExists,
+            issues: fileIssues
+          });
+        }
+      }
+
+      if (seriesResults.files.length > 0) {
+        results.push(seriesResults);
+      }
+    }
+
+    const report = {
+      timestamp: new Date().toISOString(),
+      filesAudited,
+      issuesFound,
+      results
+    };
+
+    const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
+    writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+    return report;
+  });
+
+  app.get('/api/audit-cbz-integrity', async (req, reply) => {
+    const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
+    if (!existsSync(reportPath)) {
+      return { timestamp: null, filesAudited: 0, issuesFound: 0, results: [] };
+    }
+    try {
+      const data = readFileSync(reportPath, 'utf-8');
+      return JSON.parse(data);
+    } catch {
+      return reply.code(500).send({ error: 'Failed to read integrity report' });
+    }
+  });
+
   // --- Providers ---
   app.get('/api/providers', async () => {
     const states = Object.fromEntries(getProviderStates().map(p => [p.name, p]));
@@ -666,7 +780,9 @@ export default async function apiRoutes(app) {
       }
     }
 
-    return resolveVolumes(s.id, { chaptersPerVolume: chaptersPerVolume ? Number(chaptersPerVolume) : null });
+    const res = resolveVolumes(s.id, { chaptersPerVolume: chaptersPerVolume ? Number(chaptersPerVolume) : null });
+    await autoPackageCompleteVolumes(s.id);
+    return res;
   });
   app.get('/api/series/:id/extrapolate-preview', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
@@ -761,6 +877,7 @@ export default async function apiRoutes(app) {
       totalChanges += res.changes;
     }
     await refreshSeries(s.id);
+    await autoPackageCompleteVolumes(s.id);
     return { ok: true, changes: totalChanges };
   });
   app.post('/api/series/:id/custom-volume', async (req, reply) => {
@@ -789,6 +906,7 @@ export default async function apiRoutes(app) {
     const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
     const res = upd.run(String(volume), s.id, Number(from), Number(to));
     await refreshSeries(s.id);
+    await autoPackageCompleteVolumes(s.id);
     return { ok: true, changes: res.changes };
   });
   app.get('/api/series/:id/audit-volumes', async (req, reply) => {
@@ -1131,4 +1249,41 @@ export default async function apiRoutes(app) {
     runScan().catch(() => {}); // long-running; fire and forget
     return { ok: true, started: true };
   });
+}
+
+async function autoPackageCompleteVolumes(seriesId) {
+  const s = getSeries(seriesId);
+  if (!s) return;
+  const chapters = listChaptersForSeries(s.id);
+  const byVolume = new Map();
+  for (const c of chapters) {
+    if (c.volume == null || c.volume === '') continue;
+    if (!byVolume.has(c.volume)) byVolume.set(c.volume, []);
+    byVolume.get(c.volume).push(c);
+  }
+
+  const isSeriesClosed = s.status === 'completed' || s.status === 'cancelled';
+  let maxVolNum = -Infinity;
+  for (const vk of byVolume.keys()) {
+    const v = parseFloat(vk);
+    if (!Number.isNaN(v)) maxVolNum = Math.max(maxVolNum, v);
+  }
+
+  const LOCAL_STATES = new Set(['imported', 'downloaded', 'bindery']);
+  for (const [volLabel, vchapters] of byVolume) {
+    const v = parseFloat(volLabel);
+    const isClosed = isSeriesClosed || Number.isNaN(v) || v < maxVolNum;
+
+    // A volume is complete if all non-skipped chapters are local
+    const nonSkipped = vchapters.filter(c => c.state !== 'skipped');
+    const allReady = nonSkipped.length > 0 && nonSkipped.every(c => LOCAL_STATES.has(c.state));
+
+    if (allReady && isClosed) {
+      try {
+        await packageSingleVolume(s.id, volLabel);
+      } catch (err) {
+        console.error(`Failed to auto-package Vol ${volLabel} after override:`, err);
+      }
+    }
+  }
 }

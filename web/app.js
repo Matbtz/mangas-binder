@@ -2340,6 +2340,92 @@ async function viewSettings(v) {
   aform.appendChild(aresults);
   ac.appendChild(aform);
   container.appendChild(ac);
+
+  // CBZ Integrity Audit
+  const ic = h('<div class="card" style="grid-column: 1 / -1; margin-top:20px"><h2>CBZ Integrity Audit</h2><p class="muted" style="font-size:13px;margin:4px 0 14px 0">Scans all CBZ files on disk to ensure there are no empty/corrupt files, and verifies the chapters inside match your database records.</p></div>');
+  const iform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:14px"></div>');
+  const ibtnRow = h('<div style="display:flex;align-items:center;gap:12px"></div>');
+  const ibtn = h('<button class="btn primary" style="align-self:flex-start">Run CBZ Integrity Audit</button>');
+  const ilastRun = h('<span class="muted" style="font-size:12px"></span>');
+  ibtnRow.appendChild(ibtn);
+  ibtnRow.appendChild(ilastRun);
+  iform.appendChild(ibtnRow);
+
+  const iresults = h('<div style="display:none;flex-direction:column;gap:10px;margin-top:10px"></div>');
+  const itext = h('<textarea readonly style="width:100%;height:250px;background:#0d1117;border:1px solid #30363d;color:#fff;padding:10px;border-radius:8px;font-family:monospace;font-size:12px"></textarea>');
+  const icopy = h('<button class="btn sm" style="align-self:flex-start">📋 Copy to Clipboard</button>');
+  
+  icopy.onclick = () => {
+    itext.select();
+    document.execCommand('copy');
+    toast('Copied to clipboard!');
+  };
+
+  const formatIntegrityLines = (res) => {
+    const lines = [];
+    lines.push('=== mangas-binder CBZ integrity audit ===\n');
+    lines.push(`Audited ${res.filesAudited} files. Found ${res.issuesFound} issues.`);
+    lines.push('');
+    if (!res.results || !res.results.length) {
+      lines.push('No CBZ file integrity issues detected! All archives look correct.');
+    } else {
+      let totalIssues = 0;
+      for (const s of res.results) {
+        lines.push(`Series: "${s.seriesTitle}" (ID: ${s.seriesId})`);
+        for (const f of s.files) {
+          lines.push(`  File: "${f.basename}" (${(f.size / (1024*1024)).toFixed(2)} MB)`);
+          for (const issue of f.issues) {
+            lines.push(`    ⚠️  ${issue}`);
+            totalIssues++;
+          }
+        }
+        lines.push('');
+      }
+      lines.push(`=== Audit complete. Found ${totalIssues} integrity issues. ===`);
+    }
+    return lines;
+  };
+
+  const loadIntegrityReport = async () => {
+    try {
+      const res = await api('/audit-cbz-integrity');
+      if (res.timestamp) {
+        ilastRun.textContent = `Last run: ${new Date(res.timestamp).toLocaleString()}`;
+        const lines = formatIntegrityLines(res);
+        itext.value = lines.join('\n');
+        iresults.style.display = 'flex';
+      } else {
+        ilastRun.textContent = 'Last run: Never';
+      }
+    } catch {}
+  };
+  setTimeout(loadIntegrityReport, 100);
+
+  ibtn.onclick = async () => {
+    ibtn.disabled = true;
+    ibtn.textContent = 'Running Integrity Audit…';
+    try {
+      const res = await api('/audit-cbz-integrity', { method: 'POST' });
+      if (res.timestamp) {
+        ilastRun.textContent = `Last run: ${new Date(res.timestamp).toLocaleString()}`;
+      }
+      const lines = formatIntegrityLines(res);
+      itext.value = lines.join('\n');
+      iresults.style.display = 'flex';
+      toast('Integrity audit completed successfully');
+    } catch (e) {
+      toast('Failed: ' + e.message);
+    } finally {
+      ibtn.disabled = false;
+      ibtn.textContent = 'Run CBZ Integrity Audit';
+    }
+  };
+
+  iresults.appendChild(itext);
+  iresults.appendChild(icopy);
+  iform.appendChild(iresults);
+  ic.appendChild(iform);
+  container.appendChild(ic);
 }
 
 function openPackageAuditModal({ title, allVols, alerts, onProceed }) {
