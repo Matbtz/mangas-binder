@@ -522,6 +522,64 @@ export default async function apiRoutes(app) {
     return getAllSettings();
   });
 
+  app.get('/api/audit-all', async (req, reply) => {
+    const db = getDb();
+    const series = db.prepare('SELECT id, title FROM series').all();
+    const results = [];
+
+    for (const s of series) {
+      const chapters = db.prepare('SELECT id, number, volume, calculated FROM chapters WHERE series_id = ? ORDER BY CAST(number AS REAL), number').all(s.id);
+      
+      const volMap = {};
+      for (const c of chapters) {
+        if (c.volume == null || c.volume === '' || c.volume === 'none') continue;
+        (volMap[c.volume] ||= []).push(c);
+      }
+
+      const volKeys = Object.keys(volMap).sort((a, b) => parseFloat(a) - parseFloat(b));
+      const anomalies = [];
+
+      const ranges = [];
+      for (const vol of volKeys) {
+        const chs = volMap[vol];
+        const nums = chs.map(c => parseFloat(c.number)).filter(n => !isNaN(n));
+        if (!nums.length) continue;
+        const min = Math.min(...nums);
+        const max = Math.max(...nums);
+        ranges.push({ vol, min, max, chCount: chs.length });
+
+        const span = max - min;
+        if (span > 50 && chs.length < 30) {
+          anomalies.push(`Volume ${vol} spans chapter numbers ${min} to ${max} (span of ${span}) but only has ${chs.length} chapters.`);
+        }
+      }
+
+      for (let i = 0; i < ranges.length; i++) {
+        for (let j = i + 1; j < ranges.length; j++) {
+          const r1 = ranges[i];
+          const r2 = ranges[j];
+          const v1Num = parseFloat(r1.vol);
+          const v2Num = parseFloat(r2.vol);
+          if (!isNaN(v1Num) && !isNaN(v2Num) && v1Num < v2Num) {
+            if (r1.max > r2.min) {
+              anomalies.push(`Overlap anomaly: Volume ${r1.vol} goes up to Chapter ${r1.max}, but Volume ${r2.vol} starts at Chapter ${r2.min}.`);
+            }
+          }
+        }
+      }
+
+      if (anomalies.length > 0) {
+        results.push({
+          seriesId: s.id,
+          seriesTitle: s.title,
+          anomalies,
+        });
+      }
+    }
+
+    return { ok: true, results };
+  });
+
   // --- Providers ---
   app.get('/api/providers', async () => {
     const states = Object.fromEntries(getProviderStates().map(p => [p.name, p]));

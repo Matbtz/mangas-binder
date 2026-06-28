@@ -2257,6 +2257,59 @@ async function viewSettings(v) {
     pc.appendChild(wrap);
   }
   container.appendChild(pc);
+
+  // Volume Audit
+  const ac = h('<div class="card" style="grid-column: 1 / -1"><h2>Volume Mapping Audit</h2></div>');
+  const aform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:14px"></div>');
+  const abtn = h('<button class="btn primary" style="align-self:flex-start">Run Volume Audit</button>');
+  const aresults = h('<div style="display:none;flex-direction:column;gap:10px;margin-top:10px"></div>');
+  const atext = h('<textarea readonly style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;color:#fff;padding:10px;border-radius:8px;font-family:monospace;font-size:12px"></textarea>');
+  const acopy = h('<button class="btn sm" style="align-self:flex-start">📋 Copy to Clipboard</button>');
+  
+  acopy.onclick = () => {
+    atext.select();
+    document.execCommand('copy');
+    toast('Copied to clipboard!');
+  };
+
+  abtn.onclick = async () => {
+    abtn.disabled = true;
+    abtn.textContent = 'Running Audit…';
+    try {
+      const res = await api('/audit-all');
+      const lines = [];
+      lines.push('=== mangas-binder volume audit ===\n');
+      if (!res.results || !res.results.length) {
+        lines.push('No volume mapping anomalies detected! Everything looks consistent.');
+      } else {
+        let issueCount = 0;
+        for (const s of res.results) {
+          lines.push(`Series: "${s.seriesTitle}" (ID: ${s.seriesId})`);
+          for (const a of s.anomalies) {
+            lines.push(`  ⚠️  ${a}`);
+            issueCount++;
+          }
+          lines.push('');
+        }
+        lines.push(`=== Audit complete. Found ${issueCount} volume anomalies. ===`);
+      }
+      atext.value = lines.join('\n');
+      aresults.style.display = 'flex';
+      toast('Audit completed successfully');
+    } catch (e) {
+      toast('Failed: ' + e.message);
+    } finally {
+      abtn.disabled = false;
+      abtn.textContent = 'Run Volume Audit';
+    }
+  };
+
+  aform.appendChild(abtn);
+  aresults.appendChild(atext);
+  aresults.appendChild(acopy);
+  aform.appendChild(aresults);
+  ac.appendChild(aform);
+  container.appendChild(ac);
 }
 
 function openPackageAuditModal({ title, allVols, alerts, onProceed }) {
