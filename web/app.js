@@ -2114,7 +2114,7 @@ async function viewSettings(v) {
 
   const sc = h('<div class="card"><h2>General Settings</h2></div>');
   const form = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:16px"></div>');
-  const grid = h('<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:14px;margin-bottom:10px"></div>');
+  const grid = h('<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:14px;margin-bottom:10px"></div>');
 
   for (const k of [...numKeys, ...Object.keys(enumKeys), ...boolKeys, ...textKeys]) {
     if (!(k in settings)) continue;
@@ -2166,7 +2166,7 @@ async function viewSettings(v) {
   const nc = h('<div class="card"><h2>Notifications</h2></div>');
   const nform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:16px"></div>');
   const webhooksGrid = h('<div style="display:flex;flex-direction:column;gap:14px"></div>');
-  const togglesGrid = h('<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:14px"></div>');
+  const togglesGrid = h('<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:14px"></div>');
 
   const nFields = [
     ['discordWebhook','Discord Webhook URL','text'],
