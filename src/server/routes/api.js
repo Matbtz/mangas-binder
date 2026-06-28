@@ -105,12 +105,14 @@ export default async function apiRoutes(app) {
 
     try {
       const res = await fetch(s.cover_path, { headers });
-      if (!res.ok) return reply.code(res.status).send({ error: 'failed to fetch cover' });
+      if (!res.ok) {
+        return reply.redirect(302, s.cover_path);
+      }
       reply.header('Content-Type', res.headers.get('Content-Type') || 'image/jpeg');
       reply.header('Cache-Control', 'public, max-age=86400');
       return Buffer.from(await res.arrayBuffer());
     } catch (err) {
-      return reply.code(500).send({ error: err.message });
+      return reply.redirect(302, s.cover_path);
     }
   });
 
