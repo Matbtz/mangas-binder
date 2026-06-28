@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, statSync, unlinkSync } from 'fs';
+import { readdirSync, existsSync, statSync, unlinkSync, rmSync } from 'fs';
 import path from 'path';
 import { getProvider, describeProviders } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
@@ -110,6 +110,45 @@ export default async function apiRoutes(app) {
       return Buffer.from(await res.arrayBuffer());
     } catch (err) {
       return reply.code(500).send({ error: err.message });
+    }
+  });
+
+
+  app.post('/api/series/:id/external-links', async (req, reply) => {
+    const id = parseInt(req.params.id, 10);
+    const series = getSeries(id);
+    if (!series) return reply.code(404).send({ error: 'Series not found' });
+    updateSeries(id, { externalLinks: req.body });
+    logHistory('links_updated', { seriesId: id, message: 'Updated external download links' });
+    return { success: true };
+  });
+
+  app.post('/api/series/:id/hardcover-cover', async (req, reply) => {
+    const id = parseInt(req.params.id, 10);
+    const series = getSeries(id);
+    if (!series) return reply.code(404).send({ error: 'Series not found' });
+    const { title } = req.body;
+    if (!title) return reply.code(400).send({ error: 'Title required' });
+
+    try {
+      const q = `query($title: String!) { mangas(where: {title: {_ilike: $title}}, limit: 1) { image { url } } }`;
+      const resp = await fetch('https://api.hardcover.app/v1/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': process.env.HARDCOVER_API_KEY ? `Bearer ${process.env.HARDCOVER_API_KEY}` : '' },
+        body: JSON.stringify({ query: q, variables: { title: `%${title}%` } })
+      });
+      const data = await resp.json();
+      const coverUrl = data?.data?.mangas?.[0]?.image?.url;
+      if (coverUrl) {
+        updateSeries(id, { coverPath: coverUrl });
+        logHistory('cover_updated', { seriesId: id, message: 'Fetched cover from Hardcover' });
+        return { success: true, coverUrl };
+      } else {
+        return reply.code(404).send({ error: 'Cover not found on Hardcover' });
+      }
+    } catch (err) {
+      console.error('Hardcover error:', err);
+      return reply.code(500).send({ error: 'Failed to fetch from Hardcover' });
     }
   });
 
@@ -359,8 +398,16 @@ export default async function apiRoutes(app) {
     let deleted = 0;
     const errors = [];
     for (const c of toDelete) {
-      try {
-        if (c.cbz_path && existsSync(c.cbz_path)) { unlinkSync(c.cbz_path); deleted++; }
+       try {
+        if (c.cbz_path && existsSync(c.cbz_path)) {
+          const st = statSync(c.cbz_path);
+          if (st.isDirectory()) {
+            rmSync(c.cbz_path, { recursive: true, force: true });
+          } else {
+            unlinkSync(c.cbz_path);
+          }
+          deleted++;
+        }
         setChapterState(c.id, defaultState, resetExtra);
       } catch (err) {
         errors.push({ chapterId: c.id, error: err.message });
@@ -522,6 +569,64 @@ export default async function apiRoutes(app) {
     return getAllSettings();
   });
 
+  app.get('/api/audit-all', async (req, reply) => {
+    const db = getDb();
+    const series = db.prepare('SELECT id, title FROM series').all();
+    const results = [];
+
+    for (const s of series) {
+      const chapters = db.prepare('SELECT id, number, volume, calculated FROM chapters WHERE series_id = ? ORDER BY CAST(number AS REAL), number').all(s.id);
+
+      const volMap = {};
+      for (const c of chapters) {
+        if (c.volume == null || c.volume === '' || c.volume === 'none') continue;
+        (volMap[c.volume] ||= []).push(c);
+      }
+
+      const volKeys = Object.keys(volMap).sort((a, b) => parseFloat(a) - parseFloat(b));
+      const anomalies = [];
+
+      const ranges = [];
+      for (const vol of volKeys) {
+        const chs = volMap[vol];
+        const nums = chs.map(c => parseFloat(c.number)).filter(n => !isNaN(n));
+        if (!nums.length) continue;
+        const min = Math.min(...nums);
+        const max = Math.max(...nums);
+        ranges.push({ vol, min, max, chCount: chs.length });
+
+        const span = max - min;
+        if (span > 50 && chs.length < 30) {
+          anomalies.push(`Volume ${vol} spans chapter numbers ${min} to ${max} (span of ${span}) but only has ${chs.length} chapters.`);
+        }
+      }
+
+      for (let i = 0; i < ranges.length; i++) {
+        for (let j = i + 1; j < ranges.length; j++) {
+          const r1 = ranges[i];
+          const r2 = ranges[j];
+          const v1Num = parseFloat(r1.vol);
+          const v2Num = parseFloat(r2.vol);
+          if (!isNaN(v1Num) && !isNaN(v2Num) && v1Num < v2Num) {
+            if (r1.max > r2.min) {
+              anomalies.push(`Overlap anomaly: Volume ${r1.vol} goes up to Chapter ${r1.max}, but Volume ${r2.vol} starts at Chapter ${r2.min}.`);
+            }
+          }
+        }
+      }
+
+      if (anomalies.length > 0) {
+        results.push({
+          seriesId: s.id,
+          seriesTitle: s.title,
+          anomalies,
+        });
+      }
+    }
+
+    return { ok: true, results };
+  });
+
   // --- Providers ---
   app.get('/api/providers', async () => {
     const states = Object.fromEntries(getProviderStates().map(p => [p.name, p]));
@@ -562,13 +667,51 @@ export default async function apiRoutes(app) {
   app.post('/api/series/:id/extrapolate-volumes', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
-    const { chaptersPerVolume } = req.body || {};
+    const { chaptersPerVolume, maxVolume } = req.body || {};
+    const db = getDb();
+    const chapters = listChaptersForSeries(s.id);
+    const volumeMap = {};
+    for (const c of chapters) {
+      const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
+      if (hasRealVolume) {
+        (volumeMap[c.volume] ||= []).push(c.number);
+      } else if (c.state === 'imported' && c.volume) {
+        (volumeMap[c.volume] ||= []).push(c.number);
+      }
+    }
+    const stats = getVolumeStats(volumeMap);
+    const finalChsPerVol = chaptersPerVolume ? Number(chaptersPerVolume) : (stats.avgChsPerVol || 10);
+
+    if (maxVolume && Number(maxVolume) > 0 && Number(maxVolume) < 500) {
+      let maxExisting = 0;
+      for (const c of chapters) {
+        const n = parseFloat(c.number);
+        if (!isNaN(n)) maxExisting = Math.max(maxExisting, n);
+      }
+      const targetMaxCh = Number(maxVolume) * finalChsPerVol;
+      const start = Math.floor(maxExisting) + 1;
+      const end = Math.floor(targetMaxCh);
+      if (start <= end && (end - start) < 100) {
+        for (let num = start; num <= end; num++) {
+          const numStr = String(num);
+          const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
+          if (!exists) {
+            db.prepare(`
+              INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+              VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
+            `).run(s.id, s.provider || 'mangadex', numStr, null, `Chapter ${numStr}`, s.language || 'en');
+          }
+        }
+      }
+    }
+
     return resolveVolumes(s.id, { chaptersPerVolume: chaptersPerVolume ? Number(chaptersPerVolume) : null });
   });
   app.get('/api/series/:id/extrapolate-preview', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const chsPerVolOverride = req.query.chaptersPerVolume ? Number(req.query.chaptersPerVolume) : null;
+    const maxVolume = req.query.maxVolume ? Number(req.query.maxVolume) : null;
     const chapters = listChaptersForSeries(s.id);
     const volumeMap = {};
     const unassigned = [];
@@ -583,7 +726,26 @@ export default async function apiRoutes(app) {
       }
     }
     const stats = getVolumeStats(volumeMap);
-    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, s.total_volumes_hint || null, false, chsPerVolOverride);
+    const finalChsPerVol = chsPerVolOverride || stats.avgChsPerVol || 10;
+
+    const unassignedCopy = [...unassigned];
+    if (maxVolume && maxVolume > 0 && maxVolume < 500) {
+      let maxExisting = 0;
+      for (const c of chapters) {
+        const n = parseFloat(c.number);
+        if (!isNaN(n)) maxExisting = Math.max(maxExisting, n);
+      }
+      const targetMaxCh = maxVolume * finalChsPerVol;
+      const start = Math.floor(maxExisting) + 1;
+      const end = Math.floor(targetMaxCh);
+      if (start <= end && (end - start) < 100) {
+        for (let num = start; num <= end; num++) {
+          unassignedCopy.push(String(num));
+        }
+      }
+    }
+
+    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassignedCopy, s.total_volumes_hint || null, false, finalChsPerVol);
     const volumes = Object.entries(calculated)
       .filter(([k]) => k !== 'Specials')
       .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))
@@ -592,9 +754,9 @@ export default async function apiRoutes(app) {
         return { vol, count: chs.length, chapters: sorted };
       });
     return {
-      chsPerVol: chsPerVolOverride || stats.avgChsPerVol,
+      chsPerVol: finalChsPerVol,
       consecutiveVols: stats.lastConsecutive,
-      totalUnassigned: unassigned.length,
+      totalUnassigned: unassignedCopy.length,
       volumes,
       overflow: overflow.length,
     };
@@ -603,12 +765,37 @@ export default async function apiRoutes(app) {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const { volumes = [] } = req.body || {};
-    if (!Array.isArray(volumes) || !volumes.length) return reply.code(400).send({ error: 'volumes array required' });
+    if (!Array.isArray(volumes)) return reply.code(400).send({ error: 'volumes array required' });
     const db = getDb();
+
+    // Clear old volume assignments (excluding Specials) first
+    db.prepare(`
+      UPDATE chapters
+      SET volume = NULL, calculated = 0, updated_at = datetime('now')
+      WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL)
+    `).run(s.id);
+
     const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
     let totalChanges = 0;
     for (const { volume, from, to } of volumes) {
       if (!volume || from == null || to == null) continue;
+
+      // Auto-create missing integer chapters in the range [from, to]
+      const start = Math.floor(Number(from));
+      const end = Math.floor(Number(to));
+      if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 50) {
+        for (let num = start; num <= end; num++) {
+          const numStr = String(num);
+          const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
+          if (!exists) {
+            db.prepare(`
+              INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+              VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
+            `).run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en');
+          }
+        }
+      }
+
       const res = upd.run(String(volume), s.id, Number(from), Number(to));
       totalChanges += res.changes;
     }
@@ -621,6 +808,23 @@ export default async function apiRoutes(app) {
     const { volume, from, to } = req.body || {};
     if (!volume || from == null || to == null) return reply.code(400).send({ error: 'invalid range' });
     const db = getDb();
+
+    // Auto-create missing integer chapters in the range [from, to]
+    const start = Math.floor(Number(from));
+    const end = Math.floor(Number(to));
+    if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 50) {
+      for (let num = start; num <= end; num++) {
+        const numStr = String(num);
+        const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
+        if (!exists) {
+          db.prepare(`
+            INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+            VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
+          `).run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en');
+        }
+      }
+    }
+
     const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
     const res = upd.run(String(volume), s.id, Number(from), Number(to));
     await refreshSeries(s.id);

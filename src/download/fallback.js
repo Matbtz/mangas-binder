@@ -26,6 +26,10 @@ export function fallbackEnabled() {
 
 /** Resolve (and cache) the MangaKatana series URL best matching this series. */
 export async function resolveSeriesUrl(series, { signal } = {}) {
+  // Override via externalLinks if present
+  if (series.externalLinks && series.externalLinks.mangakatana) {
+    return series.externalLinks.mangakatana;
+  }
   const hit = _cache.get(series.id);
   if (hit) {
     const ttl = hit.url ? POS_TTL_MS : NEG_TTL_MS;

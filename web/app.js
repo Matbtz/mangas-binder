@@ -530,7 +530,7 @@ async function showDetail(id) {
       <div class="hero-toolbar">
         <button class="btn sm" id="hd-back">← Library</button>
         <button class="btn sm primary" id="hd-refresh">↻ Refresh &amp; Scan</button>
-        <button class="btn sm" id="hd-run" title="Drain the download queue now">▶ Run downloads</button>
+        <span id="hd-downloads-slot"></span>
         <button class="btn sm acc2" id="hd-package-all" title="Package all owned volumes into clean CBZs">📦 Package All</button>
         <span id="hd-more-slot"></span>
         <div class="row" id="modes" style="margin-left:auto;gap:8px"></div>
@@ -545,27 +545,13 @@ async function showDetail(id) {
     await api(`/series/${id}/scan-library`,{method:'POST'});
     showDetail(id);
   };
-  hero.querySelector('#hd-run').onclick = async () => {
-    await api('/downloads/run', { method:'POST' });
-    toast('Running downloads…');
-    startLive();
-  };
-  const linkFolderAction = () => {
-    openFolderPickerModal({
-      defaultPath: s.folderPath || '/books',
-      title: `📁 Link Folder — ${s.title}`,
-      onSelect: async (folderPath) => {
-        toast('Linking folder & scanning library…');
-        try {
-          await api(`/series/${id}`, { method:'PATCH', body:{ folderPath } });
-          await api(`/series/${id}/scan-library`, { method:'POST' });
-          toast('Folder linked and scanned!');
-          showDetail(id);
-        } catch (e) { toast(e.message); }
-      }
-    });
-  };
-  hero.querySelector('#folder-pill').onclick = linkFolderAction;
+
+  const downloadsMenu = menuButton('Downloads ▾', [
+    { label: 'Run Downloads', icon: '▶', onClick: async () => { await api('/downloads/run', { method:'POST' }); toast('Running downloads…'); startLive(); } },
+    { label: 'Retry all failed', icon: '↻', onClick: async () => { const r = await api(`/series/${id}/retry-failed`, { method:'POST' }); toast(`Re-queued ${r.retried||0} failed`); startLive(); showDetail(id); } },
+    { label: 'Cancel all downloads', icon: '✕', danger: true, onClick: async () => { const r = await api(`/series/${id}/cancel`, { method:'POST' }); toast(`Cancelled ${r.cancelled||0}`); showDetail(id); } },
+  ], 'btn sm primary');
+  hero.querySelector('#hd-downloads-slot').replaceWith(downloadsMenu);
 
   hero.querySelector('#hd-package-all').onclick = async () => {
     toast('Auditing volumes…');
@@ -591,7 +577,6 @@ async function showDetail(id) {
 
   // Secondary actions tucked into a "More" menu to declutter the toolbar.
   const moreMenu = menuButton('⋯ More', [
-    { label: 'Link local folder', icon: '📁', onClick: linkFolderAction },
     { label: 'Manage Files', icon: '🗂', onClick: () => openManageFilesModal({
         seriesId: id,
         seriesTitle: s.title,
@@ -599,21 +584,9 @@ async function showDetail(id) {
         folderPath: s.folderPath || '',
         onApplied: () => showDetail(id),
       }) },
-    { label: 'Extrapolate volumes', icon: '🪄', onClick: () => openExtrapolateModal({ seriesId: id, seriesTitle: s.title, onApplied: () => showDetail(id) }) },
+    { label: 'Manage volumes', icon: '📚', onClick: () => openManageVolumesModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
     { label: 'Edit metadata', icon: '✍', onClick: () => openEditMetadataModal({ seriesId: id, title: s.title, description: s.description, coverPath: s.coverPath, onApplied: () => showDetail(id) }) },
-    { label: 'Define volumes manually', icon: '📋', onClick: () => openVolumeDefinitionsModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
-    { label: 'Link / change MangaDex', icon: '🔗', onClick: async () => {
-        const input = prompt(`Enter MangaDex Series ID or URL to link with ${s.title}:`, s.provider === 'mangadex' ? s.providerSeriesId : '');
-        if (!input) return;
-        let mdxId = input.trim();
-        const match = mdxId.match(/mangadex\.org\/title\/([a-f0-9-]+)/i);
-        if (match) mdxId = match[1];
-        toast('Linking with MangaDex…');
-        try { await api(`/series/${id}/link-mangadex`, { method:'POST', body:{ providerSeriesId: mdxId } }); toast('Linked to MangaDex!'); showDetail(id); }
-        catch (e) { alert('Failed to link MangaDex: ' + (e.message || e)); }
-      } },
-    { label: 'Retry all failed', icon: '↻', onClick: async () => { const r = await api(`/series/${id}/retry-failed`, { method:'POST' }); toast(`Re-queued ${r.retried||0} failed`); startLive(); showDetail(id); } },
-    { label: 'Cancel all downloads', icon: '✕', danger: true, onClick: async () => { const r = await api(`/series/${id}/cancel`, { method:'POST' }); toast(`Cancelled ${r.cancelled||0}`); showDetail(id); } },
+    { label: 'External links', icon: '🔗', onClick: () => openExternalLinksModal({ seriesId: id, seriesTitle: s.title, mediaType: s.mediaType, externalLinks: s.externalLinks || {}, onApplied: () => showDetail(id) }) },
     { label: 'Delete all files', icon: '🗑', danger: true, onClick: () => openDeleteFilesModal({ seriesId: id, seriesTitle: s.title, scope: 'all', onDeleted: () => showDetail(id) }) },
   ], 'btn sm');
   hero.querySelector('#hd-more-slot').replaceWith(moreMenu);
@@ -1363,10 +1336,16 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
         <button id="em-tab-auto" style="flex:1;background:var(--acc);color:#fff;border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✨ Automatic</button>
         <button id="em-tab-manual" style="flex:1;background:transparent;color:var(--fg);border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✏️ Manual</button>
       </div>
-      <div id="em-manual-row" style="display:none;padding:12px 20px;border-bottom:1px solid #2e353f;align-items:center;gap:10px;flex-shrink:0">
-        <span style="color:#ccc;font-size:13px">Chapters per volume:</span>
-        <input type="number" id="em-chs-per-vol" min="1" max="500" value="8" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:80px;font-family:inherit">
-        <button class="btn sm" id="em-preview-btn">Preview</button>
+      <div id="em-options-row" style="padding:12px 20px;border-bottom:1px solid #2e353f;display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex-shrink:0">
+        <div id="em-manual-opt" style="display:none;align-items:center;gap:8px">
+          <span style="color:#ccc;font-size:13px">Chapters/Vol:</span>
+          <input type="number" id="em-chs-per-vol" min="1" max="500" value="8" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:70px;font-family:inherit">
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="color:#ccc;font-size:13px">Extrapolate up to Volume:</span>
+          <input type="number" id="em-max-vol" min="1" max="500" placeholder="e.g. 10" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:75px;font-family:inherit">
+        </div>
+        <button class="btn sm" id="em-preview-btn" style="margin-left:auto">🔍 Preview</button>
       </div>
       <div id="em-body" style="padding:16px 20px;overflow-y:auto;flex:1">
         <p class="muted">Loading…</p>
@@ -1388,8 +1367,10 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
 
   const body = modal.querySelector('#em-body');
   const applyBtn = modal.querySelector('#em-apply');
-  const manualRow = modal.querySelector('#em-manual-row');
+  const manualOpt = modal.querySelector('#em-manual-opt');
   const chsInput = modal.querySelector('#em-chs-per-vol');
+  const maxVolInput = modal.querySelector('#em-max-vol');
+  const previewBtn = modal.querySelector('#em-preview-btn');
 
   const renderPreview = () => {
     if (!previewData) return;
@@ -1428,13 +1409,17 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
     applyBtn.disabled = volumes.length === 0;
   };
 
-  const fetchPreview = async (chaptersPerVolume = null) => {
+  const fetchPreview = async () => {
     body.innerHTML = '<p class="muted" style="padding:8px 0">Loading preview…</p>';
     applyBtn.disabled = true;
     try {
-      const qs = chaptersPerVolume ? `?chaptersPerVolume=${encodeURIComponent(chaptersPerVolume)}` : '';
+      const params = [];
+      if (mode === 'manual') params.push(`chaptersPerVolume=${encodeURIComponent(Number(chsInput.value) || 8)}`);
+      const maxVolVal = Number(maxVolInput.value);
+      if (maxVolVal && maxVolVal > 0) params.push(`maxVolume=${encodeURIComponent(maxVolVal)}`);
+      const qs = params.length ? '?' + params.join('&') : '';
+
       previewData = await api(`/series/${seriesId}/extrapolate-preview${qs}`);
-      if (mode === 'manual' && chaptersPerVolume) chsInput.value = chaptersPerVolume;
       renderPreview();
     } catch (e) {
       body.innerHTML = `<p style="color:var(--warn)">Failed to load preview: ${esc(e.message)}</p>`;
@@ -1447,20 +1432,25 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
     const manualTab = modal.querySelector('#em-tab-manual');
     autoTab.style.cssText = `flex:1;background:${mode==='auto'?'var(--acc)':'transparent'};color:${mode==='auto'?'#fff':'var(--fg)'};border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
     manualTab.style.cssText = `flex:1;background:${mode==='manual'?'var(--acc)':'transparent'};color:${mode==='manual'?'#fff':'var(--fg)'};border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
-    manualRow.style.display = mode === 'manual' ? 'flex' : 'none';
-    fetchPreview(mode === 'manual' ? (Number(chsInput.value) || 8) : null);
+    manualOpt.style.display = mode === 'manual' ? 'flex' : 'none';
+    fetchPreview();
   };
 
   modal.querySelector('#em-tab-auto').onclick = () => switchTab('auto');
   modal.querySelector('#em-tab-manual').onclick = () => switchTab('manual');
-  modal.querySelector('#em-preview-btn').onclick = () => fetchPreview(Number(chsInput.value) || 8);
-  chsInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(Number(chsInput.value) || 8); };
+  previewBtn.onclick = () => fetchPreview();
+  chsInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
+  maxVolInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
 
   applyBtn.onclick = async () => {
     applyBtn.disabled = true;
     applyBtn.textContent = 'Extrapolating…';
     try {
-      const reqBody = mode === 'manual' ? { chaptersPerVolume: Number(chsInput.value) || undefined } : {};
+      const reqBody = {};
+      if (mode === 'manual') reqBody.chaptersPerVolume = Number(chsInput.value) || undefined;
+      const maxVolVal = Number(maxVolInput.value);
+      if (maxVolVal && maxVolVal > 0) reqBody.maxVolume = maxVolVal;
+
       await api(`/series/${seriesId}/extrapolate-volumes`, { method: 'POST', body: reqBody });
       toast('Distributed chapters into volumes!');
       close();
@@ -1499,6 +1489,13 @@ function openEditMetadataModal({ seriesId, title, description, coverPath, onAppl
           <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Cover Image URL</label>
           <input id="em-cover-input" type="text" value="${esc(coverPath || '')}" style="${INP}">
         </div>
+        <div style="padding:10px;background:var(--bg);border-radius:8px;border:1px solid var(--line2)">
+          <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Find Cover on Hardcover</label>
+          <div style="display:flex;gap:8px">
+            <input id="em-hc-search" type="text" value="${esc(title || '')}" style="${INP};flex:1" placeholder="Search title...">
+            <button class="btn sm" id="em-hc-btn" style="flex-shrink:0">🔍 Fetch</button>
+          </div>
+        </div>
         <div>
           <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Description</label>
           <textarea id="em-desc-input" style="${TXT}">${esc(description || '')}</textarea>
@@ -1515,6 +1512,23 @@ function openEditMetadataModal({ seriesId, title, description, coverPath, onAppl
   modal.querySelector('#em-close').onclick = close;
   modal.querySelector('#em-cancel').onclick = close;
   modal.onclick = e => { if (e.target === modal) close(); };
+
+  modal.querySelector('#em-hc-btn').onclick = async () => {
+    const btn = modal.querySelector('#em-hc-btn');
+    const query = modal.querySelector('#em-hc-search').value.trim();
+    if (!query) return;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+      const res = await api(`/series/${seriesId}/hardcover-cover`, { method: 'POST', body: { title: query } });
+      if (res.coverUrl) {
+        modal.querySelector('#em-cover-input').value = res.coverUrl;
+        toast('Cover found on Hardcover!');
+      } else {
+        toast('No cover found for this title');
+      }
+    } catch (err) { toast(err.message); }
+    btn.disabled = false; btn.textContent = '🔍 Fetch';
+  };
 
   modal.querySelector('#em-save').onclick = async () => {
     const saveBtn = modal.querySelector('#em-save');
@@ -1542,6 +1556,50 @@ function openEditMetadataModal({ seriesId, title, description, coverPath, onAppl
       saveBtn.textContent = '✓ Save Changes';
     }
   };
+
+  document.body.appendChild(modal);
+}
+
+async function openManageVolumesModal({ seriesId, seriesTitle, chapters, onApplied }) {
+  const existing = document.getElementById('manage-volumes-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="manage-volumes-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="background:var(--bg);border:1px solid var(--line);border-radius:12px;width:100%;max-width:500px;display:flex;flex-direction:column;box-shadow:0 20px 40px rgba(0,0,0,0.8)">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between">
+        <h3 style="margin:0;font-size:16px;font-weight:600">📚 Manage Volumes - ${esc(seriesTitle)}</h3>
+        <button class="btn sm icon modal-close" style="border:none">✕</button>
+      </div>
+      <div style="display:flex;border-bottom:1px solid var(--line);background:var(--bg2)">
+        <button class="tab-btn active" data-tab="extrapolate" style="flex:1;padding:12px;background:none;border:none;color:#fff;cursor:pointer;font-weight:500;border-bottom:2px solid var(--acc)">✨ Extrapolate</button>
+        <button class="tab-btn" data-tab="manual" style="flex:1;padding:12px;background:none;border:none;color:var(--muted);cursor:pointer;font-weight:500;border-bottom:2px solid transparent">📋 Define Manually</button>
+      </div>
+      <div style="padding:20px;display:flex;flex-direction:column;gap:20px" id="manage-volumes-content">
+        <div id="tab-extrapolate" class="col" style="gap:16px;text-align:center">
+          <p class="muted">Automatically group loose chapters into volumes based on standard chapter counts.</p>
+          <button class="btn primary" id="btn-run-extrapolate" style="padding:10px;font-size:14px">Run Extrapolation</button>
+        </div>
+        <div id="tab-manual" class="col" style="gap:16px;display:none;text-align:center">
+          <p class="muted">Manually define volume boundaries (e.g. Volume 1: ch 1-10).</p>
+          <button class="btn primary" id="btn-run-manual" style="padding:10px;font-size:14px">Open Manual Editor</button>
+        </div>
+      </div>
+    </div>
+  </div>`);
+
+  modal.querySelector('.modal-close').onclick = () => modal.remove();
+  modal.onclick = e => { if (e.target === modal) modal.remove(); };
+
+  const tabs = modal.querySelectorAll('.tab-btn');
+  tabs.forEach(t => t.onclick = () => {
+    tabs.forEach(btn => { btn.classList.remove('active'); btn.style.color = 'var(--muted)'; btn.style.borderBottomColor = 'transparent'; });
+    t.classList.add('active'); t.style.color = '#fff'; t.style.borderBottomColor = 'var(--acc)';
+    modal.querySelector('#tab-extrapolate').style.display = t.dataset.tab === 'extrapolate' ? 'flex' : 'none';
+    modal.querySelector('#tab-manual').style.display = t.dataset.tab === 'manual' ? 'flex' : 'none';
+  });
+
+  modal.querySelector('#btn-run-extrapolate').onclick = () => { modal.remove(); openExtrapolateModal({ seriesId, seriesTitle, onApplied }); };
+  modal.querySelector('#btn-run-manual').onclick = () => { modal.remove(); openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied }); };
 
   document.body.appendChild(modal);
 }
@@ -1620,6 +1678,14 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
   for (const row of initial) addRow(row);
   modal.querySelector('#vd-add').onclick = () => addRow();
 
+  const clearBtn = h('<button class="btn sm" id="vd-clear" style="border-color:#ff6b6b;color:#ff6b6b;margin-left:10px" title="Clear all rows and reset to auto-extrapolation">🗑 Clear All</button>');
+  clearBtn.onclick = () => {
+    if (confirm('Clear all manually defined volume definitions and reset this series to automatic extrapolation?')) {
+      tbody.innerHTML = '';
+    }
+  };
+  modal.querySelector('#vd-add').parentNode.appendChild(clearBtn);
+
   modal.querySelector('#vd-save').onclick = async () => {
     const rows = [...tbody.querySelectorAll('tr')];
     const volumes = [];
@@ -1645,6 +1711,40 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
   };
 
   document.body.appendChild(modal);
+}
+
+function openExternalLinksModal({ seriesId, seriesTitle, mediaType, externalLinks = {}, onApplied }) {
+  const isComic = mediaType === 'comic';
+  const form = h(`<form class="col" style="gap:16px; min-width:300px">
+    <p class="muted">Links to track metadata or downloads. Used for direct matching.</p>
+    ${isComic ? `
+      <label class="field"><span>ComicVine <a href="#" title="Full URL to ComicVine issue list" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="comicvine" type="url" placeholder="https://comicvine.gamespot.com/..." value="${esc(externalLinks.comicvine || '')}">
+      </label>
+      <label class="field"><span>GetComics <a href="#" title="Full URL to GetComics series or search" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="getcomics" type="url" placeholder="https://getcomics.info/..." value="${esc(externalLinks.getcomics || '')}">
+      </label>
+    ` : `
+      <label class="field"><span>MangaDex <a href="#" title="MangaDex Series ID or URL" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="mangadex" type="text" placeholder="https://mangadex.org/title/..." value="${esc(externalLinks.mangadex || '')}">
+      </label>
+      <label class="field"><span>MangaKatana <a href="#" title="Full URL to MangaKatana series" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="mangakatana" type="url" placeholder="https://mangakatana.com/manga/..." value="${esc(externalLinks.mangakatana || '')}">
+      </label>
+    `}
+  </form>`);
+
+  openModal('🔗 External Links - ' + seriesTitle, form, 'Save Links', async () => {
+    let data = Object.fromEntries(new FormData(form));
+    // If mangadex is a full url, try to extract ID
+    if (data.mangadex) {
+      const match = data.mangadex.match(/mangadex\.org\/title\/([a-f0-9-]+)/i);
+      if (match) data.mangadex = match[1];
+    }
+    await api(`/series/${seriesId}/external-links`, { method: 'POST', body: data });
+    if (data.mangadex) { try { await api(`/series/${seriesId}/link-mangadex`, { method:'POST', body:{ providerSeriesId: data.mangadex } }); } catch(e) { console.error('Failed to link mangadex metadata:', e); } }
+    if (onApplied) onApplied();
+  });
 }
 
 // --- Delete Files confirmation modal ---
@@ -1716,7 +1816,12 @@ function openDeleteFilesModal({ seriesId, seriesTitle, scope = 'all', volume = u
     confirmBtn.textContent = 'Deleting…';
     try {
       const res = await api(`/series/${seriesId}/delete-files`, { method: 'POST', body: { chapterIds: confirmedIds } });
-      toast(`🗑 Deleted ${res.deleted} file${res.deleted !== 1 ? 's' : ''}`);
+      if (res.errors && res.errors.length > 0) {
+        toast(`⚠ Deleted ${res.deleted} file(s), but ${res.errors.length} failed. Check console.`);
+        console.error('Delete errors:', res.errors);
+      } else {
+        toast(`🗑 Deleted ${res.deleted} file${res.deleted !== 1 ? 's' : ''}`);
+      }
       close();
       if (onDeleted) onDeleted();
     } catch (e) {
@@ -2257,6 +2362,59 @@ async function viewSettings(v) {
     pc.appendChild(wrap);
   }
   container.appendChild(pc);
+
+  // Volume Audit
+  const ac = h('<div class="card" style="grid-column: 1 / -1"><h2>Volume Mapping Audit</h2></div>');
+  const aform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:14px"></div>');
+  const abtn = h('<button class="btn primary" style="align-self:flex-start">Run Volume Audit</button>');
+  const aresults = h('<div style="display:none;flex-direction:column;gap:10px;margin-top:10px"></div>');
+  const atext = h('<textarea readonly style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;color:#fff;padding:10px;border-radius:8px;font-family:monospace;font-size:12px"></textarea>');
+  const acopy = h('<button class="btn sm" style="align-self:flex-start">📋 Copy to Clipboard</button>');
+
+  acopy.onclick = () => {
+    atext.select();
+    document.execCommand('copy');
+    toast('Copied to clipboard!');
+  };
+
+  abtn.onclick = async () => {
+    abtn.disabled = true;
+    abtn.textContent = 'Running Audit…';
+    try {
+      const res = await api('/audit-all');
+      const lines = [];
+      lines.push('=== mangas-binder volume audit ===\n');
+      if (!res.results || !res.results.length) {
+        lines.push('No volume mapping anomalies detected! Everything looks consistent.');
+      } else {
+        let issueCount = 0;
+        for (const s of res.results) {
+          lines.push(`Series: "${s.seriesTitle}" (ID: ${s.seriesId})`);
+          for (const a of s.anomalies) {
+            lines.push(`  ⚠️  ${a}`);
+            issueCount++;
+          }
+          lines.push('');
+        }
+        lines.push(`=== Audit complete. Found ${issueCount} volume anomalies. ===`);
+      }
+      atext.value = lines.join('\n');
+      aresults.style.display = 'flex';
+      toast('Audit completed successfully');
+    } catch (e) {
+      toast('Failed: ' + e.message);
+    } finally {
+      abtn.disabled = false;
+      abtn.textContent = 'Run Volume Audit';
+    }
+  };
+
+  aform.appendChild(abtn);
+  aresults.appendChild(atext);
+  aresults.appendChild(acopy);
+  aform.appendChild(aresults);
+  ac.appendChild(aform);
+  container.appendChild(ac);
 }
 
 function openPackageAuditModal({ title, allVols, alerts, onProceed }) {
