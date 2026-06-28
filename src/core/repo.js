@@ -168,6 +168,14 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(seriesId, c.provider, c.providerChapterId ?? null, number, c.volume ?? null,
          c.title ?? '', lang, c.publishedAt ?? null, c.pages ?? null, initialState);
+
+  if (initialState === 'wanted') {
+    const s = db.prepare('SELECT title FROM series WHERE id = ?').get(seriesId);
+    if (s) {
+      import('./notify.js').then(m => m.notifyNewChapter(s.title, number));
+    }
+  }
+
   return true;
 }
 
@@ -212,6 +220,10 @@ export function listChaptersInStates(states, { seriesId = null, limit = 100000 }
 }
 
 export function setChapterState(id, state, extra = {}) {
+  const db = getDb();
+  const ch = db.prepare('SELECT state, number, series_id FROM chapters WHERE id = ?').get(id);
+  const oldState = ch?.state;
+
   const cols = ['state = ?'];
   const vals = [state];
   for (const [k, col] of Object.entries({
@@ -223,8 +235,16 @@ export function setChapterState(id, state, extra = {}) {
     if (extra[k] !== undefined) { cols.push(`${col} = ?`); vals.push(extra[k]); }
   }
   cols.push("updated_at = datetime('now')");
-  getDb().prepare(`UPDATE chapters SET ${cols.join(', ')} WHERE id = ?`).run(...vals, id);
+  db.prepare(`UPDATE chapters SET ${cols.join(', ')} WHERE id = ?`).run(...vals, id);
   publish('chapter', { id, state });
+
+  if (ch && oldState !== state) {
+    const s = db.prepare('SELECT title FROM series WHERE id = ?').get(ch.series_id);
+    const seriesTitle = s ? s.title : `Series #${ch.series_id}`;
+    if (state === 'imported') {
+      import('./notify.js').then(m => m.notifyImport(seriesTitle, `Chapter ${ch.number}`));
+    }
+  }
 }
 
 /** Light progress write during a download — does not touch state. */

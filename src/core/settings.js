@@ -34,8 +34,11 @@ export function ensureSeeded() {
   seedSetting('mangaFallbackEnabled', d.mangaFallbackEnabled);
   seedSetting('discordWebhook', d.discordWebhook);
   seedSetting('ntfyUrl', d.ntfyUrl);
+  seedSetting('notifyOnBindery', d.notifyOnBindery);
   seedSetting('notifyOnImport', d.notifyOnImport);
   seedSetting('notifyOnError', d.notifyOnError);
+  seedSetting('notifyOnScan', d.notifyOnScan);
+  seedSetting('notifyOnNewChapter', d.notifyOnNewChapter);
   seedSetting('debugLogs', d.debugLogs);
   seedSetting('libraryScanDirs', config.libraryScanDirs.join(', '));
   seedSetting('stagingDir', config.stagingDir);

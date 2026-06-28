@@ -1823,10 +1823,35 @@ async function viewActivity(v) {
   head.querySelector('.spacer').after(runBtn, retryBtn, pauseBtn, cancelBtn);
   v.appendChild(head);
 
-  const queueWrap = h('<div></div>'); v.appendChild(queueWrap);
-  const histWrap = h('<div></div>'); v.appendChild(histWrap);
+  // Tabs navigation
+  const tabs = h(`<div class="chips" style="margin-bottom:18px">
+    <button class="chip active" data-tab="queue">Downloading & Queue <span class="pill sm" id="cnt-queue" style="margin-left:4px;padding:1px 5px;font-size:10px;background:rgba(255,255,255,0.08)">0</span></button>
+    <button class="chip" data-tab="processing">Processing <span class="pill sm" id="cnt-processing" style="margin-left:4px;padding:1px 5px;font-size:10px;background:rgba(255,255,255,0.08)">0</span></button>
+    <button class="chip" data-tab="bindery">Bindery <span class="pill sm" id="cnt-bindery" style="margin-left:4px;padding:1px 5px;font-size:10px;background:rgba(255,255,255,0.08)">0</span></button>
+    <button class="chip" data-tab="failed">Failed <span class="pill sm" id="cnt-failed" style="margin-left:4px;padding:1px 5px;font-size:10px;background:rgba(255,255,255,0.08)">0</span></button>
+    <button class="chip" data-tab="logs">Logs</button>
+  </div>`);
+  v.appendChild(tabs);
 
-  const qThumb = (c) => `<div class="q-thumb">${coverArt(c.seriesId, c.seriesCover, c.seriesTitle || ('#' + c.seriesId))}</div>`;
+  const pauseBanner = h('<div></div>'); v.appendChild(pauseBanner);
+  const tabContent = h('<div id="tab-content"></div>'); v.appendChild(tabContent);
+
+  let currentTab = 'queue';
+  const expandedVols = new Set(); // Key: `${seriesId}-vol-${volume}`
+
+  // Hook up tab switches
+  for (const btn of tabs.querySelectorAll('.chip')) {
+    btn.onclick = () => {
+      tabs.querySelectorAll('.chip').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentTab = btn.dataset.tab;
+      render();
+    };
+  }
+
+  let data = { queue: [], processing: [], bindery: [], failed: [], history: [] };
+
+  const qThumb = (c) => `<div class="q-thumb">${coverArt(c.seriesId || c.series_id, c.seriesCover || c.series_cover, c.seriesTitle || c.series_title || ('#' + (c.seriesId || c.series_id)))}</div>`;
   const unit = (c) => (c.seriesMediaType === 'comic' ? 'Issue' : 'Ch.');
 
   const qRow = (c) => {
@@ -1862,49 +1887,166 @@ async function viewActivity(v) {
     return row;
   };
 
-  const renderQueue = (queue) => {
-    const downloading = queue.filter(c => c.state === 'downloading');
-    const pending = queue.filter(c => ['wanted','queued','downloaded'].includes(c.state));
-    const failed = queue.filter(c => c.state === 'failed');
-    queueWrap.innerHTML = '';
-    const section = (title, items, accent) => {
-      const sec = h(`<div><div class="section-head"><h2>${title} <span class="count">${items.length}</span></h2><div class="line"></div></div></div>`);
-      const list = h('<div class="q-list"></div>');
-      for (const c of items) list.appendChild(qRow(c));
-      sec.appendChild(list);
-      return sec;
-    };
-    if (downloading.length) queueWrap.appendChild(section('⬇ Downloading now', downloading));
-    if (pending.length) queueWrap.appendChild(section('● Queued', pending));
-    if (failed.length) queueWrap.appendChild(section('✕ Failed', failed));
-    if (!queue.length) queueWrap.appendChild(h('<div class="empty"><div class="big">✓</div><div>Queue is idle</div><p class="muted">Nothing downloading right now.</p></div>'));
+  const formatParis = (ts) => {
+    if (!ts) return '';
+    try {
+      const d = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z');
+      if (isNaN(d.getTime())) return ts;
+      return new Intl.DateTimeFormat('sv-SE', {
+        timeZone: 'Europe/Paris',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      }).format(d);
+    } catch { return ts; }
   };
 
-  const renderHist = (history) => {
-    histWrap.innerHTML = '';
-    const formatParis = (ts) => {
-      if (!ts) return '';
-      try {
-        const d = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z');
-        if (isNaN(d.getTime())) return ts;
-        return new Intl.DateTimeFormat('sv-SE', {
-          timeZone: 'Europe/Paris',
-          year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit', second: '2-digit',
-          hour12: false
-        }).format(d);
-      } catch { return ts; }
-    };
-    const hi = h(`<div class="card"><div class="section-head"><h2>History</h2><div class="line"></div></div><div class="table-wrap"><table><thead><tr><th style="width:160px">When</th><th style="width:180px">Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div></div>`);
-    const tb = $('tbody', hi);
-    for (const e of history) tb.appendChild(h(`<tr><td class="muted" style="font-size:12px">${esc(formatParis(e.ts))}</td><td><span class="pill">${esc(e.event)}</span></td><td>${esc(e.message||'')}</td></tr>`));
-    if (!history.length) tb.appendChild(h('<tr><td colspan="3" class="muted">Nothing yet.</td></tr>'));
-    histWrap.appendChild(hi);
+  const render = () => {
+    tabContent.innerHTML = '';
+    if (currentTab === 'queue') {
+      const pending = data.queue;
+      if (!pending.length) {
+        tabContent.appendChild(h('<div class="empty"><div class="big">✓</div><div>Queue is idle</div><p class="muted">Nothing downloading right now.</p></div>'));
+      } else {
+        const list = h('<div class="q-list"></div>');
+        for (const c of pending) list.appendChild(qRow(c));
+        tabContent.appendChild(list);
+      }
+    } else if (currentTab === 'processing') {
+      const proc = data.processing;
+      if (!proc.length) {
+        tabContent.appendChild(h('<div class="empty"><div class="big">●</div><div>No active processing</div><p class="muted">No volumes are currently being processed.</p></div>'));
+      } else {
+        const list = h('<div class="q-list"></div>');
+        for (const p of proc) {
+          const volKey = `${p.seriesId}-vol-${p.volume}`;
+          const isExpanded = expandedVols.has(volKey);
+          
+          const header = h(`<div class="q-row" style="cursor:pointer;user-select:none">
+            ${qThumb(p)}
+            <div class="q-main">
+              <div class="q-title"><strong>${esc(p.seriesTitle)}</strong></div>
+              <div class="q-sub">${p.volume === 'none' ? 'Unknown Volume' : `Volume ${esc(p.volume)}`} · <span class="muted">${p.ownedCount}/${p.totalCount} packaged</span></div>
+            </div>
+            <div style="flex:1;max-width:200px;margin:0 16px">${progressBar(p.ownedCount, p.totalCount)}</div>
+            <div style="font-size:16px;color:var(--muted);width:24px;text-align:center">${isExpanded ? '▼' : '▶'}</div>
+          </div>`);
+          
+          header.onclick = () => {
+            if (isExpanded) expandedVols.delete(volKey);
+            else expandedVols.add(volKey);
+            render();
+          };
+          
+          list.appendChild(header);
+          
+          if (isExpanded) {
+            const subList = h('<div style="padding-left:48px;border-left:2px solid var(--line2);margin:4px 0 12px;display:flex;flex-direction:column;gap:6px"></div>');
+            for (const c of p.chapters) {
+              const chRow = h(`<div class="q-row" style="background:rgba(255,255,255,0.01)">
+                <div class="q-main">
+                  <div class="q-title" style="font-size:13px">${unit(p)} ${esc(c.number)}${c.title ? ` : ${esc(c.title)}` : ''}</div>
+                  <div class="q-sub" style="font-size:11px">${esc(c.state)}${c.attempts ? ` · attempt ${c.attempts}` : ''}${c.error ? ` · ${esc(c.error)}` : ''}</div>
+                </div>
+                <div class="q-status"></div>
+                <div class="q-actions"></div>
+              </div>`);
+              const st = chRow.querySelector('.q-status');
+              const ac = chRow.querySelector('.q-actions');
+              
+              if (c.state === 'downloading') {
+                const pct = c.progTotal ? Math.round((c.progDone/c.progTotal)*100) : null;
+                st.innerHTML = `${progressBar(c.progDone, c.progTotal, 'dl')}<span class="muted" style="font-size:11px;min-width:30px">${pct!=null?pct+'%':'…'}</span>`;
+              } else if (c.state === 'failed') {
+                st.innerHTML = `<span class="status-badge failed">✕ Failed</span>`;
+              } else if (c.state === 'imported') {
+                st.innerHTML = `<span class="status-badge imported">✓ Imported</span>`;
+              } else if (c.state === 'bindery') {
+                st.innerHTML = `<span class="status-badge ok">📦 Bindery</span>`;
+              } else {
+                st.innerHTML = `<span class="status-badge ${c.state==='downloaded'?'queued':'wanted'}">${c.state==='downloaded'?'⏳ Processing':'● Queued'}</span>`;
+              }
+              
+              if (c.state === 'failed') {
+                const retry = h('<button class="btn sm primary" title="Retry">↻</button>');
+                retry.onclick = async (e) => { e.stopPropagation(); await api(`/chapters/${c.id}/retry`, { method:'POST' }); toast('Retrying…'); load(); };
+                ac.append(retry);
+              }
+              if (['wanted','queued','downloading','downloaded','failed'].includes(c.state)) {
+                const x = h('<button class="btn sm danger icon" title="Cancel">✕</button>');
+                x.onclick = async (e) => { e.stopPropagation(); await api(`/chapters/${c.id}/cancel`, { method:'POST' }); toast('Cancelled'); load(); };
+                ac.append(x);
+              }
+              
+              subList.appendChild(chRow);
+            }
+            list.appendChild(subList);
+          }
+        }
+        tabContent.appendChild(list);
+      }
+    } else if (currentTab === 'bindery') {
+      const bin = data.bindery;
+      if (!bin.length) {
+        tabContent.appendChild(h('<div class="empty"><div class="big">📦</div><div>Bindery is empty</div><p class="muted">No packages currently ready in the bindery.</p></div>'));
+      } else {
+        const list = h('<div class="q-list"></div>');
+        for (const c of bin) {
+          const row = h(`<div class="q-row">
+            ${qThumb(c)}
+            <div class="q-main">
+              <div class="q-title"><strong>${esc(c.seriesTitle)}</strong></div>
+              <div class="q-sub">${unit(c)} ${esc(c.number)} · <span class="muted">Packaged: ${esc(formatParis(c.packagedAt))}</span></div>
+            </div>
+            <div class="q-status"><span class="status-badge ok">📦 Packaged</span></div>
+            <div class="q-actions"></div>
+          </div>`);
+          const ac = row.querySelector('.q-actions');
+          const goto = h('<button class="btn sm icon" title="Open series">↗</button>');
+          goto.onclick = () => navigate('#/series/' + c.seriesId);
+          const x = h('<button class="btn sm danger icon" title="Delete from bindery">✕</button>');
+          x.onclick = async () => { if (confirm('Remove package from bindery and delete its file?')) { await api(`/chapters/${c.id}/cancel`, { method:'POST' }); toast('Removed'); load(); } };
+          ac.append(x, goto);
+          list.appendChild(row);
+        }
+        tabContent.appendChild(list);
+      }
+    } else if (currentTab === 'failed') {
+      const fail = data.failed;
+      if (!fail.length) {
+        tabContent.appendChild(h('<div class="empty"><div class="big">✓</div><div>No failed downloads</div><p class="muted">Everything is running smoothly!</p></div>'));
+      } else {
+        const list = h('<div class="q-list"></div>');
+        for (const c of fail) {
+          list.appendChild(qRow(c));
+        }
+        tabContent.appendChild(list);
+      }
+    } else if (currentTab === 'logs') {
+      const history = data.history;
+      const hi = h(`<div class="card" style="margin-top:0"><div class="table-wrap"><table><thead><tr><th style="width:160px">When</th><th style="width:180px">Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div></div>`);
+      const tb = $('tbody', hi);
+      for (const e of history) tb.appendChild(h(`<tr><td class="muted" style="font-size:12px">${esc(formatParis(e.ts))}</td><td><span class="pill">${esc(e.event)}</span></td><td>${esc(e.message||'')}</td></tr>`));
+      if (!history.length) tb.appendChild(h('<tr><td colspan="3" class="muted">Nothing yet.</td></tr>'));
+      tabContent.appendChild(hi);
+    }
   };
 
-  const pauseBanner = h('<div></div>'); queueWrap.before(pauseBanner);
   const load = async () => {
-    const [queue, health, history] = await Promise.all([api('/queue'), api('/health'), api('/history')]);
+    const [act, health, history] = await Promise.all([api('/activity'), api('/health'), api('/history')]);
+    
+    data.queue = act.queue;
+    data.processing = act.processing;
+    data.bindery = act.bindery;
+    data.failed = act.failed;
+    data.history = history;
+
+    // Update pills/counts
+    v.querySelector('#cnt-queue').textContent = act.queue.length;
+    v.querySelector('#cnt-processing').textContent = act.processing.length;
+    v.querySelector('#cnt-bindery').textContent = act.bindery.length;
+    v.querySelector('#cnt-failed').textContent = act.failed.length;
+
     const sp = v.querySelector('#sched-pill');
     if (sp) {
       const sc = health.scheduler;
@@ -1916,11 +2058,15 @@ async function viewActivity(v) {
     pauseBtn.className = `btn sm${isPaused ? ' primary' : ''}`;
     pauseBtn.title = isPaused ? 'Resume all downloads' : 'Pause all downloads';
     pauseBanner.innerHTML = isPaused
-      ? `<div class="card" style="border-color:#a36;background:#3a1f2a"><strong>⏸ Downloads are paused.</strong> <span class="muted">Click ▶ Resume in the toolbar to resume.</span></div>`
+      ? `<div class="card" style="border-color:#a36;background:#3a1f2a;margin-top:0;margin-bottom:14px"><strong>⏸ Downloads are paused.</strong> <span class="muted">Click ▶ Resume in the toolbar to resume.</span></div>`
       : '';
-    renderQueue(queue);
-    renderHist(history);
+      
+    render();
   };
+
+  await load();
+  startPolling(load, 2000);
+}
 
   await load();
   startPolling(load, 2000);
@@ -1931,6 +2077,20 @@ async function viewSettings(v) {
   const [settings, providers] = await Promise.all([api('/settings'), api('/providers')]);
   v.innerHTML = '';
   v.appendChild(h('<div class="page-head"><h1>Settings</h1></div>'));
+
+  const formatLabel = (key) => {
+    return key
+      .replace(/([A-Z])/g, ' $1')
+      .replace(/^./, str => str.toUpperCase())
+      .replace(/Url$/, ' URL')
+      .replace(/Cbz$/, ' CBZ')
+      .replace(/Db$/, ' DB')
+      .replace(/Sec$/, ' Seconds')
+      .replace(/Url/, ' URL');
+  };
+
+  const container = h('<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(360px, 1fr));gap:20px;padding-top:10px;align-items:start"></div>');
+  v.appendChild(container);
 
   // Prominent master switch: pause the whole download/package pipeline.
   const dlc = h('<div class="card"><h2>Downloads</h2></div>');
@@ -1948,25 +2108,27 @@ async function viewSettings(v) {
     if (!val) api('/downloads/run', { method:'POST' }).catch(()=>{});
   };
   const phead = h('<div class="row" style="align-items:center;gap:10px"></div>');
-  phead.append(prow, pStatus); dlc.appendChild(phead); v.appendChild(dlc);
+  phead.append(prow, pStatus); dlc.appendChild(phead);
+  container.appendChild(dlc);
 
   const numKeys = ['scanIntervalHours','downloadConcurrency','chapterConcurrency','refreshConcurrency','seriesRefreshTimeoutSec'];
-  // English is the default, French the backup — list them first in that order.
   const enumKeys = { defaultPackagingMode:['volume','chapter'], defaultMonitorMode:['all','future','none'], defaultLanguage:['en','fr','ja','es','pt'] };
   const boolKeys = ['dataSaver','keepLoosePages','extrapolateVolumes','mangaFallbackEnabled','debugLogs'];
   const textKeys = ['flaresolverrUrl'];
 
-  const sc = h('<div class="card"><h2>General</h2></div>');
-  const form = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:10px"></div>');
+  const sc = h('<div class="card"><h2>General Settings</h2></div>');
+  const form = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:16px"></div>');
+  const grid = h('<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:14px;margin-bottom:10px"></div>');
+
   for (const k of [...numKeys, ...Object.keys(enumKeys), ...boolKeys, ...textKeys]) {
     if (!(k in settings)) continue;
-    const row = h(`<label class="field">${k}</label>`);
+    const row = h(`<label class="field">${formatLabel(k)}</label>`);
     let inp;
-    if (numKeys.includes(k)) inp = h(`<input type="number" value="${esc(settings[k])}" style="width:140px">`);
-    else if (boolKeys.includes(k)) { inp = h(`<select style="width:140px"><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(settings[k]); }
-    else if (enumKeys[k]) inp = h(`<select style="width:140px">${enumKeys[k].map(o=>`<option ${o===settings[k]?'selected':''}>${o}</option>`).join('')}</select>`);
-    else inp = h(`<input value="${esc(settings[k])}" style="width:140px">`);
-    inp.dataset.key = k; row.appendChild(inp); form.appendChild(row);
+    if (numKeys.includes(k)) inp = h(`<input type="number" value="${esc(settings[k])}">`);
+    else if (boolKeys.includes(k)) { inp = h(`<select><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(settings[k]); }
+    else if (enumKeys[k]) inp = h(`<select>${enumKeys[k].map(o=>`<option ${o===settings[k]?'selected':''}>${o}</option>`).join('')}</select>`);
+    else inp = h(`<input value="${esc(settings[k])}">`);
+    inp.dataset.key = k; row.appendChild(inp); grid.appendChild(row);
   }
   const save = h('<button class="btn primary" style="align-self:flex-start">Save settings</button>');
   save.onclick = async () => {
@@ -1977,7 +2139,9 @@ async function viewSettings(v) {
     }
     await api('/settings',{method:'PATCH',body}); toast('Saved');
   };
-  form.appendChild(save); sc.appendChild(form); v.appendChild(sc);
+  form.appendChild(grid);
+  form.appendChild(save); sc.appendChild(form);
+  container.appendChild(sc);
 
   // Library / folder paths
   const lc = h('<div class="card"><h2>Folders</h2></div>');
@@ -1993,43 +2157,59 @@ async function viewSettings(v) {
   mkFolderRow('Staging directory', 'stagingDir', './data/staging', '— in-progress downloads (env: STAGING_DIR)');
   mkFolderRow('Library scan directories', 'libraryScanDirs', './data/output', '— comma-separated paths scanned for already-owned files');
 
-  const lsave = h('<button class="btn primary" style="align-self:flex-start">Save</button>');
+  const lsave = h('<button class="btn primary" style="align-self:flex-start">Save folders</button>');
   lsave.onclick = async () => {
     const body = {};
     for (const el of lform.querySelectorAll('[data-fkey]')) body[el.dataset.fkey] = el.value.trim();
-    await api('/settings', { method:'PATCH', body }); toast('Saved — restart the server for path changes to take full effect');
+    await api('/settings', { method:'PATCH', body }); toast('Saved — restart the server for path changes to take effect');
   };
-  lform.appendChild(lsave); lc.appendChild(lform); v.appendChild(lc);
+  lform.appendChild(lsave); lc.appendChild(lform);
+  container.appendChild(lc);
 
   // Notifications
   const nc = h('<div class="card"><h2>Notifications</h2></div>');
-  const nform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:10px"></div>');
+  const nform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:16px"></div>');
+  const webhooksGrid = h('<div style="display:flex;flex-direction:column;gap:14px"></div>');
+  const togglesGrid = h('<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:14px"></div>');
+
   const nFields = [
-    ['discordWebhook','Discord webhook URL','text'],
-    ['ntfyUrl','ntfy topic URL (e.g. https://ntfy.sh/my-topic)','text'],
-    ['notifyOnImport','Notify when media is added','bool'],
+    ['discordWebhook','Discord Webhook URL','text'],
+    ['ntfyUrl','ntfy Topic URL','text'],
+    ['notifyOnBindery','Notify on Bindery ready','bool'],
+    ['notifyOnImport','Notify on Library import','bool'],
     ['notifyOnError','Notify on failures','bool'],
+    ['notifyOnScan','Notify on library scan','bool'],
+    ['notifyOnNewChapter','Notify on new chapters','bool'],
   ];
   for (const [k,label,type] of nFields) {
     const row = h(`<label class="field">${label}</label>`);
     let inp;
-    if (type==='bool') { inp = h(`<select style="width:160px"><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(settings[k] ?? false); }
-    else inp = h(`<input value="${esc(settings[k]??'')}" placeholder="(disabled)" class="input-w-full">`);
-    inp.dataset.nkey = k; row.appendChild(inp); nform.appendChild(row);
+    if (type==='bool') {
+      inp = h(`<select><option value="true">true</option><option value="false">false</option></select>`);
+      inp.value = String(settings[k] ?? false);
+      inp.dataset.nkey = k; row.appendChild(inp); togglesGrid.appendChild(row);
+    } else {
+      inp = h(`<input value="${esc(settings[k]??'')}" placeholder="(disabled)" class="input-w-full">`);
+      inp.dataset.nkey = k; row.appendChild(inp); webhooksGrid.appendChild(row);
+    }
   }
-  const nrow = h('<div class="row"></div>');
+  nform.appendChild(webhooksGrid);
+  nform.appendChild(togglesGrid);
+
+  const nrow = h('<div class="row" style="gap:10px"></div>');
   const nsave = h('<button class="btn primary">Save notifications</button>');
   nsave.onclick = async () => {
     const body = {};
     for (const el of nform.querySelectorAll('[data-nkey]')) {
       const k = el.dataset.nkey;
-      body[k] = (k==='notifyOnImport'||k==='notifyOnError') ? el.value==='true' : el.value;
+      body[k] = ['notifyOnBindery','notifyOnImport','notifyOnError','notifyOnScan','notifyOnNewChapter'].includes(k) ? el.value==='true' : el.value;
     }
     await api('/settings',{method:'PATCH',body}); toast('Saved');
   };
   const ntest = h('<button class="btn">Send test</button>');
   ntest.onclick = async () => { try { await api('/notify/test',{method:'POST'}); toast('Test sent'); } catch(e){ toast(e.message); } };
-  nrow.append(nsave, ntest); nform.appendChild(nrow); nc.appendChild(nform); v.appendChild(nc);
+  nrow.append(nsave, ntest); nform.appendChild(nrow); nc.appendChild(nform);
+  container.appendChild(nc);
 
   const PROVIDER_CONFIG = {
     comicvine: [['apikey', 'ComicVine API key (comicvine.gamespot.com/api)', 'password']],
@@ -2080,7 +2260,8 @@ async function viewSettings(v) {
     }
     pc.appendChild(wrap);
   }
-  v.appendChild(pc);
+  container.appendChild(pc);
+}
 }
 
 function openPackageAuditModal({ title, allVols, alerts, onProceed }) {

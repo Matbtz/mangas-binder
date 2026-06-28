@@ -11,7 +11,7 @@ import { downloadArchiveChapter } from './archive-downloader.js';
 import { downloadChapterViaFallback, fallbackEnabled } from './fallback.js';
 import { bindChapter, bindVolume } from '../core/binder.js';
 import { resolveVolumes } from '../core/mapping.js';
-import { notifyImport, notifyError } from '../core/notify.js';
+import { notifyBindery, notifyError } from '../core/notify.js';
 import { pLimit } from './limit.js';
 
 const MAX_ATTEMPTS = 5;
@@ -144,7 +144,7 @@ export async function runOnce({ limit = 200 } = {}) {
           setChapterState(ch.id, 'bindery', { cbz_path: res.path });
           imported++;
           logHistory('chapter.packaged', { seriesId: series.id, chapterId: ch.id, message: res.path });
-          notifyImport(series.title, `Chapter ${ch.number}`);
+          notifyBindery(series.title, `Chapter ${ch.number}`);
         } else {
           affectedVolumeSeries.add(series.id);
         }
@@ -300,7 +300,7 @@ export async function packageCompleteVolumes(seriesId) {
       }
       importedVolumes++;
       logHistory('volume.packaged', { seriesId, message: `${series.title} Vol. ${volLabel}${calculated ? ' (estimated)' : ''}` });
-      notifyImport(series.title, `Volume ${volLabel}${calculated ? ' (estimated)' : ''}`);
+      notifyBindery(series.title, `Volume ${volLabel}${calculated ? ' (estimated)' : ''}`);
     } catch (err) {
       logHistory('volume.failed', { seriesId, message: `Vol ${volLabel}: ${err.message || err}` });
       notifyError(series.title, `Volume ${volLabel}`, String(err.message || err));

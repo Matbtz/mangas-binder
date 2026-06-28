@@ -666,5 +666,12 @@ async function _scanLibrary({ seriesId } = {}) {
     };
   });
 
+  const msgParts = [];
+  if (markedChapters > 0) msgParts.push(`Marked ${markedChapters} chapter(s) as owned.`);
+  if (prunedChapters > 0) msgParts.push(`Pruned ${prunedChapters} missing chapter(s) from DB.`);
+  if (msgParts.length > 0) {
+    import('./notify.js').then(m => m.notifyScan(msgParts.join(' ')));
+  }
+
   return { files: files.length, matchedFiles, markedChapters, perSeries, untracked };
 }

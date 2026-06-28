@@ -62,8 +62,11 @@ export const config = {
     // Notifications (empty = disabled). ntfyUrl is a full topic URL, e.g. https://ntfy.sh/my-topic
     discordWebhook: process.env.DISCORD_WEBHOOK || '',
     ntfyUrl: process.env.NTFY_URL || '',
-    notifyOnImport: process.env.NOTIFY_ON_IMPORT !== 'false',
+    notifyOnBindery: process.env.NOTIFY_ON_BINDERY !== 'false',
+    notifyOnImport: process.env.NOTIFY_ON_IMPORT === 'true',
     notifyOnError: process.env.NOTIFY_ON_ERROR === 'true',
+    notifyOnScan: process.env.NOTIFY_ON_SCAN === 'true',
+    notifyOnNewChapter: process.env.NOTIFY_ON_NEW_CHAPTER === 'true',
     debugLogs: process.env.DEBUG_LOGS === 'true',
   },
 };

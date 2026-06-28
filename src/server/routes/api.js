@@ -390,6 +390,90 @@ export default async function apiRoutes(app) {
     }));
   });
 
+  app.get('/api/activity', async () => {
+    const queueRows = getDb().prepare(`
+      SELECT c.*, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type
+      FROM chapters c JOIN series s ON s.id = c.series_id
+      WHERE c.state IN ('wanted', 'queued', 'downloading')
+      ORDER BY CASE c.state WHEN 'downloading' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, c.updated_at DESC
+      LIMIT 200
+    `).all();
+    const queue = queueRows.map(r => ({
+      ...chapterView(r),
+      seriesTitle: r.series_title,
+      seriesCover: r.series_cover || null,
+      seriesMediaType: r.series_media_type || 'manga',
+    }));
+
+    const procVols = getDb().prepare(`
+      SELECT c.series_id, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type,
+             c.volume,
+             SUM(CASE WHEN c.state IN ('imported', 'bindery', 'downloaded') THEN 1 ELSE 0 END) AS owned_count,
+             COUNT(*) AS total_count
+      FROM chapters c
+      JOIN series s ON s.id = c.series_id
+      GROUP BY c.series_id, c.volume
+      HAVING SUM(CASE WHEN c.state IN ('wanted', 'queued', 'downloading', 'downloaded') THEN 1 ELSE 0 END) > 0
+      ORDER BY s.title, c.volume
+    `).all();
+
+    const processing = [];
+    for (const pv of procVols) {
+      const chs = getDb().prepare(`
+        SELECT * FROM chapters 
+        WHERE series_id = ? AND (volume = ? OR (volume IS NULL AND ? = 'none'))
+        ORDER BY CAST(number AS REAL), number
+      `).all(pv.series_id, pv.volume, pv.volume || 'none');
+
+      processing.push({
+        seriesId: pv.series_id,
+        seriesTitle: pv.series_title,
+        seriesCover: pv.series_cover || null,
+        seriesMediaType: pv.series_media_type || 'manga',
+        volume: pv.volume || 'none',
+        ownedCount: pv.owned_count,
+        totalCount: pv.total_count,
+        chapters: chs.map(chapterView),
+      });
+    }
+
+    const binderyRows = getDb().prepare(`
+      SELECT c.*, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type
+      FROM chapters c JOIN series s ON s.id = c.series_id
+      WHERE c.state = 'bindery'
+      ORDER BY c.updated_at DESC
+      LIMIT 200
+    `).all();
+    const bindery = binderyRows.map(r => ({
+      ...chapterView(r),
+      seriesTitle: r.series_title,
+      seriesCover: r.series_cover || null,
+      seriesMediaType: r.series_media_type || 'manga',
+      packagedAt: r.updated_at,
+    }));
+
+    const failedRows = getDb().prepare(`
+      SELECT c.*, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type
+      FROM chapters c JOIN series s ON s.id = c.series_id
+      WHERE c.state = 'failed'
+      ORDER BY c.updated_at DESC
+      LIMIT 200
+    `).all();
+    const failed = failedRows.map(r => ({
+      ...chapterView(r),
+      seriesTitle: r.series_title,
+      seriesCover: r.series_cover || null,
+      seriesMediaType: r.series_media_type || 'manga',
+    }));
+
+    return {
+      queue,
+      processing,
+      bindery,
+      failed,
+    };
+  });
+
   app.get('/api/history', async () => recentHistory(100));
 
   // --- Global download controls ---

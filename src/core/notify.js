@@ -41,13 +41,29 @@ async function sendNtfy(url, title, message, { tags = [], priority } = {}) {
   if (!res.ok) throw new Error(`ntfy ${res.status}`);
 }
 
-/** Convenience hooks used by the worker. */
+/** Convenience hooks used by the scanner / worker. */
+
+export function notifyBindery(seriesTitle, what) {
+  if (!getSetting('notifyOnBindery', true)) return;
+  notify(`📦 ${seriesTitle}`, `${what} is ready in the Bindery`, { tags: ['package'] }).catch(() => {});
+}
+
 export function notifyImport(seriesTitle, what) {
-  if (!getSetting('notifyOnImport', true)) return;
-  notify(`📚 ${seriesTitle}`, `${what} added to your library`, { tags: ['books'] }).catch(() => {});
+  if (!getSetting('notifyOnImport', false)) return;
+  notify(`📚 ${seriesTitle}`, `${what} has been imported into your library`, { tags: ['books'] }).catch(() => {});
 }
 
 export function notifyError(seriesTitle, what, reason) {
   if (!getSetting('notifyOnError', false)) return;
   notify(`⚠️ ${seriesTitle}`, `${what} failed: ${reason}`, { tags: ['warning'], priority: 'high' }).catch(() => {});
+}
+
+export function notifyScan(summary) {
+  if (!getSetting('notifyOnScan', false)) return;
+  notify(`🔍 Library Scan`, summary, { tags: ['mag'] }).catch(() => {});
+}
+
+export function notifyNewChapter(seriesTitle, chapterNum) {
+  if (!getSetting('notifyOnNewChapter', false)) return;
+  notify(`🆕 ${seriesTitle}`, `New Chapter ${chapterNum} detected`, { tags: ['bell'] }).catch(() => {});
 }
