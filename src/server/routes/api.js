@@ -10,7 +10,7 @@ import {
   listChaptersForSeries, getChapter, setChapterState, bulkSetChapterState,
   listChaptersInStates, recentHistory, listChapterFilesForSeries, resetStaleDownloads,
 } from '../../core/repo.js';
-import { getDb } from '../../core/db.js';
+import { getDb, logHistory } from '../../core/db.js';
 import {
   getAllSettings, getSetting, setSetting, getProviderStates,
   setProviderEnabled, setProviderConfig, getProviderConfig, isProviderEnabled,
