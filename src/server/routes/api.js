@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, statSync, unlinkSync } from 'fs';
+import { readdirSync, existsSync, statSync, unlinkSync, rmSync } from 'fs';
 import path from 'path';
 import { getProvider, describeProviders } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
@@ -359,8 +359,16 @@ export default async function apiRoutes(app) {
     let deleted = 0;
     const errors = [];
     for (const c of toDelete) {
-      try {
-        if (c.cbz_path && existsSync(c.cbz_path)) { unlinkSync(c.cbz_path); deleted++; }
+       try {
+        if (c.cbz_path && existsSync(c.cbz_path)) {
+          const st = statSync(c.cbz_path);
+          if (st.isDirectory()) {
+            rmSync(c.cbz_path, { recursive: true, force: true });
+          } else {
+            unlinkSync(c.cbz_path);
+          }
+          deleted++;
+        }
         setChapterState(c.id, defaultState, resetExtra);
       } catch (err) {
         errors.push({ chapterId: c.id, error: err.message });
@@ -620,13 +628,51 @@ export default async function apiRoutes(app) {
   app.post('/api/series/:id/extrapolate-volumes', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
-    const { chaptersPerVolume } = req.body || {};
+    const { chaptersPerVolume, maxVolume } = req.body || {};
+    const db = getDb();
+    const chapters = listChaptersForSeries(s.id);
+    const volumeMap = {};
+    for (const c of chapters) {
+      const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
+      if (hasRealVolume) {
+        (volumeMap[c.volume] ||= []).push(c.number);
+      } else if (c.state === 'imported' && c.volume) {
+        (volumeMap[c.volume] ||= []).push(c.number);
+      }
+    }
+    const stats = getVolumeStats(volumeMap);
+    const finalChsPerVol = chaptersPerVolume ? Number(chaptersPerVolume) : (stats.avgChsPerVol || 10);
+
+    if (maxVolume && Number(maxVolume) > 0 && Number(maxVolume) < 500) {
+      let maxExisting = 0;
+      for (const c of chapters) {
+        const n = parseFloat(c.number);
+        if (!isNaN(n)) maxExisting = Math.max(maxExisting, n);
+      }
+      const targetMaxCh = Number(maxVolume) * finalChsPerVol;
+      const start = Math.floor(maxExisting) + 1;
+      const end = Math.floor(targetMaxCh);
+      if (start <= end && (end - start) < 100) {
+        for (let num = start; num <= end; num++) {
+          const numStr = String(num);
+          const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
+          if (!exists) {
+            db.prepare(`
+              INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+              VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
+            `).run(s.id, s.provider || 'mangadex', numStr, null, `Chapter ${numStr}`, s.language || 'en');
+          }
+        }
+      }
+    }
+
     return resolveVolumes(s.id, { chaptersPerVolume: chaptersPerVolume ? Number(chaptersPerVolume) : null });
   });
   app.get('/api/series/:id/extrapolate-preview', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const chsPerVolOverride = req.query.chaptersPerVolume ? Number(req.query.chaptersPerVolume) : null;
+    const maxVolume = req.query.maxVolume ? Number(req.query.maxVolume) : null;
     const chapters = listChaptersForSeries(s.id);
     const volumeMap = {};
     const unassigned = [];
@@ -641,7 +687,26 @@ export default async function apiRoutes(app) {
       }
     }
     const stats = getVolumeStats(volumeMap);
-    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, s.total_volumes_hint || null, false, chsPerVolOverride);
+    const finalChsPerVol = chsPerVolOverride || stats.avgChsPerVol || 10;
+
+    const unassignedCopy = [...unassigned];
+    if (maxVolume && maxVolume > 0 && maxVolume < 500) {
+      let maxExisting = 0;
+      for (const c of chapters) {
+        const n = parseFloat(c.number);
+        if (!isNaN(n)) maxExisting = Math.max(maxExisting, n);
+      }
+      const targetMaxCh = maxVolume * finalChsPerVol;
+      const start = Math.floor(maxExisting) + 1;
+      const end = Math.floor(targetMaxCh);
+      if (start <= end && (end - start) < 100) {
+        for (let num = start; num <= end; num++) {
+          unassignedCopy.push(String(num));
+        }
+      }
+    }
+
+    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassignedCopy, s.total_volumes_hint || null, false, finalChsPerVol);
     const volumes = Object.entries(calculated)
       .filter(([k]) => k !== 'Specials')
       .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))
@@ -650,9 +715,9 @@ export default async function apiRoutes(app) {
         return { vol, count: chs.length, chapters: sorted };
       });
     return {
-      chsPerVol: chsPerVolOverride || stats.avgChsPerVol,
+      chsPerVol: finalChsPerVol,
       consecutiveVols: stats.lastConsecutive,
-      totalUnassigned: unassigned.length,
+      totalUnassigned: unassignedCopy.length,
       volumes,
       overflow: overflow.length,
     };

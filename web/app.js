@@ -1363,10 +1363,16 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
         <button id="em-tab-auto" style="flex:1;background:var(--acc);color:#fff;border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✨ Automatic</button>
         <button id="em-tab-manual" style="flex:1;background:transparent;color:var(--fg);border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✏️ Manual</button>
       </div>
-      <div id="em-manual-row" style="display:none;padding:12px 20px;border-bottom:1px solid #2e353f;align-items:center;gap:10px;flex-shrink:0">
-        <span style="color:#ccc;font-size:13px">Chapters per volume:</span>
-        <input type="number" id="em-chs-per-vol" min="1" max="500" value="8" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:80px;font-family:inherit">
-        <button class="btn sm" id="em-preview-btn">Preview</button>
+      <div id="em-options-row" style="padding:12px 20px;border-bottom:1px solid #2e353f;display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex-shrink:0">
+        <div id="em-manual-opt" style="display:none;align-items:center;gap:8px">
+          <span style="color:#ccc;font-size:13px">Chapters/Vol:</span>
+          <input type="number" id="em-chs-per-vol" min="1" max="500" value="8" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:70px;font-family:inherit">
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="color:#ccc;font-size:13px">Extrapolate up to Volume:</span>
+          <input type="number" id="em-max-vol" min="1" max="500" placeholder="e.g. 10" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:75px;font-family:inherit">
+        </div>
+        <button class="btn sm" id="em-preview-btn" style="margin-left:auto">🔍 Preview</button>
       </div>
       <div id="em-body" style="padding:16px 20px;overflow-y:auto;flex:1">
         <p class="muted">Loading…</p>
@@ -1388,8 +1394,10 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
 
   const body = modal.querySelector('#em-body');
   const applyBtn = modal.querySelector('#em-apply');
-  const manualRow = modal.querySelector('#em-manual-row');
+  const manualOpt = modal.querySelector('#em-manual-opt');
   const chsInput = modal.querySelector('#em-chs-per-vol');
+  const maxVolInput = modal.querySelector('#em-max-vol');
+  const previewBtn = modal.querySelector('#em-preview-btn');
 
   const renderPreview = () => {
     if (!previewData) return;
@@ -1428,13 +1436,17 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
     applyBtn.disabled = volumes.length === 0;
   };
 
-  const fetchPreview = async (chaptersPerVolume = null) => {
+  const fetchPreview = async () => {
     body.innerHTML = '<p class="muted" style="padding:8px 0">Loading preview…</p>';
     applyBtn.disabled = true;
     try {
-      const qs = chaptersPerVolume ? `?chaptersPerVolume=${encodeURIComponent(chaptersPerVolume)}` : '';
+      const params = [];
+      if (mode === 'manual') params.push(`chaptersPerVolume=${encodeURIComponent(Number(chsInput.value) || 8)}`);
+      const maxVolVal = Number(maxVolInput.value);
+      if (maxVolVal && maxVolVal > 0) params.push(`maxVolume=${encodeURIComponent(maxVolVal)}`);
+      const qs = params.length ? '?' + params.join('&') : '';
+      
       previewData = await api(`/series/${seriesId}/extrapolate-preview${qs}`);
-      if (mode === 'manual' && chaptersPerVolume) chsInput.value = chaptersPerVolume;
       renderPreview();
     } catch (e) {
       body.innerHTML = `<p style="color:var(--warn)">Failed to load preview: ${esc(e.message)}</p>`;
@@ -1447,20 +1459,25 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
     const manualTab = modal.querySelector('#em-tab-manual');
     autoTab.style.cssText = `flex:1;background:${mode==='auto'?'var(--acc)':'transparent'};color:${mode==='auto'?'#fff':'var(--fg)'};border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
     manualTab.style.cssText = `flex:1;background:${mode==='manual'?'var(--acc)':'transparent'};color:${mode==='manual'?'#fff':'var(--fg)'};border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
-    manualRow.style.display = mode === 'manual' ? 'flex' : 'none';
-    fetchPreview(mode === 'manual' ? (Number(chsInput.value) || 8) : null);
+    manualOpt.style.display = mode === 'manual' ? 'flex' : 'none';
+    fetchPreview();
   };
 
   modal.querySelector('#em-tab-auto').onclick = () => switchTab('auto');
   modal.querySelector('#em-tab-manual').onclick = () => switchTab('manual');
-  modal.querySelector('#em-preview-btn').onclick = () => fetchPreview(Number(chsInput.value) || 8);
-  chsInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(Number(chsInput.value) || 8); };
+  previewBtn.onclick = () => fetchPreview();
+  chsInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
+  maxVolInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
 
   applyBtn.onclick = async () => {
     applyBtn.disabled = true;
     applyBtn.textContent = 'Extrapolating…';
     try {
-      const reqBody = mode === 'manual' ? { chaptersPerVolume: Number(chsInput.value) || undefined } : {};
+      const reqBody = {};
+      if (mode === 'manual') reqBody.chaptersPerVolume = Number(chsInput.value) || undefined;
+      const maxVolVal = Number(maxVolInput.value);
+      if (maxVolVal && maxVolVal > 0) reqBody.maxVolume = maxVolVal;
+
       await api(`/series/${seriesId}/extrapolate-volumes`, { method: 'POST', body: reqBody });
       toast('Distributed chapters into volumes!');
       close();
@@ -1724,7 +1741,12 @@ function openDeleteFilesModal({ seriesId, seriesTitle, scope = 'all', volume = u
     confirmBtn.textContent = 'Deleting…';
     try {
       const res = await api(`/series/${seriesId}/delete-files`, { method: 'POST', body: { chapterIds: confirmedIds } });
-      toast(`🗑 Deleted ${res.deleted} file${res.deleted !== 1 ? 's' : ''}`);
+      if (res.errors && res.errors.length > 0) {
+        toast(`⚠ Deleted ${res.deleted} file(s), but ${res.errors.length} failed. Check console.`);
+        console.error('Delete errors:', res.errors);
+      } else {
+        toast(`🗑 Deleted ${res.deleted} file${res.deleted !== 1 ? 's' : ''}`);
+      }
       close();
       if (onDeleted) onDeleted();
     } catch (e) {
