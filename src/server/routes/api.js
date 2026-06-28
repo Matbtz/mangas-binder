@@ -675,6 +675,23 @@ export default async function apiRoutes(app) {
     let totalChanges = 0;
     for (const { volume, from, to } of volumes) {
       if (!volume || from == null || to == null) continue;
+
+      // Auto-create missing integer chapters in the range [from, to]
+      const start = Math.floor(Number(from));
+      const end = Math.floor(Number(to));
+      if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 50) {
+        for (let num = start; num <= end; num++) {
+          const numStr = String(num);
+          const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
+          if (!exists) {
+            db.prepare(`
+              INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+              VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
+            `).run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en');
+          }
+        }
+      }
+
       const res = upd.run(String(volume), s.id, Number(from), Number(to));
       totalChanges += res.changes;
     }
@@ -687,6 +704,23 @@ export default async function apiRoutes(app) {
     const { volume, from, to } = req.body || {};
     if (!volume || from == null || to == null) return reply.code(400).send({ error: 'invalid range' });
     const db = getDb();
+
+    // Auto-create missing integer chapters in the range [from, to]
+    const start = Math.floor(Number(from));
+    const end = Math.floor(Number(to));
+    if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 50) {
+      for (let num = start; num <= end; num++) {
+        const numStr = String(num);
+        const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
+        if (!exists) {
+          db.prepare(`
+            INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+            VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
+          `).run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en');
+        }
+      }
+    }
+
     const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
     const res = upd.run(String(volume), s.id, Number(from), Number(to));
     await refreshSeries(s.id);
