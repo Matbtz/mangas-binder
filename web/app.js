@@ -1714,37 +1714,79 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
 }
 
 function openExternalLinksModal({ seriesId, seriesTitle, mediaType, externalLinks = {}, onApplied }) {
-  const isComic = mediaType === 'comic';
-  const form = h(`<form class="col" style="gap:16px; min-width:300px">
-    <p class="muted">Links to track metadata or downloads. Used for direct matching.</p>
-    ${isComic ? `
-      <label class="field"><span>ComicVine <a href="#" title="Full URL to ComicVine issue list" style="text-decoration:none;cursor:help">ℹ️</a></span>
-        <input name="comicvine" type="url" placeholder="https://comicvine.gamespot.com/..." value="${esc(externalLinks.comicvine || '')}">
-      </label>
-      <label class="field"><span>GetComics <a href="#" title="Full URL to GetComics series or search" style="text-decoration:none;cursor:help">ℹ️</a></span>
-        <input name="getcomics" type="url" placeholder="https://getcomics.info/..." value="${esc(externalLinks.getcomics || '')}">
-      </label>
-    ` : `
-      <label class="field"><span>MangaDex <a href="#" title="MangaDex Series ID or URL" style="text-decoration:none;cursor:help">ℹ️</a></span>
-        <input name="mangadex" type="text" placeholder="https://mangadex.org/title/..." value="${esc(externalLinks.mangadex || '')}">
-      </label>
-      <label class="field"><span>MangaKatana <a href="#" title="Full URL to MangaKatana series" style="text-decoration:none;cursor:help">ℹ️</a></span>
-        <input name="mangakatana" type="url" placeholder="https://mangakatana.com/manga/..." value="${esc(externalLinks.mangakatana || '')}">
-      </label>
-    `}
-  </form>`);
+  const existing = document.getElementById('external-links-modal');
+  if (existing) existing.remove();
 
-  openModal('🔗 External Links - ' + seriesTitle, form, 'Save Links', async () => {
-    let data = Object.fromEntries(new FormData(form));
-    // If mangadex is a full url, try to extract ID
-    if (data.mangadex) {
-      const match = data.mangadex.match(/mangadex\.org\/title\/([a-f0-9-]+)/i);
-      if (match) data.mangadex = match[1];
+  const isComic = mediaType === 'comic';
+  const modal = h(`<div id="external-links-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px">
+    <div style="background:var(--panel);border:1px solid var(--line2);border-radius:16px;width:100%;max-width:460px;display:flex;flex-direction:column;box-shadow:0 18px 48px rgba(0,0,0,0.65);overflow:hidden">
+      <div style="padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+        <strong style="color:#fff;font-size:15px">🔗 External Links - ${esc(seriesTitle)}</strong>
+        <button class="btn sm icon" id="el-close">✕</button>
+      </div>
+      <form id="el-form" style="padding:18px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;max-height:65vh">
+        <p class="muted" style="margin:0 0 4px 0;font-size:13px">Links to track metadata or downloads. Used for direct matching.</p>
+        ${isComic ? `
+          <div>
+            <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">ComicVine URL</label>
+            <input name="comicvine" type="url" placeholder="https://comicvine.gamespot.com/..." value="${esc(externalLinks.comicvine || '')}" style="background:var(--bg2);border:1px solid var(--line);color:#fff;padding:8px 12px;border-radius:6px;font-family:inherit;font-size:13px;width:100%;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">GetComics URL</label>
+            <input name="getcomics" type="url" placeholder="https://getcomics.info/..." value="${esc(externalLinks.getcomics || '')}" style="background:var(--bg2);border:1px solid var(--line);color:#fff;padding:8px 12px;border-radius:6px;font-family:inherit;font-size:13px;width:100%;box-sizing:border-box">
+          </div>
+        ` : `
+          <div>
+            <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">MangaDex ID or URL</label>
+            <input name="mangadex" type="text" placeholder="https://mangadex.org/title/..." value="${esc(externalLinks.mangadex || '')}" style="background:var(--bg2);border:1px solid var(--line);color:#fff;padding:8px 12px;border-radius:6px;font-family:inherit;font-size:13px;width:100%;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">MangaKatana URL</label>
+            <input name="mangakatana" type="url" placeholder="https://mangakatana.com/manga/..." value="${esc(externalLinks.mangakatana || '')}" style="background:var(--bg2);border:1px solid var(--line);color:#fff;padding:8px 12px;border-radius:6px;font-family:inherit;font-size:13px;width:100%;box-sizing:border-box">
+          </div>
+        `}
+      </form>
+      <div style="padding:12px 18px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0">
+        <button class="btn sm" id="el-cancel">Cancel</button>
+        <button class="btn sm primary" id="el-save">✓ Save Links</button>
+      </div>
+    </div>
+  </div>`);
+
+  const close = () => modal.remove();
+  modal.querySelector('#el-close').onclick = close;
+  modal.querySelector('#el-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  modal.querySelector('#el-save').onclick = async () => {
+    const saveBtn = modal.querySelector('#el-save');
+    saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+    try {
+      const formEl = modal.querySelector('#el-form');
+      let data = Object.fromEntries(new FormData(formEl));
+      // If mangadex is a full url, try to extract ID
+      if (data.mangadex) {
+        const match = data.mangadex.match(/mangadex\.org\/title\/([a-f0-9-]+)/i);
+        if (match) data.mangadex = match[1];
+      }
+      await api(`/series/${seriesId}/external-links`, { method: 'POST', body: data });
+      if (data.mangadex) {
+        try {
+          await api(`/series/${seriesId}/link-mangadex`, { method: 'POST', body: { providerSeriesId: data.mangadex } });
+        } catch(e) {
+          console.error('Failed to link mangadex metadata:', e);
+        }
+      }
+      toast('Links saved successfully');
+      close();
+      if (onApplied) onApplied();
+    } catch (e) {
+      toast('Failed to save links: ' + e.message);
+      saveBtn.disabled = false; saveBtn.textContent = '✓ Save Links';
     }
-    await api(`/series/${seriesId}/external-links`, { method: 'POST', body: data });
-    if (data.mangadex) { try { await api(`/series/${seriesId}/link-mangadex`, { method:'POST', body:{ providerSeriesId: data.mangadex } }); } catch(e) { console.error('Failed to link mangadex metadata:', e); } }
-    if (onApplied) onApplied();
-  });
+  };
+
+  document.body.appendChild(modal);
 }
 
 // --- Delete Files confirmation modal ---
