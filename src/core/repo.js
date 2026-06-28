@@ -122,7 +122,7 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
   const lang = c.language ?? 'en';
   const number = String(c.number);
   const existing = db.prepare(
-    'SELECT id, language FROM chapters WHERE series_id = ? AND number = ?'
+    'SELECT id, language, calculated FROM chapters WHERE series_id = ? AND number = ?'
   ).all(seriesId, number);
 
   if (existing.length > 0) {
@@ -131,6 +131,10 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
       const dupIds = existing.slice(1).map(e => e.id);
       db.prepare(`DELETE FROM chapters WHERE id IN (${dupIds.map(() => '?').join(',')})`).run(...dupIds);
     }
+
+    // If a user manually defined a volume (calculated=0 and volume is set), we don't let the provider overwrite it.
+    const isManuallyDefined = main.calculated === 0;
+    const nextVolume = isManuallyDefined ? null : (c.volume ?? null);
 
     if (main.language !== lang) {
       // Language upgrade/change: reset download state so the new language version is grabbed
@@ -147,7 +151,7 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
           staging_path = NULL,
           updated_at = datetime('now')
         WHERE id = ?`)
-        .run(c.volume ?? null, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, lang, initialState, main.id);
+        .run(nextVolume, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, lang, initialState, main.id);
       return false;
     } else {
       // Normal update
@@ -158,7 +162,7 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
           title = COALESCE(?, title),
           updated_at = datetime('now')
         WHERE id = ?`)
-        .run(c.volume ?? null, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, main.id);
+        .run(nextVolume, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, main.id);
       return false;
     }
   }
