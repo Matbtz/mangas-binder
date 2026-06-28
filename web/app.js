@@ -1960,6 +1960,7 @@ async function viewActivity(v) {
 
   let currentTab = 'queue';
   const expandedVols = new Set(); // Key: `${seriesId}-vol-${volume}`
+  const expandedBindery = new Set(); // Key: `bindery-pkg-${cbzPath}`
 
   // Hook up tab switches
   for (const btn of tabs.querySelectorAll('.chip')) {
@@ -2124,22 +2125,87 @@ async function viewActivity(v) {
       } else {
         const list = h('<div class="q-list"></div>');
         for (const c of bin) {
-          const row = h(`<div class="q-row">
+          const volKey = `bindery-pkg-${c.cbzPath}`;
+          const isExpanded = expandedBindery.has(volKey);
+
+          const row = h(`<div class="q-row" style="cursor:pointer;user-select:none">
             ${qThumb(c)}
             <div class="q-main">
               <div class="q-title"><strong>${esc(c.seriesTitle)}</strong></div>
-              <div class="q-sub">${unit(c)} ${esc(c.number)} · <span class="muted">Packaged: ${esc(formatParis(c.packagedAt))}</span></div>
+              <div class="q-sub">${esc(c.fileName)} · <span class="muted">Packaged: ${esc(formatParis(c.packagedAt))} · ${(c.size / (1024 * 1024)).toFixed(2)} MB</span></div>
             </div>
-            <div class="q-status"><span class="status-badge ok">📦 Packaged</span></div>
-            <div class="q-actions"></div>
+            <div class="q-status" style="margin-right:12px"><span class="status-badge ok">📦 Packaged</span></div>
+            <div class="q-actions" style="margin-right:12px; display:flex; gap:8px;"></div>
+            <div style="font-size:16px;color:var(--muted);width:24px;text-align:center">${isExpanded ? '▼' : '▶'}</div>
           </div>`);
+
+          row.onclick = (e) => {
+            if (e.target.closest('.q-actions') || e.target.closest('button')) return;
+            if (isExpanded) expandedBindery.delete(volKey);
+            else expandedBindery.add(volKey);
+            render();
+          };
+
           const ac = row.querySelector('.q-actions');
           const goto = h('<button class="btn sm icon" title="Open series">↗</button>');
-          goto.onclick = () => navigate('#/series/' + c.seriesId);
+          goto.onclick = (e) => { e.stopPropagation(); navigate('#/series/' + c.seriesId); };
           const x = h('<button class="btn sm danger icon" title="Delete from bindery">✕</button>');
-          x.onclick = async () => { if (confirm('Remove package from bindery and delete its file?')) { await api(`/chapters/${c.id}/cancel`, { method:'POST' }); toast('Removed'); load(); } };
+          x.onclick = async (e) => {
+            e.stopPropagation();
+            if (confirm(`Remove package from bindery and delete file "${esc(c.fileName)}"?`)) {
+              await api('/bindery/delete-package', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cbzPath: c.cbzPath })
+              });
+              toast('Removed package');
+              load();
+            }
+          };
           ac.append(x, goto);
           list.appendChild(row);
+
+          if (isExpanded) {
+            const subList = h('<div style="padding-left:48px;border-left:2px solid var(--line2);margin:4px 0 12px;display:flex;flex-direction:column;gap:6px"></div>');
+            
+            const realSet = new Set(c.realChapters);
+            const dbChMap = new Map(c.dbChapters.map(ch => [String(parseFloat(ch.number)), ch]));
+            
+            const allNums = new Set([...realSet, ...dbChMap.keys()]);
+            const sortedNums = [...allNums].sort((a, b) => parseFloat(a) - parseFloat(b));
+
+            if (sortedNums.length === 0) {
+              subList.appendChild(h('<div class="muted" style="font-size:12px;padding:4px 0;">No chapters inside this package.</div>'));
+            } else {
+              for (const num of sortedNums) {
+                const isReal = realSet.has(num);
+                const dbCh = dbChMap.get(num);
+
+                const numStr = unit(c) + ' ' + num;
+                const titleStr = dbCh && dbCh.title ? ` : ${esc(dbCh.title)}` : '';
+
+                let statusBadge = '';
+                let subStyle = '';
+                if (isReal && dbCh) {
+                  statusBadge = '<span class="status-badge ok" style="font-size:10px;padding:2px 6px;">✓ Inside CBZ</span>';
+                } else if (isReal) {
+                  statusBadge = '<span class="status-badge imported" style="font-size:10px;padding:2px 6px;background:rgba(56,189,248,0.1);color:#38bdf8;border-color:rgba(56,189,248,0.2)">✓ Foreign Chapter</span>';
+                } else {
+                  statusBadge = '<span class="status-badge failed" style="font-size:10px;padding:2px 6px;">⚠️ Missing in CBZ</span>';
+                  subStyle = 'color: var(--err); text-decoration: line-through; opacity: 0.7;';
+                }
+
+                const chRow = h(`<div class="q-row" style="background:rgba(255,255,255,0.01);padding: 6px 12px;">
+                  <div class="q-main">
+                    <div class="q-title" style="font-size:13px;${subStyle}">${esc(numStr)}${titleStr}</div>
+                  </div>
+                  <div class="q-status">${statusBadge}</div>
+                </div>`);
+                subList.appendChild(chRow);
+              }
+            }
+            list.appendChild(subList);
+          }
         }
         tabContent.appendChild(list);
       }

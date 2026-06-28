@@ -455,20 +455,77 @@ export default async function apiRoutes(app) {
       ORDER BY c.updated_at DESC
       LIMIT 1000
     `).all();
-    const bindery = binderyRows
-      .filter(r => {
-        if (r.state === 'bindery') return true;
-        const normPath = path.normalize(r.cbz_path).toLowerCase();
-        return normPath.startsWith(outputDirNormalized);
-      })
-      .slice(0, 200)
-      .map(r => ({
-        ...chapterView(r),
-        seriesTitle: r.series_title,
-        seriesCover: r.series_cover || null,
-        seriesMediaType: r.series_media_type || 'manga',
-        packagedAt: r.updated_at,
-      }));
+
+    // Group bindery rows by normalized cbz_path
+    const packagesMap = new Map();
+    for (const r of binderyRows) {
+      if (!r.cbz_path) continue;
+      const normPath = path.normalize(r.cbz_path).toLowerCase();
+      
+      const isBinderyFile = r.state === 'bindery' || normPath.startsWith(outputDirNormalized);
+      if (!isBinderyFile) continue;
+
+      if (!packagesMap.has(normPath)) {
+        packagesMap.set(normPath, {
+          cbzPath: r.cbz_path,
+          seriesId: r.series_id,
+          seriesTitle: r.series_title,
+          seriesCover: r.series_cover || null,
+          seriesMediaType: r.series_media_type || 'manga',
+          volume: r.volume || null,
+          rows: []
+        });
+      }
+      packagesMap.get(normPath).rows.push(r);
+    }
+
+    const bindery = [];
+    for (const pkg of packagesMap.values()) {
+      let fileSize = 0;
+      let realChapters = [];
+      let packagedAt = null;
+
+      const fileExists = existsSync(pkg.cbzPath);
+      if (fileExists) {
+        try {
+          const st = statSync(pkg.cbzPath);
+          fileSize = st.size;
+        } catch {}
+        try {
+          const info = await readCbzInfo(pkg.cbzPath);
+          realChapters = info?.chapters || [];
+        } catch {}
+      }
+
+      // Find latest updated_at
+      for (const r of pkg.rows) {
+        if (!packagedAt || r.updated_at > packagedAt) {
+          packagedAt = r.updated_at;
+        }
+      }
+
+      bindery.push({
+        cbzPath: pkg.cbzPath,
+        fileName: path.basename(pkg.cbzPath),
+        seriesId: pkg.seriesId,
+        seriesTitle: pkg.seriesTitle,
+        seriesCover: pkg.seriesCover,
+        seriesMediaType: pkg.seriesMediaType,
+        volume: pkg.volume,
+        packagedAt: packagedAt || new Date().toISOString(),
+        size: fileSize,
+        realChapters,
+        dbChapters: pkg.rows.map(r => ({
+          id: r.id,
+          number: r.number,
+          title: r.title,
+          state: r.state
+        }))
+      });
+    }
+
+    // Sort by packagedAt DESC
+    bindery.sort((a, b) => b.packagedAt.localeCompare(a.packagedAt));
 
     const failedRows = getDb().prepare(`
       SELECT c.*, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type
@@ -490,6 +547,55 @@ export default async function apiRoutes(app) {
       bindery,
       failed,
     };
+  });
+
+  // Delete a complete bindery package (and delete the physical file)
+  app.post('/api/bindery/delete-package', async (req, reply) => {
+    const { cbzPath } = req.body || {};
+    if (!cbzPath) return reply.code(400).send({ error: 'cbzPath required' });
+
+    const db = getDb();
+    const chapters = db.prepare('SELECT * FROM chapters WHERE cbz_path = ?').all(cbzPath);
+
+    if (chapters.length > 0) {
+      const s = getSeries(chapters[0].series_id);
+      const defaultState = (s && s.monitor_mode === 'none') ? 'skipped' : 'wanted';
+      const resetExtra = defaultState === 'wanted' ? { cbz_path: null, staging_path: null, attempts: 0 } : { cbz_path: null, staging_path: null };
+
+      // Delete the file if it exists and is under outputDir (safety guardrail)
+      const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
+      const targetNormalized = path.normalize(cbzPath).toLowerCase();
+      if (targetNormalized.startsWith(outputDirNormalized) && existsSync(cbzPath)) {
+        try {
+          const st = statSync(cbzPath);
+          if (st.isDirectory()) {
+            rmSync(cbzPath, { recursive: true, force: true });
+          } else {
+            unlinkSync(cbzPath);
+          }
+        } catch (err) {
+          return reply.code(500).send({ error: `Failed to delete file: ${err.message}` });
+        }
+      }
+
+      // Reset the chapters
+      for (const c of chapters) {
+        setChapterState(c.id, defaultState, resetExtra);
+      }
+    } else {
+      // If not in database but file exists, delete it anyway if in output directory
+      const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
+      const targetNormalized = path.normalize(cbzPath).toLowerCase();
+      if (targetNormalized.startsWith(outputDirNormalized) && existsSync(cbzPath)) {
+        try {
+          unlinkSync(cbzPath);
+        } catch (err) {
+          return reply.code(500).send({ error: `Failed to delete file: ${err.message}` });
+        }
+      }
+    }
+
+    return { ok: true };
   });
 
   app.get('/api/history', async () => recentHistory(100));
@@ -657,10 +763,13 @@ export default async function apiRoutes(app) {
               issuesFound++;
             } else {
               const info = await readCbzInfo(filePath);
-              if (!info || !info.chapters || info.chapters.length === 0) {
-                fileIssues.push(`CBZ archive is unreadable, corrupt, or contains no chapters`);
+              if (info.error) {
+                fileIssues.push(`CBZ archive is unreadable or corrupt: ${info.error}`);
                 issuesFound++;
-              } else {
+              } else if (!info.isEpub && info.pageCount === 0) {
+                fileIssues.push(`CBZ archive contains no image pages`);
+                issuesFound++;
+              } else if (info.chapters && info.chapters.length > 0) {
                 const dbChNums = new Set(dbChapters.map(c => String(parseFloat(c.number))));
                 const cbzChNums = new Set(info.chapters.map(num => String(parseFloat(num))));
 

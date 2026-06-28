@@ -119,6 +119,9 @@ export async function readCbzInfo(filePath) {
 
   let series = null, mangadexId = null, comicvineId = null, publisher = null, genre = null, manga = null, chapters = [];
   let isEpub = filePath.toLowerCase().endsWith('.epub');
+  let error = null;
+  let pageCount = 0;
+
   try {
     const { names, xml } = await readArchiveBits(filePath);
     if (!isEpub) {
@@ -140,9 +143,15 @@ export async function readCbzInfo(filePath) {
     for (const n of names) {
       const m = path.basename(n).match(CBZ_PAGE_RE);
       if (m) found.add(String(parseFloat(m[1])));
+      const ext = path.extname(n).toLowerCase();
+      if (IMAGE_EXTS.has(ext)) {
+        pageCount++;
+      }
     }
     chapters = [...found];
-  } catch { /* unreadable/corrupt CBZ — skip */ }
+  } catch (err) {
+    error = err.message || String(err);
+  }
 
   const base = path.basename(filePath);
   const issueMatch = base.match(FILENAME_ISSUE_RE);
@@ -156,7 +165,7 @@ export async function readCbzInfo(filePath) {
                : null;
   const hasSeriesTag = !!series;
   if (!series) series = base.replace(/\.(cbz|epub)$/i, '');
-  const info = { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, issueNum, chapters, isEpub };
+  const info = { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, issueNum, chapters, isEpub, pageCount, error };
 
   if (st) {
     if (cbzInfoCache.size >= CBZ_CACHE_MAX) cbzInfoCache.clear();
