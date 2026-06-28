@@ -114,6 +114,45 @@ export default async function apiRoutes(app) {
     }
   });
 
+
+  app.post('/api/series/:id/external-links', async (req, reply) => {
+    const id = parseInt(req.params.id, 10);
+    const series = getSeries(id);
+    if (!series) return reply.code(404).send({ error: 'Series not found' });
+    updateSeries(id, { externalLinks: req.body });
+    logHistory('links_updated', { seriesId: id, message: 'Updated external download links' });
+    return { success: true };
+  });
+
+  app.post('/api/series/:id/hardcover-cover', async (req, reply) => {
+    const id = parseInt(req.params.id, 10);
+    const series = getSeries(id);
+    if (!series) return reply.code(404).send({ error: 'Series not found' });
+    const { title } = req.body;
+    if (!title) return reply.code(400).send({ error: 'Title required' });
+
+    try {
+      const q = `query($title: String!) { mangas(where: {title: {_ilike: $title}}, limit: 1) { image { url } } }`;
+      const resp = await fetch('https://api.hardcover.app/v1/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': process.env.HARDCOVER_API_KEY ? `Bearer ${process.env.HARDCOVER_API_KEY}` : '' },
+        body: JSON.stringify({ query: q, variables: { title: `%${title}%` } })
+      });
+      const data = await resp.json();
+      const coverUrl = data?.data?.mangas?.[0]?.image?.url;
+      if (coverUrl) {
+        updateSeries(id, { coverPath: coverUrl });
+        logHistory('cover_updated', { seriesId: id, message: 'Fetched cover from Hardcover' });
+        return { success: true, coverUrl };
+      } else {
+        return reply.code(404).send({ error: 'Cover not found on Hardcover' });
+      }
+    } catch (err) {
+      console.error('Hardcover error:', err);
+      return reply.code(500).send({ error: 'Failed to fetch from Hardcover' });
+    }
+  });
+
   app.patch('/api/series/:id', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
@@ -838,7 +877,6 @@ export default async function apiRoutes(app) {
       return reply.code(500).send({ error: 'Failed to read integrity report' });
     }
   });
-
   // --- Providers ---
   app.get('/api/providers', async () => {
     const states = Object.fromEntries(getProviderStates().map(p => [p.name, p]));

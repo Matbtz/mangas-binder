@@ -112,7 +112,12 @@ export async function search(query) {
  */
 export async function findIssueDownload(series, chapter) {
   const q = `${cleanTitle(series.title)} ${chapter.number}`;
-  const results = await search(q);
+  let results;
+  if (series.externalLinks && series.externalLinks.getcomics) {
+    results = [{ id: series.externalLinks.getcomics, title: q }];
+  } else {
+    results = await search(q);
+  }
   if (!results.length) return null;
 
   // Prefer a post whose title contains the issue number.

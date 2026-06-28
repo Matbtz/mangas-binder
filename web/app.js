@@ -530,7 +530,7 @@ async function showDetail(id) {
       <div class="hero-toolbar">
         <button class="btn sm" id="hd-back">← Library</button>
         <button class="btn sm primary" id="hd-refresh">↻ Refresh &amp; Scan</button>
-        <button class="btn sm" id="hd-run" title="Drain the download queue now">▶ Run downloads</button>
+        <span id="hd-downloads-slot"></span>
         <button class="btn sm acc2" id="hd-package-all" title="Package all owned volumes into clean CBZs">📦 Package All</button>
         <span id="hd-more-slot"></span>
         <div class="row" id="modes" style="margin-left:auto;gap:8px"></div>
@@ -545,27 +545,13 @@ async function showDetail(id) {
     await api(`/series/${id}/scan-library`,{method:'POST'});
     showDetail(id);
   };
-  hero.querySelector('#hd-run').onclick = async () => {
-    await api('/downloads/run', { method:'POST' });
-    toast('Running downloads…');
-    startLive();
-  };
-  const linkFolderAction = () => {
-    openFolderPickerModal({
-      defaultPath: s.folderPath || '/books',
-      title: `📁 Link Folder — ${s.title}`,
-      onSelect: async (folderPath) => {
-        toast('Linking folder & scanning library…');
-        try {
-          await api(`/series/${id}`, { method:'PATCH', body:{ folderPath } });
-          await api(`/series/${id}/scan-library`, { method:'POST' });
-          toast('Folder linked and scanned!');
-          showDetail(id);
-        } catch (e) { toast(e.message); }
-      }
-    });
-  };
-  hero.querySelector('#folder-pill').onclick = linkFolderAction;
+
+  const downloadsMenu = menuButton('Downloads ▾', [
+    { label: 'Run Downloads', icon: '▶', onClick: async () => { await api('/downloads/run', { method:'POST' }); toast('Running downloads…'); startLive(); } },
+    { label: 'Retry all failed', icon: '↻', onClick: async () => { const r = await api(`/series/${id}/retry-failed`, { method:'POST' }); toast(`Re-queued ${r.retried||0} failed`); startLive(); showDetail(id); } },
+    { label: 'Cancel all downloads', icon: '✕', danger: true, onClick: async () => { const r = await api(`/series/${id}/cancel`, { method:'POST' }); toast(`Cancelled ${r.cancelled||0}`); showDetail(id); } },
+  ], 'btn sm primary');
+  hero.querySelector('#hd-downloads-slot').replaceWith(downloadsMenu);
 
   hero.querySelector('#hd-package-all').onclick = async () => {
     toast('Auditing volumes…');
@@ -591,7 +577,6 @@ async function showDetail(id) {
 
   // Secondary actions tucked into a "More" menu to declutter the toolbar.
   const moreMenu = menuButton('⋯ More', [
-    { label: 'Link local folder', icon: '📁', onClick: linkFolderAction },
     { label: 'Manage Files', icon: '🗂', onClick: () => openManageFilesModal({
         seriesId: id,
         seriesTitle: s.title,
@@ -599,21 +584,9 @@ async function showDetail(id) {
         folderPath: s.folderPath || '',
         onApplied: () => showDetail(id),
       }) },
-    { label: 'Extrapolate volumes', icon: '🪄', onClick: () => openExtrapolateModal({ seriesId: id, seriesTitle: s.title, onApplied: () => showDetail(id) }) },
+    { label: 'Manage volumes', icon: '📚', onClick: () => openManageVolumesModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
     { label: 'Edit metadata', icon: '✍', onClick: () => openEditMetadataModal({ seriesId: id, title: s.title, description: s.description, coverPath: s.coverPath, onApplied: () => showDetail(id) }) },
-    { label: 'Define volumes manually', icon: '📋', onClick: () => openVolumeDefinitionsModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
-    { label: 'Link / change MangaDex', icon: '🔗', onClick: async () => {
-        const input = prompt(`Enter MangaDex Series ID or URL to link with ${s.title}:`, s.provider === 'mangadex' ? s.providerSeriesId : '');
-        if (!input) return;
-        let mdxId = input.trim();
-        const match = mdxId.match(/mangadex\.org\/title\/([a-f0-9-]+)/i);
-        if (match) mdxId = match[1];
-        toast('Linking with MangaDex…');
-        try { await api(`/series/${id}/link-mangadex`, { method:'POST', body:{ providerSeriesId: mdxId } }); toast('Linked to MangaDex!'); showDetail(id); }
-        catch (e) { alert('Failed to link MangaDex: ' + (e.message || e)); }
-      } },
-    { label: 'Retry all failed', icon: '↻', onClick: async () => { const r = await api(`/series/${id}/retry-failed`, { method:'POST' }); toast(`Re-queued ${r.retried||0} failed`); startLive(); showDetail(id); } },
-    { label: 'Cancel all downloads', icon: '✕', danger: true, onClick: async () => { const r = await api(`/series/${id}/cancel`, { method:'POST' }); toast(`Cancelled ${r.cancelled||0}`); showDetail(id); } },
+    { label: 'External links', icon: '🔗', onClick: () => openExternalLinksModal({ seriesId: id, seriesTitle: s.title, mediaType: s.mediaType, externalLinks: s.externalLinks || {}, onApplied: () => showDetail(id) }) },
     { label: 'Delete all files', icon: '🗑', danger: true, onClick: () => openDeleteFilesModal({ seriesId: id, seriesTitle: s.title, scope: 'all', onDeleted: () => showDetail(id) }) },
   ], 'btn sm');
   hero.querySelector('#hd-more-slot').replaceWith(moreMenu);
@@ -1516,6 +1489,13 @@ function openEditMetadataModal({ seriesId, title, description, coverPath, onAppl
           <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Cover Image URL</label>
           <input id="em-cover-input" type="text" value="${esc(coverPath || '')}" style="${INP}">
         </div>
+        <div style="padding:10px;background:var(--bg);border-radius:8px;border:1px solid var(--line2)">
+          <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Find Cover on Hardcover</label>
+          <div style="display:flex;gap:8px">
+            <input id="em-hc-search" type="text" value="${esc(title || '')}" style="${INP};flex:1" placeholder="Search title...">
+            <button class="btn sm" id="em-hc-btn" style="flex-shrink:0">🔍 Fetch</button>
+          </div>
+        </div>
         <div>
           <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Description</label>
           <textarea id="em-desc-input" style="${TXT}">${esc(description || '')}</textarea>
@@ -1532,6 +1512,23 @@ function openEditMetadataModal({ seriesId, title, description, coverPath, onAppl
   modal.querySelector('#em-close').onclick = close;
   modal.querySelector('#em-cancel').onclick = close;
   modal.onclick = e => { if (e.target === modal) close(); };
+
+  modal.querySelector('#em-hc-btn').onclick = async () => {
+    const btn = modal.querySelector('#em-hc-btn');
+    const query = modal.querySelector('#em-hc-search').value.trim();
+    if (!query) return;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+      const res = await api(`/series/${seriesId}/hardcover-cover`, { method: 'POST', body: { title: query } });
+      if (res.coverUrl) {
+        modal.querySelector('#em-cover-input').value = res.coverUrl;
+        toast('Cover found on Hardcover!');
+      } else {
+        toast('No cover found for this title');
+      }
+    } catch (err) { toast(err.message); }
+    btn.disabled = false; btn.textContent = '🔍 Fetch';
+  };
 
   modal.querySelector('#em-save').onclick = async () => {
     const saveBtn = modal.querySelector('#em-save');
@@ -1559,6 +1556,50 @@ function openEditMetadataModal({ seriesId, title, description, coverPath, onAppl
       saveBtn.textContent = '✓ Save Changes';
     }
   };
+
+  document.body.appendChild(modal);
+}
+
+async function openManageVolumesModal({ seriesId, seriesTitle, chapters, onApplied }) {
+  const existing = document.getElementById('manage-volumes-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="manage-volumes-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="background:var(--bg);border:1px solid var(--line);border-radius:12px;width:100%;max-width:500px;display:flex;flex-direction:column;box-shadow:0 20px 40px rgba(0,0,0,0.8)">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between">
+        <h3 style="margin:0;font-size:16px;font-weight:600">📚 Manage Volumes - ${esc(seriesTitle)}</h3>
+        <button class="btn sm icon modal-close" style="border:none">✕</button>
+      </div>
+      <div style="display:flex;border-bottom:1px solid var(--line);background:var(--bg2)">
+        <button class="tab-btn active" data-tab="extrapolate" style="flex:1;padding:12px;background:none;border:none;color:#fff;cursor:pointer;font-weight:500;border-bottom:2px solid var(--acc)">✨ Extrapolate</button>
+        <button class="tab-btn" data-tab="manual" style="flex:1;padding:12px;background:none;border:none;color:var(--muted);cursor:pointer;font-weight:500;border-bottom:2px solid transparent">📋 Define Manually</button>
+      </div>
+      <div style="padding:20px;display:flex;flex-direction:column;gap:20px" id="manage-volumes-content">
+        <div id="tab-extrapolate" class="col" style="gap:16px;text-align:center">
+          <p class="muted">Automatically group loose chapters into volumes based on standard chapter counts.</p>
+          <button class="btn primary" id="btn-run-extrapolate" style="padding:10px;font-size:14px">Run Extrapolation</button>
+        </div>
+        <div id="tab-manual" class="col" style="gap:16px;display:none;text-align:center">
+          <p class="muted">Manually define volume boundaries (e.g. Volume 1: ch 1-10).</p>
+          <button class="btn primary" id="btn-run-manual" style="padding:10px;font-size:14px">Open Manual Editor</button>
+        </div>
+      </div>
+    </div>
+  </div>`);
+
+  modal.querySelector('.modal-close').onclick = () => modal.remove();
+  modal.onclick = e => { if (e.target === modal) modal.remove(); };
+
+  const tabs = modal.querySelectorAll('.tab-btn');
+  tabs.forEach(t => t.onclick = () => {
+    tabs.forEach(btn => { btn.classList.remove('active'); btn.style.color = 'var(--muted)'; btn.style.borderBottomColor = 'transparent'; });
+    t.classList.add('active'); t.style.color = '#fff'; t.style.borderBottomColor = 'var(--acc)';
+    modal.querySelector('#tab-extrapolate').style.display = t.dataset.tab === 'extrapolate' ? 'flex' : 'none';
+    modal.querySelector('#tab-manual').style.display = t.dataset.tab === 'manual' ? 'flex' : 'none';
+  });
+
+  modal.querySelector('#btn-run-extrapolate').onclick = () => { modal.remove(); openExtrapolateModal({ seriesId, seriesTitle, onApplied }); };
+  modal.querySelector('#btn-run-manual').onclick = () => { modal.remove(); openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied }); };
 
   document.body.appendChild(modal);
 }
@@ -1645,6 +1686,14 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
   };
   modal.querySelector('#vd-add').parentNode.appendChild(clearBtn);
 
+  const clearBtn = h('<button class="btn sm" id="vd-clear" style="border-color:#ff6b6b;color:#ff6b6b;margin-left:10px" title="Clear all rows and reset to auto-extrapolation">🗑 Clear All</button>');
+  clearBtn.onclick = () => {
+    if (confirm('Clear all manually defined volume definitions and reset this series to automatic extrapolation?')) {
+      tbody.innerHTML = '';
+    }
+  };
+  modal.querySelector('#vd-add').parentNode.appendChild(clearBtn);
+
   modal.querySelector('#vd-save').onclick = async () => {
     const rows = [...tbody.querySelectorAll('tr')];
     const volumes = [];
@@ -1670,6 +1719,40 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
   };
 
   document.body.appendChild(modal);
+}
+
+function openExternalLinksModal({ seriesId, seriesTitle, mediaType, externalLinks = {}, onApplied }) {
+  const isComic = mediaType === 'comic';
+  const form = h(`<form class="col" style="gap:16px; min-width:300px">
+    <p class="muted">Links to track metadata or downloads. Used for direct matching.</p>
+    ${isComic ? `
+      <label class="field"><span>ComicVine <a href="#" title="Full URL to ComicVine issue list" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="comicvine" type="url" placeholder="https://comicvine.gamespot.com/..." value="${esc(externalLinks.comicvine || '')}">
+      </label>
+      <label class="field"><span>GetComics <a href="#" title="Full URL to GetComics series or search" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="getcomics" type="url" placeholder="https://getcomics.info/..." value="${esc(externalLinks.getcomics || '')}">
+      </label>
+    ` : `
+      <label class="field"><span>MangaDex <a href="#" title="MangaDex Series ID or URL" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="mangadex" type="text" placeholder="https://mangadex.org/title/..." value="${esc(externalLinks.mangadex || '')}">
+      </label>
+      <label class="field"><span>MangaKatana <a href="#" title="Full URL to MangaKatana series" style="text-decoration:none;cursor:help">ℹ️</a></span>
+        <input name="mangakatana" type="url" placeholder="https://mangakatana.com/manga/..." value="${esc(externalLinks.mangakatana || '')}">
+      </label>
+    `}
+  </form>`);
+
+  openModal('🔗 External Links - ' + seriesTitle, form, 'Save Links', async () => {
+    let data = Object.fromEntries(new FormData(form));
+    // If mangadex is a full url, try to extract ID
+    if (data.mangadex) {
+      const match = data.mangadex.match(/mangadex\.org\/title\/([a-f0-9-]+)/i);
+      if (match) data.mangadex = match[1];
+    }
+    await api(`/series/${seriesId}/external-links`, { method: 'POST', body: data });
+    if (data.mangadex) { try { await api(`/series/${seriesId}/link-mangadex`, { method:'POST', body:{ providerSeriesId: data.mangadex } }); } catch(e) { console.error('Failed to link mangadex metadata:', e); } }
+    if (onApplied) onApplied();
+  });
 }
 
 // --- Delete Files confirmation modal ---
@@ -2508,7 +2591,6 @@ async function viewSettings(v) {
   aform.appendChild(aresults);
   ac.appendChild(aform);
   container.appendChild(ac);
-
   // CBZ Integrity Audit
   const ic = h('<div class="card" style="grid-column: 1 / -1; margin-top:20px"><h2>CBZ Integrity Audit</h2><p class="muted" style="font-size:13px;margin:4px 0 14px 0">Scans all CBZ files on disk to ensure there are no empty/corrupt files, and verifies the chapters inside match your database records.</p></div>');
   const iform = h('<div class="row" style="flex-direction:column;align-items:stretch;gap:14px"></div>');

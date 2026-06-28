@@ -14,12 +14,12 @@ export function createSeries(s) {
       (provider, provider_series_id, media_type, download_provider, publisher,
        title, sort_title, authors_json, artists_json,
        description, genres_json, year, status, cover_path, folder_path, language,
-       monitored, monitor_mode, monitor_from_volume, packaging_mode, total_volumes_hint)
+       monitored, monitor_mode, monitor_from_volume, packaging_mode, total_volumes_hint, external_links_json)
     VALUES
       (@provider, @provider_series_id, @media_type, @download_provider, @publisher,
        @title, @sort_title, @authors_json, @artists_json,
        @description, @genres_json, @year, @status, @cover_path, @folder_path, @language,
-       @monitored, @monitor_mode, @monitor_from_volume, @packaging_mode, @total_volumes_hint)
+       @monitored, @monitor_mode, @monitor_from_volume, @packaging_mode, @total_volumes_hint, @external_links_json)
     ON CONFLICT(provider, provider_series_id) DO UPDATE SET
        title = excluded.title, updated_at = datetime('now')
   `).run({
@@ -49,16 +49,23 @@ export function createSeries(s) {
 }
 
 export function getSeries(id) {
-  return getDb().prepare('SELECT * FROM series WHERE id = ?').get(id);
+  const s = getDb().prepare('SELECT * FROM series WHERE id = ?').get(id);
+  if (s && s.external_links_json) s.externalLinks = JSON.parse(s.external_links_json);
+  return s;
 }
 
 export function getSeriesByProvider(provider, providerSeriesId) {
-  return getDb().prepare('SELECT * FROM series WHERE provider = ? AND provider_series_id = ?')
-    .get(provider, providerSeriesId);
+  const s = getDb().prepare('SELECT * FROM series WHERE provider = ? AND provider_series_id = ?').get(provider, providerSeriesId);
+  if (s && s.external_links_json) s.externalLinks = JSON.parse(s.external_links_json);
+  return s;
 }
 
 export function listSeries() {
-  return getDb().prepare('SELECT * FROM series ORDER BY sort_title COLLATE NOCASE').all();
+  const rows = getDb().prepare('SELECT * FROM series ORDER BY sort_title COLLATE NOCASE').all();
+  for (const s of rows) {
+    if (s.external_links_json) s.externalLinks = JSON.parse(s.external_links_json);
+  }
+  return rows;
 }
 
 export function listMonitoredSeries() {
@@ -80,6 +87,7 @@ const SERIES_PATCH_COLS = {
   mediaType: v => v,
   title: v => v,
   description: v => v,
+  externalLinks: v => JSON.stringify(v),
 };
 const SERIES_COL_NAMES = {
   monitored: 'monitored', monitorMode: 'monitor_mode', monitorFromVolume: 'monitor_from_volume',
@@ -88,6 +96,7 @@ const SERIES_COL_NAMES = {
   provider: 'provider', providerSeriesId: 'provider_series_id',
   downloadProvider: 'download_provider', mediaType: 'media_type', title: 'title',
   description: 'description',
+  externalLinks: 'external_links_json',
 };
 
 export function updateSeries(id, patch) {
