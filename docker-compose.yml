@@ -3,6 +3,8 @@ services:
   mangas-binder:
     build: .
     container_name: mangas-binder
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
     environment:
       OUTPUT_DIR: /bindery            # where finished CBZs land (Tome's inbox)
       DB_PATH: /data/mangas-binder.db
