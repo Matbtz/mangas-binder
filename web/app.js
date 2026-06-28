@@ -2668,6 +2668,15 @@ async function viewSettings(v) {
   iform.appendChild(ibtnRow);
 
   const ifixBtn = h('<button class="btn sm primary" style="align-self:flex-start;display:none;background:#238636;border-color:#238636;margin-right:10px">🔧 Fix Missing Chapters (Queue Redownload)</button>');
+  const iresults = h('<div style="display:none;flex-direction:column;gap:10px;margin-top:10px"></div>');
+  const itext = h('<textarea readonly style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;color:#fff;padding:10px;border-radius:8px;font-family:monospace;font-size:12px"></textarea>');
+  const icopy = h('<button class="btn sm" style="align-self:flex-start">📋 Copy to Clipboard</button>');
+
+  icopy.onclick = () => {
+    itext.select();
+    document.execCommand('copy');
+    toast('Copied to clipboard!');
+  };
 
   ifixBtn.onclick = async () => {
     if (confirm('Are you sure you want to reset all missing chapters back to wanted state? They will be queued for redownload and the broken packages will be rebuilt.')) {
