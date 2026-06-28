@@ -122,7 +122,7 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
   const lang = c.language ?? 'en';
   const number = String(c.number);
   const existing = db.prepare(
-    'SELECT id, language, calculated FROM chapters WHERE series_id = ? AND number = ?'
+    'SELECT id, language, calculated, volume FROM chapters WHERE series_id = ? AND number = ?'
   ).all(seriesId, number);
 
   if (existing.length > 0) {
@@ -133,7 +133,7 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
     }
 
     // If a user manually defined a volume (calculated=0 and volume is set), we don't let the provider overwrite it.
-    const isManuallyDefined = main.calculated === 0;
+    const isManuallyDefined = main.calculated === 0 && main.volume !== null && main.volume !== '';
     const nextVolume = isManuallyDefined ? null : (c.volume ?? null);
 
     if (main.language !== lang) {
