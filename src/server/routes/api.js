@@ -909,8 +909,8 @@ export default async function apiRoutes(app) {
     for (const s of report.results || []) {
       const seriesObj = getSeries(s.seriesId);
       if (!seriesObj) continue;
-      const defaultState = seriesObj.monitor_mode === 'none' ? 'skipped' : 'wanted';
-      const resetExtra = defaultState === 'wanted' ? { cbz_path: null, staging_path: null, attempts: 0 } : { cbz_path: null, staging_path: null };
+      const defaultState = 'wanted';
+      const resetExtra = { cbz_path: null, staging_path: null, attempts: 0 };
 
       for (const f of s.files || []) {
         for (const issue of f.issues || []) {
