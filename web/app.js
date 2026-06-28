@@ -586,7 +586,8 @@ async function showDetail(id) {
         folderPath: s.folderPath || '',
         onApplied: () => showDetail(id),
       }) },
-    { label: 'Extrapolate volumes', icon: '🪄', onClick: async () => { toast('Extrapolating volumes…'); await api(`/series/${id}/extrapolate-volumes`, { method:'POST' }); toast('Distributed chapters into volumes!'); showDetail(id); } },
+    { label: 'Extrapolate volumes', icon: '🪄', onClick: () => openExtrapolateModal({ seriesId: id, seriesTitle: s.title, onApplied: () => showDetail(id) }) },
+    { label: 'Define volumes manually', icon: '📋', onClick: () => openVolumeDefinitionsModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
     { label: 'Link / change MangaDex', icon: '🔗', onClick: async () => {
         const input = prompt(`Enter MangaDex Series ID or URL to link with ${s.title}:`, s.provider === 'mangadex' ? s.providerSeriesId : '');
         if (!input) return;
@@ -907,11 +908,7 @@ async function showDetail(id) {
     const actsContainer = volHead.querySelector('.vol-acts');
     if (vk === 'none') {
       const autoExtBtn = h('<button class="btn sm primary" style="background:var(--acc)" title="Distribute unknown chapters automatically">✨ Extrapolate All</button>');
-      autoExtBtn.onclick = async () => {
-        toast('Extrapolating volumes…');
-        await api(`/series/${id}/extrapolate-volumes`, { method: 'POST' });
-        showDetail(id);
-      };
+      autoExtBtn.onclick = () => openExtrapolateModal({ seriesId: id, seriesTitle: s.title, onApplied: () => showDetail(id) });
       const custVolBtn = h('<button class="btn sm" style="border-color:var(--acc)" title="Choose which volume to create from chapter range">📦 Choose Volumes…</button>');
       custVolBtn.onclick = () => {
         const modal = h(`<div class="modal-backdrop" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.75);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
@@ -1334,6 +1331,236 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
 
   modal.querySelector('#mf-close').onclick = () => modal.remove();
   modal.onclick = e => { if (e.target === modal) modal.remove(); };
+  document.body.appendChild(modal);
+}
+
+// --- Extrapolate Volumes modal ---
+async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
+  const existing = document.getElementById('extrapolate-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="extrapolate-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="background:#1a1e24;border:1px solid #2e353f;border-radius:12px;width:100%;max-width:560px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 40px rgba(0,0,0,0.8);overflow:hidden">
+      <div style="padding:16px 20px;border-bottom:1px solid #2e353f;display:flex;align-items:center;gap:12px;flex-shrink:0">
+        <h3 style="margin:0;font-size:16px;color:#fff">🪄 Extrapolate Volumes</h3>
+        <span class="muted" style="font-size:13px">${esc(seriesTitle)}</span>
+        <button class="btn sm icon" id="em-close" style="margin-left:auto">✕</button>
+      </div>
+      <div style="display:flex;border-bottom:1px solid #2e353f;background:#111518;flex-shrink:0">
+        <button id="em-tab-auto" style="flex:1;background:var(--acc);color:#fff;border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✨ Automatic</button>
+        <button id="em-tab-manual" style="flex:1;background:transparent;color:var(--fg);border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✏️ Manual</button>
+      </div>
+      <div id="em-manual-row" style="display:none;padding:12px 20px;border-bottom:1px solid #2e353f;align-items:center;gap:10px;flex-shrink:0">
+        <span style="color:#ccc;font-size:13px">Chapters per volume:</span>
+        <input type="number" id="em-chs-per-vol" min="1" max="500" value="8" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:80px;font-family:inherit">
+        <button class="btn sm" id="em-preview-btn">Preview</button>
+      </div>
+      <div id="em-body" style="padding:16px 20px;overflow-y:auto;flex:1">
+        <p class="muted">Loading…</p>
+      </div>
+      <div style="padding:14px 20px;border-top:1px solid #2e353f;display:flex;justify-content:flex-end;gap:10px;flex-shrink:0">
+        <button class="btn sm" id="em-cancel">Cancel</button>
+        <button class="btn sm primary" id="em-apply" disabled>✨ Extrapolate</button>
+      </div>
+    </div>
+  </div>`);
+
+  let mode = 'auto';
+  let previewData = null;
+
+  const close = () => modal.remove();
+  modal.querySelector('#em-close').onclick = close;
+  modal.querySelector('#em-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  const body = modal.querySelector('#em-body');
+  const applyBtn = modal.querySelector('#em-apply');
+  const manualRow = modal.querySelector('#em-manual-row');
+  const chsInput = modal.querySelector('#em-chs-per-vol');
+
+  const renderPreview = () => {
+    if (!previewData) return;
+    const { chsPerVol, consecutiveVols, totalUnassigned, volumes, overflow } = previewData;
+    body.innerHTML = '';
+    if (totalUnassigned === 0) {
+      body.appendChild(h('<p class="muted" style="text-align:center;padding:24px 0">No unassigned chapters — nothing to extrapolate.</p>'));
+      applyBtn.disabled = true;
+      return;
+    }
+    const stats = h('<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>');
+    const statCard = (val, label, color = '#aaa') => h(`<div style="flex:1;min-width:90px;background:#0d1117;border:1px solid #2e353f;border-radius:8px;padding:10px 14px;text-align:center">
+      <div style="font-size:20px;font-weight:700;color:${color}">${esc(String(val))}</div>
+      <div style="font-size:11px;color:#666;margin-top:2px">${label}</div>
+    </div>`);
+    if (mode === 'auto') stats.appendChild(statCard(consecutiveVols, 'known volumes', 'var(--acc)'));
+    stats.appendChild(statCard(chsPerVol, 'chapters / vol', 'var(--acc)'));
+    stats.appendChild(statCard(totalUnassigned, 'unassigned'));
+    stats.appendChild(statCard(volumes.length, 'new volumes', '#7ecc7e'));
+    body.appendChild(stats);
+    if (volumes.length > 0) {
+      const list = h('<div style="display:flex;flex-direction:column;gap:4px"></div>');
+      for (const { vol, count, chapters: chs } of volumes) {
+        const first = chs[0], last = chs[chs.length - 1];
+        list.appendChild(h(`<div style="display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--panel2);border-radius:7px;font-size:13px">
+          <span style="font-weight:700;color:#fff;min-width:70px">Vol. ${esc(String(vol))}</span>
+          <span style="color:#888">Ch. ${esc(String(first))} – ${esc(String(last))}</span>
+          <span class="pill" style="margin-left:auto;font-size:11px">${count} ch.</span>
+        </div>`));
+      }
+      body.appendChild(list);
+    }
+    if (overflow > 0) {
+      body.appendChild(h(`<p class="muted" style="font-size:12px;margin-top:10px">+ ${overflow} chapter${overflow !== 1 ? 's' : ''} outside known volume range (not assigned)</p>`));
+    }
+    applyBtn.disabled = volumes.length === 0;
+  };
+
+  const fetchPreview = async (chaptersPerVolume = null) => {
+    body.innerHTML = '<p class="muted" style="padding:8px 0">Loading preview…</p>';
+    applyBtn.disabled = true;
+    try {
+      const qs = chaptersPerVolume ? `?chaptersPerVolume=${encodeURIComponent(chaptersPerVolume)}` : '';
+      previewData = await api(`/series/${seriesId}/extrapolate-preview${qs}`);
+      if (mode === 'manual' && chaptersPerVolume) chsInput.value = chaptersPerVolume;
+      renderPreview();
+    } catch (e) {
+      body.innerHTML = `<p style="color:var(--warn)">Failed to load preview: ${esc(e.message)}</p>`;
+    }
+  };
+
+  const switchTab = (newMode) => {
+    mode = newMode;
+    const autoTab = modal.querySelector('#em-tab-auto');
+    const manualTab = modal.querySelector('#em-tab-manual');
+    autoTab.style.cssText = `flex:1;background:${mode==='auto'?'var(--acc)':'transparent'};color:${mode==='auto'?'#fff':'var(--fg)'};border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
+    manualTab.style.cssText = `flex:1;background:${mode==='manual'?'var(--acc)':'transparent'};color:${mode==='manual'?'#fff':'var(--fg)'};border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
+    manualRow.style.display = mode === 'manual' ? 'flex' : 'none';
+    fetchPreview(mode === 'manual' ? (Number(chsInput.value) || 8) : null);
+  };
+
+  modal.querySelector('#em-tab-auto').onclick = () => switchTab('auto');
+  modal.querySelector('#em-tab-manual').onclick = () => switchTab('manual');
+  modal.querySelector('#em-preview-btn').onclick = () => fetchPreview(Number(chsInput.value) || 8);
+  chsInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(Number(chsInput.value) || 8); };
+
+  applyBtn.onclick = async () => {
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Extrapolating…';
+    try {
+      const reqBody = mode === 'manual' ? { chaptersPerVolume: Number(chsInput.value) || undefined } : {};
+      await api(`/series/${seriesId}/extrapolate-volumes`, { method: 'POST', body: reqBody });
+      toast('Distributed chapters into volumes!');
+      close();
+      if (onApplied) onApplied();
+    } catch (e) {
+      toast(e.message);
+      applyBtn.disabled = false;
+      applyBtn.textContent = '✨ Extrapolate';
+    }
+  };
+
+  document.body.appendChild(modal);
+  fetchPreview();
+}
+
+// --- Manual Volume Definitions modal ---
+function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied }) {
+  const existing = document.getElementById('vol-def-modal');
+  if (existing) existing.remove();
+
+  // Pre-populate from existing non-specials volumes
+  const volRanges = new Map();
+  for (const c of chapters) {
+    if (c.volume == null || c.volume === '' || c.volume === 'none' || c.volume === 'Specials') continue;
+    const num = parseFloat(c.number);
+    if (Number.isNaN(num) || !Number.isInteger(num)) continue;
+    if (!volRanges.has(c.volume)) volRanges.set(c.volume, { min: num, max: num });
+    else { const r = volRanges.get(c.volume); if (num < r.min) r.min = num; if (num > r.max) r.max = num; }
+  }
+  const initial = [...volRanges.entries()]
+    .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))
+    .map(([vol, { min, max }]) => ({ vol, from: min, to: max }));
+  if (!initial.length) initial.push({ vol: '', from: '', to: '' });
+
+  const INP = 'background:#0d1117;border:1px solid #30363d;color:#fff;padding:5px 8px;border-radius:6px;font-family:inherit;font-size:13px;width:100%';
+  const TH2 = 'padding:8px 14px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#888';
+
+  const modal = h(`<div id="vol-def-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.78);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:#1a1e24;border:1px solid #2e353f;border-radius:12px;width:100%;max-width:520px;display:flex;flex-direction:column;box-shadow:0 20px 40px rgba(0,0,0,0.8);margin:auto">
+      <div style="padding:16px 20px;border-bottom:1px solid #2e353f;display:flex;align-items:center;gap:12px;flex-shrink:0">
+        <h3 style="margin:0;font-size:16px;color:#fff">📋 Volume Definitions</h3>
+        <span class="muted" style="font-size:13px">${esc(seriesTitle)}</span>
+        <button class="btn sm icon" id="vd-close" style="margin-left:auto">✕</button>
+      </div>
+      <p class="muted" style="padding:10px 20px 0;font-size:13px;margin:0">Define which chapters belong to each volume. Saves override any existing auto-assigned boundaries.</p>
+      <div style="overflow-y:auto;max-height:50vh">
+        <table style="width:100%;border-collapse:collapse">
+          <thead style="position:sticky;top:0;background:#111518;z-index:1">
+            <tr>
+              <th style="${TH2};width:100px">Volume #</th>
+              <th style="${TH2}">From Ch.</th>
+              <th style="${TH2}">To Ch.</th>
+              <th style="${TH2};width:40px"></th>
+            </tr>
+          </thead>
+          <tbody id="vd-tbody"></tbody>
+        </table>
+      </div>
+      <div style="padding:10px 20px;border-top:1px solid #2e353f">
+        <button class="btn sm" id="vd-add">+ Add Row</button>
+      </div>
+      <div style="padding:14px 20px;border-top:1px solid #2e353f;display:flex;justify-content:flex-end;gap:10px;flex-shrink:0">
+        <button class="btn sm" id="vd-cancel">Cancel</button>
+        <button class="btn sm primary" id="vd-save">✓ Save Definitions</button>
+      </div>
+    </div>
+  </div>`);
+
+  const close = () => modal.remove();
+  modal.querySelector('#vd-close').onclick = close;
+  modal.querySelector('#vd-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  const tbody = modal.querySelector('#vd-tbody');
+
+  const addRow = ({ vol = '', from = '', to = '' } = {}) => {
+    const tr = h(`<tr style="border-bottom:1px solid #1e242c">
+      <td style="padding:7px 14px"><input type="text" class="vd-vol" value="${esc(String(vol))}" placeholder="e.g. 1" style="${INP}"></td>
+      <td style="padding:7px 14px"><input type="number" class="vd-from" value="${esc(String(from))}" placeholder="e.g. 1" style="${INP}"></td>
+      <td style="padding:7px 14px"><input type="number" class="vd-to" value="${esc(String(to))}" placeholder="e.g. 8" style="${INP}"></td>
+      <td style="padding:7px 14px"><button class="btn sm danger icon vd-del" title="Remove row">✕</button></td>
+    </tr>`);
+    tr.querySelector('.vd-del').onclick = () => tr.remove();
+    tbody.appendChild(tr);
+  };
+
+  for (const row of initial) addRow(row);
+  modal.querySelector('#vd-add').onclick = () => addRow();
+
+  modal.querySelector('#vd-save').onclick = async () => {
+    const rows = [...tbody.querySelectorAll('tr')];
+    const volumes = [];
+    for (const tr of rows) {
+      const vol = tr.querySelector('.vd-vol').value.trim();
+      const from = parseFloat(tr.querySelector('.vd-from').value);
+      const to = parseFloat(tr.querySelector('.vd-to').value);
+      if (!vol || Number.isNaN(from) || Number.isNaN(to)) continue;
+      volumes.push({ volume: vol, from, to });
+    }
+    if (!volumes.length) { toast('No valid volume definitions to save'); return; }
+    const saveBtn = modal.querySelector('#vd-save');
+    saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+    try {
+      const res = await api(`/series/${seriesId}/volume-definitions`, { method: 'POST', body: { volumes } });
+      toast(`✓ Saved ${res.changes || 0} chapter assignment${res.changes !== 1 ? 's' : ''}`);
+      close();
+      if (onApplied) onApplied();
+    } catch (e) {
+      toast('Failed: ' + e.message);
+      saveBtn.disabled = false; saveBtn.textContent = '✓ Save Definitions';
+    }
+  };
+
   document.body.appendChild(modal);
 }
 

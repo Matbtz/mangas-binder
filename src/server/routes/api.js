@@ -17,6 +17,7 @@ import {
 import { followSeries, refreshSeries } from '../../core/series-service.js';
 import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
+import { getVolumeStats, extrapolateVolumes } from '../../core/extrapolate.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning } from '../../download/worker.js';
@@ -455,7 +456,57 @@ export default async function apiRoutes(app) {
   app.post('/api/series/:id/extrapolate-volumes', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
-    return resolveVolumes(s.id);
+    const { chaptersPerVolume } = req.body || {};
+    return resolveVolumes(s.id, { chaptersPerVolume: chaptersPerVolume ? Number(chaptersPerVolume) : null });
+  });
+  app.get('/api/series/:id/extrapolate-preview', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const chsPerVolOverride = req.query.chaptersPerVolume ? Number(req.query.chaptersPerVolume) : null;
+    const chapters = listChaptersForSeries(s.id);
+    const volumeMap = {};
+    const unassigned = [];
+    for (const c of chapters) {
+      const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
+      if (hasRealVolume) {
+        (volumeMap[c.volume] ||= []).push(c.number);
+      } else if (c.state === 'imported' && c.volume) {
+        (volumeMap[c.volume] ||= []).push(c.number);
+      } else {
+        unassigned.push(c.number);
+      }
+    }
+    const stats = getVolumeStats(volumeMap);
+    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, s.total_volumes_hint || null, false, chsPerVolOverride);
+    const volumes = Object.entries(calculated)
+      .filter(([k]) => k !== 'Specials')
+      .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))
+      .map(([vol, chs]) => {
+        const sorted = [...chs].sort((a, b) => parseFloat(a) - parseFloat(b));
+        return { vol, count: chs.length, chapters: sorted };
+      });
+    return {
+      chsPerVol: chsPerVolOverride || stats.avgChsPerVol,
+      consecutiveVols: stats.lastConsecutive,
+      totalUnassigned: unassigned.length,
+      volumes,
+      overflow: overflow.length,
+    };
+  });
+  app.post('/api/series/:id/volume-definitions', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const { volumes = [] } = req.body || {};
+    if (!Array.isArray(volumes) || !volumes.length) return reply.code(400).send({ error: 'volumes array required' });
+    const db = getDb();
+    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
+    let totalChanges = 0;
+    for (const { volume, from, to } of volumes) {
+      if (!volume || from == null || to == null) continue;
+      const res = upd.run(String(volume), s.id, Number(from), Number(to));
+      totalChanges += res.changes;
+    }
+    return { ok: true, changes: totalChanges };
   });
   app.post('/api/series/:id/custom-volume', async (req, reply) => {
     const s = getSeries(Number(req.params.id));

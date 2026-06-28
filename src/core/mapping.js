@@ -17,7 +17,7 @@ import { getSetting } from './settings.js';
  *
  * @returns {{ assigned: number }}  count of chapters given an estimated volume
  */
-export function resolveVolumes(seriesId) {
+export function resolveVolumes(seriesId, { chaptersPerVolume = null } = {}) {
   if (!getSetting('extrapolateVolumes', true)) return { assigned: 0 };
 
   const series = getSeries(seriesId);
@@ -45,7 +45,7 @@ export function resolveVolumes(seriesId) {
 
   if (!unassigned.length) return { assigned: 0 };
 
-  const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null, false);
+  const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null, false, chaptersPerVolume);
 
   const upd = getDb().prepare(
     "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ? AND (state != 'imported' OR volume IS NULL OR volume = '')"

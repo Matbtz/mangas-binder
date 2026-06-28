@@ -35,14 +35,14 @@ export function getVolumeStats(volumeMap) {
  *
  * Returns { calculated, overflow }
  */
-export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHint = null, capAtHint = true) {
+export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHint = null, capAtHint = true, chsPerVolOverride = null) {
   if (!unassignedChapters.length) return { calculated: {}, overflow: [] };
 
   const knownVols = Object.entries(volumeMap)
     .filter(([k]) => k !== 'none')
     .sort(([a], [b]) => parseFloat(a) - parseFloat(b));
 
-  let chsPerVol = 10;
+  let chsPerVol = chsPerVolOverride || 10;
   const knownSet = new Set();
   const anchors = []; // [{ volNum, minCh, maxCh }]
 
@@ -64,7 +64,7 @@ export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHi
       }
       if (maxCh > -Infinity) anchors.push({ volNum: vNum, minCh, maxCh });
     }
-    chsPerVol = Math.round(totalChapters / knownVols.length) || 10;
+    if (!chsPerVolOverride) chsPerVol = Math.round(totalChapters / knownVols.length) || 10;
     anchors.sort((a, b) => a.maxCh - b.maxCh);
   }
 

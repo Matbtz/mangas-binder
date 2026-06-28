@@ -49,6 +49,24 @@ test('MangaKatana: parseSearchResults extracts series links, skips chapter links
   assert.ok(out.every(o => !/\/c\d/.test(o.url.replace(/\/manga\/[^/]+/, ''))), 'no chapter links among results');
 });
 
+test('MangaKatana: parseSearchResults handles direct series page redirect', () => {
+  const html = `
+    <html>
+      <head>
+        <link rel="canonical" href="https://mangakatana.com/manga/sakamoto-days.25740">
+        <title>Sakamoto Days | MangaKatana</title>
+      </head>
+      <body>
+        <h1 class="heading">Sakamoto Days</h1>
+        <script>var page_url = 'https://mangakatana.com/manga/sakamoto-days.25740';</script>
+      </body>
+    </html>`;
+  const out = parseSearchResults(html);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].title, 'Sakamoto Days');
+  assert.equal(out[0].url, 'https://mangakatana.com/manga/sakamoto-days.25740');
+});
+
 test('MangaKatana: parseChapterList maps chapter numbers to URLs', () => {
   const html = `
     <div class="chapters">

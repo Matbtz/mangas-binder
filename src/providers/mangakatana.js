@@ -63,8 +63,18 @@ async function fetchPage(url, { signal } = {}) {
   return { html: await res.text(), imageHeaders: { 'User-Agent': BROWSER_UA, Referer: `${SITE}/` } };
 }
 
-/** Parse search results into [{ url, title }]. */
 export function parseSearchResults(html) {
+  // If we were redirected directly to a series page, match it
+  const pageUrlMatch = html.match(/var\s+page_url\s*=\s*'([^']+)'/i) || html.match(/<link\s+rel="canonical"\s+href="([^"]+)"/i);
+  if (pageUrlMatch) {
+    const url = pageUrlMatch[1];
+    if (url.includes('/manga/')) {
+      const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+      const title = h1Match ? h1Match[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : '';
+      return [{ url, title }];
+    }
+  }
+
   const out = [];
   const seen = new Set();
   // Result anchors point at /manga/<slug>.<id> and carry the series title.
