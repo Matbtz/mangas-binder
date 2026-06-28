@@ -2305,8 +2305,7 @@ async function viewActivity(v) {
             if (confirm(`Remove package from bindery and delete file "${esc(c.fileName)}"?`)) {
               await api('/bindery/delete-package', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cbzPath: c.cbzPath })
+                body: { cbzPath: c.cbzPath }
               });
               toast('Removed package');
               load();
