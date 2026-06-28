@@ -87,7 +87,15 @@ export async function bindChapter(series, chapter, { coverUrl = null } = {}) {
  * @param {{ calculated?: boolean, coverUrl?: string, overwrite?: boolean }} opts
  */
 export async function bindVolume(series, volumeLabel, chapters, { calculated = false, coverUrl = null, overwrite = false } = {}) {
-  const nums = chapters.map(c => c.number);
+  // Restore pages for any chapter whose staging was cleared (e.g. `imported`
+  // chapters, whose pages only live inside an existing CBZ). Without this, a
+  // volume that mixes freshly-`downloaded` and already-`imported` chapters would
+  // crash the binder on the missing staging dir and never package.
+  const usable = [];
+  for (const c of chapters) {
+    if (await ensureChapterStaging(series, c)) usable.push(c);
+  }
+  const nums = usable.map(c => c.number);
   const localChapters = {};
   for (const n of nums) localChapters[n] = chapterStagingDir(series.id, n);
 
@@ -120,7 +128,9 @@ export async function ensureChapterStaging(series, chapter) {
     }
     if (/\.(cbz|zip)$/i.test(cbzPath)) {
       const buf = await readFile(cbzPath);
-      await extractToStaging(buf, series.id, chapter.number);
+      // Pull only this chapter's pages back out — cbz_path may be a multi-chapter
+      // volume CBZ, in which case extracting the whole thing would duplicate pages.
+      await extractToStaging(buf, series.id, chapter.number, { onlyChapter: chapter.number });
       return true;
     }
   } catch {}

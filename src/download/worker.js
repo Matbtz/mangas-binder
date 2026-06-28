@@ -246,7 +246,7 @@ async function cleanupStaging(seriesId, number) {
  *
  * @returns {Promise<number>} number of volumes imported
  */
-export async function packageCompleteVolumes(seriesId) {
+export async function packageCompleteVolumes(seriesId, { force = false } = {}) {
   const series = getSeries(seriesId);
   if (!series) return 0;
 
@@ -263,11 +263,12 @@ export async function packageCompleteVolumes(seriesId) {
     }
   }
 
-  const chapters = allChapters.filter(c => c.state === 'downloaded' || c.state === 'imported');
-
-  // Group chapters that have a numeric volume.
+  // Group EVERY chapter that has a numeric volume (including wanted/skipped) so a
+  // volume's completeness is judged against the whole volume, not just the parts
+  // already on disk — otherwise a volume could package while still missing a
+  // not-yet-downloaded chapter.
   const byVolume = new Map();
-  for (const c of chapters) {
+  for (const c of allChapters) {
     if (c.volume == null || c.volume === '') continue;
     if (Number.isNaN(parseFloat(c.volume))) continue;
     if (!byVolume.has(c.volume)) byVolume.set(c.volume, []);
@@ -276,6 +277,7 @@ export async function packageCompleteVolumes(seriesId) {
   if (!byVolume.size) return 0;
 
   const isComplete = series.status === 'completed' || series.status === 'cancelled';
+  const LOCAL_STATES = new Set(['imported', 'downloaded', 'bindery']);
   let coverMap = null;
   const provider = getProvider(series.provider);
 
@@ -283,19 +285,25 @@ export async function packageCompleteVolumes(seriesId) {
   for (const [volLabel, vchapters] of byVolume) {
     const v = parseFloat(volLabel);
     const closed = isComplete || v < maxVolume;          // a later volume exists
-    const ready = vchapters.every(c => c.state === 'downloaded' || c.state === 'imported');
-    const pending = vchapters.some(c => c.state === 'downloaded'); // something to import
-    if (!closed || !ready || !pending) continue;
+    // A volume is complete when every non-skipped chapter is local.
+    const nonSkipped = vchapters.filter(c => c.state !== 'skipped');
+    const ready = nonSkipped.length > 0 && nonSkipped.every(c => LOCAL_STATES.has(c.state));
+    // Auto mode only acts when there's something newly downloaded to import; force
+    // mode (after a manual volume edit) re-packages even fully-owned volumes so new
+    // chapter→volume boundaries are applied.
+    const hasNew = vchapters.some(c => c.state === 'downloaded');
+    if (!closed || !ready) continue;
+    if (!force && !hasNew) continue;
 
     if (coverMap === null && provider.getVolumeCovers) {
       coverMap = await provider.getVolumeCovers(series.provider_series_id).catch(() => new Map());
     }
     const coverUrl = coverMap?.get(String(v)) || coverMap?.get(volLabel) || null;
-    const calculated = vchapters.some(c => c.calculated);
+    const calculated = nonSkipped.some(c => c.calculated);
 
     try {
-      const res = await bindVolume(series, volLabel, vchapters, { coverUrl, calculated, overwrite: true });
-      for (const c of vchapters) {
+      const res = await bindVolume(series, volLabel, nonSkipped, { coverUrl, calculated, overwrite: true });
+      for (const c of nonSkipped) {
         setChapterState(c.id, 'bindery', { cbz_path: res.path });
       }
       importedVolumes++;

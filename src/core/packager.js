@@ -1,5 +1,5 @@
 import { ZipArchive } from 'archiver';
-import { createWriteStream } from 'fs';
+import { createWriteStream, existsSync } from 'fs';
 import { readdir, mkdir } from 'fs/promises';
 import path from 'path';
 
@@ -85,11 +85,17 @@ export async function buildEntries(chapters, localChapters, { comicInfoXml = nul
   const sortedChapters = [...chapters].sort((a, b) => parseFloat(a) - parseFloat(b));
   for (const chNum of sortedChapters) {
     const folderPath = localChapters[Object.keys(localChapters).find(k => parseFloat(k) === parseFloat(chNum))];
-    if (!folderPath) continue;
+    // Skip a chapter whose pages aren't on disk rather than throwing — a missing
+    // staging dir must never abort the whole volume bind.
+    if (!folderPath || !existsSync(folderPath)) continue;
 
-    const files = (await readdir(folderPath))
-      .filter(f => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
-      .sort();
+    let files;
+    try {
+      files = (await readdir(folderPath))
+        .filter(f => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
+        .sort();
+    } catch { continue; }
+    if (!files.length) continue;
     files.forEach((file, idx) => {
       const ext = path.extname(file);
       const archiveName = `ch${chapterKey(chNum)}_p${padNum(idx + 1, 3)}${ext}`;

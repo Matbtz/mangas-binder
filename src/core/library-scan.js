@@ -20,7 +20,6 @@ import { readZipDirectory } from './zip-read.js';
 import { config } from './config.js';
 import { listSeries, getSeries, listChaptersForSeries, setChapterState, upsertChapter } from './repo.js';
 import { sanitize } from './library.js';
-import { resolveVolumes } from './mapping.js';
 import { logHistory } from './db.js';
 import { getSetting } from './settings.js';
 

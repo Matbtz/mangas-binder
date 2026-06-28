@@ -807,6 +807,10 @@ export default async function apiRoutes(app) {
       for (const [filePath, dbChapters] of byCbz.entries()) {
         filesAudited++;
         const fileIssues = [];
+        // Structured list of chapters registered in the DB but absent from the CBZ.
+        // The fixer reads this instead of regex-parsing the human-readable strings,
+        // so reworded messages can't silently break `fix-missing`.
+        const missingChapters = [];
         let fileSize = 0;
         let fileExists = false;
 
@@ -837,6 +841,7 @@ export default async function apiRoutes(app) {
                 for (const num of dbChNums) {
                   if (!cbzChNums.has(num)) {
                     fileIssues.push(`Chapter ${num} is registered in database but missing inside the CBZ`);
+                    missingChapters.push(num);
                     issuesFound++;
                   }
                 }
@@ -862,7 +867,8 @@ export default async function apiRoutes(app) {
             basename: path.basename(filePath),
             size: fileSize,
             exists: fileExists,
-            issues: fileIssues
+            issues: fileIssues,
+            missingChapters
           });
         }
       }
@@ -920,19 +926,22 @@ export default async function apiRoutes(app) {
       const resetExtra = { cbz_path: null, staging_path: null, attempts: 0 };
 
       for (const f of s.files || []) {
-        for (const issue of f.issues || []) {
-          const match = issue.match(/^Chapter (\d+(?:\.\d+)?) is registered in database but missing inside the CBZ$/);
-          if (match) {
-            const chNum = match[1];
-            const row = db.prepare('SELECT id FROM chapters WHERE series_id = ? AND number = ?').get(s.seriesId, chNum);
-            if (row) {
-              try {
-                const sDir = chapterStagingDir(s.seriesId, chNum);
-                rmSync(sDir, { recursive: true, force: true });
-              } catch {}
-              setChapterState(row.id, defaultState, resetExtra);
-              fixedCount++;
-            }
+        // Prefer the structured list; fall back to parsing the display strings so a
+        // report written before this field existed still fixes correctly.
+        const missing = Array.isArray(f.missingChapters) && f.missingChapters.length
+          ? f.missingChapters
+          : (f.issues || [])
+              .map(issue => issue.match(/^Chapter (\d+(?:\.\d+)?) is registered in database but missing inside the CBZ$/)?.[1])
+              .filter(Boolean);
+        for (const chNum of missing) {
+          const row = db.prepare('SELECT id FROM chapters WHERE series_id = ? AND number = ?').get(s.seriesId, chNum);
+          if (row) {
+            try {
+              const sDir = chapterStagingDir(s.seriesId, chNum);
+              rmSync(sDir, { recursive: true, force: true });
+            } catch {}
+            setChapterState(row.id, defaultState, resetExtra);
+            fixedCount++;
           }
         }
       }
@@ -1497,39 +1506,13 @@ export default async function apiRoutes(app) {
   });
 }
 
+// Package every complete, closed volume after a manual edit. Delegates to the
+// single shared implementation in the worker (force mode re-packages fully-owned
+// volumes so new chapter→volume boundaries are applied).
 async function autoPackageCompleteVolumes(seriesId) {
-  const s = getSeries(seriesId);
-  if (!s) return;
-  const chapters = listChaptersForSeries(s.id);
-  const byVolume = new Map();
-  for (const c of chapters) {
-    if (c.volume == null || c.volume === '') continue;
-    if (!byVolume.has(c.volume)) byVolume.set(c.volume, []);
-    byVolume.get(c.volume).push(c);
-  }
-
-  const isSeriesClosed = s.status === 'completed' || s.status === 'cancelled';
-  let maxVolNum = -Infinity;
-  for (const vk of byVolume.keys()) {
-    const v = parseFloat(vk);
-    if (!Number.isNaN(v)) maxVolNum = Math.max(maxVolNum, v);
-  }
-
-  const LOCAL_STATES = new Set(['imported', 'downloaded', 'bindery']);
-  for (const [volLabel, vchapters] of byVolume) {
-    const v = parseFloat(volLabel);
-    const isClosed = isSeriesClosed || Number.isNaN(v) || v < maxVolNum;
-
-    // A volume is complete if all non-skipped chapters are local
-    const nonSkipped = vchapters.filter(c => c.state !== 'skipped');
-    const allReady = nonSkipped.length > 0 && nonSkipped.every(c => LOCAL_STATES.has(c.state));
-
-    if (allReady && isClosed) {
-      try {
-        await packageSingleVolume(s.id, volLabel);
-      } catch (err) {
-        console.error(`Failed to auto-package Vol ${volLabel} after override:`, err);
-      }
-    }
+  try {
+    await packageCompleteVolumes(seriesId, { force: true });
+  } catch (err) {
+    console.error(`Failed to auto-package volumes for series ${seriesId}:`, err);
   }
 }
