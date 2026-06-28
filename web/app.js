@@ -1619,6 +1619,14 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
 
   for (const row of initial) addRow(row);
   modal.querySelector('#vd-add').onclick = () => addRow();
+  
+  const clearBtn = h('<button class="btn sm" id="vd-clear" style="border-color:#ff6b6b;color:#ff6b6b;margin-left:10px" title="Clear all rows and reset to auto-extrapolation">🗑 Clear All</button>');
+  clearBtn.onclick = () => {
+    if (confirm('Clear all manually defined volume definitions and reset this series to automatic extrapolation?')) {
+      tbody.innerHTML = '';
+    }
+  };
+  modal.querySelector('#vd-add').parentNode.appendChild(clearBtn);
 
   modal.querySelector('#vd-save').onclick = async () => {
     const rows = [...tbody.querySelectorAll('tr')];

@@ -661,14 +661,14 @@ export default async function apiRoutes(app) {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const { volumes = [] } = req.body || {};
-    if (!Array.isArray(volumes) || !volumes.length) return reply.code(400).send({ error: 'volumes array required' });
+    if (!Array.isArray(volumes)) return reply.code(400).send({ error: 'volumes array required' });
     const db = getDb();
     
-    // Clear old non-imported volume assignments (excluding Specials) first
+    // Clear old volume assignments (excluding Specials) first
     db.prepare(`
       UPDATE chapters 
       SET volume = NULL, calculated = 0, updated_at = datetime('now')
-      WHERE series_id = ? AND state != 'imported' AND (volume != 'Specials' OR volume IS NULL)
+      WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL)
     `).run(s.id);
 
     const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");

@@ -64,7 +64,11 @@ export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHi
       }
       if (maxCh > -Infinity) anchors.push({ volNum: vNum, minCh, maxCh });
     }
-    if (!chsPerVolOverride) chsPerVol = Math.round(totalChapters / knownVols.length) || 10;
+    if (!chsPerVolOverride) {
+      const stats = getVolumeStats(volumeMap);
+      chsPerVol = stats.avgChsPerVol || 10;
+      if (chsPerVol < 3) chsPerVol = 10; // safety clamp to prevent sparse/erroneous metadata from causing 1-chapter volumes
+    }
     anchors.sort((a, b) => a.maxCh - b.maxCh);
   }
 
