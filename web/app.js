@@ -407,20 +407,27 @@ async function viewLibrary(v) {
           <div class="muted" style="font-size:12px">${esc(idLabel)}</div>
         </div>`);
         if (provider) {
-          const actions = h('<div class="row" style="margin-top:8px"></div>');
+          const actions = h('<div class="row" style="margin-top:8px;gap:8px;align-items:center"></div>');
           const pk = h(`<select class="pk"><option value="chapter">per ${comic?'issue':'chapter'}</option><option value="volume">${comic?'collected':'volume'} CBZ</option></select>`);
           pk.value = comic ? 'chapter' : 'volume';
-          const mm = h('<select class="mm"><option value="all">all</option><option value="future">future only</option></select>');
+          const mm = h('<select class="mm"><option value="all">all</option><option value="future">future only</option><option value="from">from vol.</option><option value="none">none</option></select>');
+          const mv = h('<input class="mv" type="number" min="1" placeholder="vol #" style="width:4.5em;display:none;background:var(--bg2);border:1px solid var(--line);color:#fff;padding:4px 8px;border-radius:6px;font-family:inherit;font-size:13px">');
+          mm.onchange = () => { mv.style.display = mm.value === 'from' ? '' : 'none'; };
           const btn = h('<button class="btn primary sm">Follow</button>');
           btn.onclick = async () => {
             btn.disabled = true; btn.textContent = 'Following…';
             try {
-              await api('/series', { method:'POST', body:{ provider, providerSeriesId: providerId, packagingMode: pk.value, monitorMode: mm.value } });
+              const body = { provider, providerSeriesId: providerId, packagingMode: pk.value, monitorMode: mm.value };
+              if (mm.value === 'from') {
+                const vol = parseFloat(mv.value);
+                body.monitorFromVolume = Number.isNaN(vol) ? 1 : vol;
+              }
+              await api('/series', { method:'POST', body });
               toast('Following ' + u.title);
               route();
             } catch(e) { toast(e.message); btn.disabled = false; btn.textContent = 'Follow'; }
           };
-          actions.append(pk, mm, btn);
+          actions.append(pk, mm, mv, btn);
           card.appendChild(actions);
         }
         grid2.appendChild(card);
@@ -1759,18 +1766,31 @@ async function viewAdd(v) {
       if (!rs.length) { results.innerHTML = '<p class="muted">No results.</p>'; return; }
       for (const r of rs) {
         const meta = [r.publisher, r.year, r.issueCount ? `${r.issueCount} issues` : null].filter(Boolean).join(' · ');
-        const row = h(`<div class="card row"><div style="flex:1"><strong>${esc(r.title)}</strong>${meta?`<div class="muted" style="font-size:12px">${esc(meta)}</div>`:''}</div>
+        const row = h(`<div class="card row" style="align-items:center;gap:8px"><div style="flex:1"><strong>${esc(r.title)}</strong>${meta?`<div class="muted" style="font-size:12px">${esc(meta)}</div>`:''}</div>
           <select class="pk"><option value="chapter">per ${unit}</option><option value="volume">${coll} CBZ</option></select>
-          <select class="mm"><option value="all">all</option><option value="future">future only</option></select></div>`);
+          <select class="mm"><option value="all">all</option><option value="future">future only</option><option value="from">from vol.</option><option value="none">none</option></select>
+          <input class="mv" type="number" min="1" placeholder="vol #" style="width:4.5em;display:none;background:var(--bg2);border:1px solid var(--line);color:#fff;padding:4px 8px;border-radius:6px;font-family:inherit;font-size:13px"></div>`);
         // Manga default to volume packaging; comics default to per-issue.
         $('.pk', row).value = comic ? 'chapter' : 'volume';
+        const mm = $('.mm', row);
+        const mv = $('.mv', row);
+        mm.onchange = () => { mv.style.display = mm.value === 'from' ? '' : 'none'; };
         const add = h('<button class="btn primary">Follow</button>');
         add.onclick = async () => {
           add.disabled = true; add.textContent = 'Following…';
-          try { await api('/series',{method:'POST',body:{provider,providerSeriesId:r.id,packagingMode:$('.pk',row).value,monitorMode:$('.mm',row).value}}); toast('Following '+r.title); navigate('#/library'); }
-          catch(e){ toast(e.message); add.disabled=false; add.textContent='Follow'; }
+          try {
+            const body = { provider, providerSeriesId: r.id, packagingMode: $('.pk', row).value, monitorMode: mm.value };
+            if (mm.value === 'from') {
+              const vol = parseFloat(mv.value);
+              body.monitorFromVolume = Number.isNaN(vol) ? 1 : vol;
+            }
+            await api('/series', { method:'POST', body });
+            toast('Following ' + r.title);
+            navigate('#/library');
+          } catch(e) { toast(e.message); add.disabled = false; add.textContent = 'Follow'; }
         };
-        row.appendChild(add); results.appendChild(row);
+        row.appendChild(add);
+        results.appendChild(row);
       }
     } catch (e) { results.innerHTML = `<div class="card"><span class="pill err">error</span> ${esc(e.message)}</div>`; }
   };
