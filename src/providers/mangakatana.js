@@ -130,11 +130,69 @@ export function parseChapterImages(html) {
   return [...new Set(imgs)];
 }
 
-/** Search MangaKatana by title. Returns [{ url, title }]. */
+/** Search MangaKatana by title or URL. Returns [{ url, title }]. */
 export async function searchSeries(title, { signal } = {}) {
+  if (/^https?:\/\/mangakatana\.com\/manga\/[^/]+/i.test(title)) {
+    const { html } = await fetchPage(title, { signal });
+    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    const resolvedTitle = h1Match ? h1Match[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : 'MangaKatana Series';
+    return [{ url: title, title: resolvedTitle }];
+  }
   const url = `${SITE}/?search=${encodeURIComponent(title)}&search_by=book_name`;
   const { html } = await fetchPage(url, { signal });
   return parseSearchResults(html);
+}
+
+/** Get series details from a MangaKatana series URL. */
+export async function getSeries(idOrUrl) {
+  const url = idOrUrl.startsWith('http') ? idOrUrl : `${SITE}${idOrUrl}`;
+  const { html } = await fetchPage(url);
+  const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  const title = h1Match ? h1Match[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : 'MangaKatana Series';
+
+  const coverMatch = html.match(/<div class="cover">[^]*?<img[^>]+src="([^"]+)"/i);
+  const coverPath = coverMatch ? coverMatch[1] : null;
+
+  const summaryMatch = html.match(/<div class="summary">[^]*?<p>([\s\S]*?)<\/p>/i);
+  const description = summaryMatch ? summaryMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+
+  return {
+    title: title || 'MangaKatana Series',
+    authors: [],
+    artists: [],
+    genres: [],
+    description: description || '',
+    year: null,
+    status: 'ongoing',
+    coverPath,
+  };
+}
+
+/** List chapters for a series URL. */
+export async function listChapters(idOrUrl, { lang = 'en' } = {}) {
+  const url = idOrUrl.startsWith('http') ? idOrUrl : `${SITE}${idOrUrl}`;
+  const { html } = await fetchPage(url);
+  const chaptersMap = parseChapterList(html);
+  
+  const out = [];
+  for (const [num, chUrl] of chaptersMap.entries()) {
+    out.push({
+      id: chUrl,
+      number: num,
+      volume: null,
+      title: `Chapter ${num}`,
+      lang,
+    });
+  }
+  return out;
+}
+
+/** Get pages for a specific chapter URL. */
+export async function getChapterPages(chapterUrl, { signal } = {}) {
+  const { html, imageHeaders } = await fetchPage(chapterUrl, { signal });
+  const images = parseChapterImages(html);
+  if (!images.length) throw new Error(`MangaKatana returned no page images`);
+  return images.map(url => ({ url, headers: imageHeaders }));
 }
 
 /**
@@ -193,17 +251,15 @@ export async function testConnection() {
   return { message: flareEnabled() ? 'Reached MangaKatana via FlareSolverr.' : 'Reached MangaKatana (no FlareSolverr — may hit Cloudflare).' };
 }
 
-/**
- * Fallback page-source provider. `pageFallback` keeps it out of the normal
- * download/archive selection — it's only invoked by the worker when the primary
- * source fails.
- */
 export const provider = {
   name: 'mangakatana',
   label: 'MangaKatana',
   mediaType: 'manga',
-  capabilities: { download: false, metadata: false, archive: false, pageFallback: true },
+  capabilities: { download: true, metadata: true, archive: false, pageFallback: true },
   searchSeries,
+  getSeries,
+  listChapters,
+  getChapterPages,
   findChapterPages,
   testConnection,
 };

@@ -3,6 +3,7 @@ import { provider as mangakatana } from '../providers/mangakatana.js';
 import { titlesMatch, normTitle } from '../core/library.js';
 import { isProviderEnabled, getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
+import { updateSeries } from '../core/repo.js';
 
 /**
  * Page-image fallback: when the primary download provider (MangaDex@Home) can't
@@ -50,6 +51,18 @@ export async function resolveSeriesUrl(series, { signal } = {}) {
   }
   _cache.set(series.id, { url: best.url, ts: Date.now() });
   logHistory('fallback.resolved', { seriesId: series.id, message: `MangaKatana: ${best.title} → ${best.url}` });
+
+  // Save resolved URL to database so it populates the external link field automatically
+  if (!series.externalLinks || !series.externalLinks.mangakatana) {
+    const currentLinks = series.externalLinks || {};
+    currentLinks.mangakatana = best.url;
+    try {
+      updateSeries(series.id, { externalLinks: currentLinks });
+    } catch (dbErr) {
+      logHistory('fallback.save_error', { seriesId: series.id, message: `Failed to save MangaKatana URL to external links: ${dbErr.message}` });
+    }
+  }
+
   return best.url;
 }
 
