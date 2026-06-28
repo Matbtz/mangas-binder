@@ -122,35 +122,39 @@ export async function readCbzInfo(filePath) {
   let error = null;
   let pageCount = 0;
 
-  try {
-    const { names, xml } = await readArchiveBits(filePath);
-    if (!isEpub) {
-      isEpub = names.some(n => {
-        const l = n.toLowerCase();
-        return l === 'meta-inf/container.xml' || l === 'mimetype';
-      });
-    }
-    if (xml) {
-      series = tagText(xml, 'Series');
-      publisher = tagText(xml, 'Publisher');
-      genre = tagText(xml, 'Genre');
-      manga = tagText(xml, 'Manga');
-      const web = tagText(xml, 'Web');
-      mangadexId = web?.match(WEB_ID_RE)?.[1] || null;
-      comicvineId = web?.match(COMICVINE_ID_RE)?.[1] || null;
-    }
-    const found = new Set();
-    for (const n of names) {
-      const m = path.basename(n).match(CBZ_PAGE_RE);
-      if (m) found.add(String(parseFloat(m[1])));
-      const ext = path.extname(n).toLowerCase();
-      if (IMAGE_EXTS.has(ext)) {
-        pageCount++;
+  if (st && st.size > 2 * 1024 * 1024 * 1024) {
+    error = `File size (${st.size}) is greater than 2 GiB`;
+  } else {
+    try {
+      const { names, xml } = await readArchiveBits(filePath);
+      if (!isEpub) {
+        isEpub = names.some(n => {
+          const l = n.toLowerCase();
+          return l === 'meta-inf/container.xml' || l === 'mimetype';
+        });
       }
+      if (xml) {
+        series = tagText(xml, 'Series');
+        publisher = tagText(xml, 'Publisher');
+        genre = tagText(xml, 'Genre');
+        manga = tagText(xml, 'Manga');
+        const web = tagText(xml, 'Web');
+        mangadexId = web?.match(WEB_ID_RE)?.[1] || null;
+        comicvineId = web?.match(COMICVINE_ID_RE)?.[1] || null;
+      }
+      const found = new Set();
+      for (const n of names) {
+        const m = path.basename(n).match(CBZ_PAGE_RE);
+        if (m) found.add(String(parseFloat(m[1])));
+        const ext = path.extname(n).toLowerCase();
+        if (IMAGE_EXTS.has(ext)) {
+          pageCount++;
+        }
+      }
+      chapters = [...found];
+    } catch (err) {
+      error = err.message || String(err);
     }
-    chapters = [...found];
-  } catch (err) {
-    error = err.message || String(err);
   }
 
   const base = path.basename(filePath);

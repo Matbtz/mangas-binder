@@ -879,6 +879,54 @@ export default async function apiRoutes(app) {
       return reply.code(500).send({ error: 'Failed to read integrity report' });
     }
   });
+
+  app.post('/api/audit/fix-missing', async (req, reply) => {
+    const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
+    if (!existsSync(reportPath)) {
+      return { ok: false, error: 'No integrity report found. Run audit first.' };
+    }
+
+    let report;
+    try {
+      report = JSON.parse(readFileSync(reportPath, 'utf-8'));
+    } catch {
+      return reply.code(500).send({ error: 'Failed to read integrity report' });
+    }
+
+    const db = getDb();
+    let fixedCount = 0;
+
+    for (const s of report.results || []) {
+      const seriesObj = getSeries(s.seriesId);
+      if (!seriesObj) continue;
+      const defaultState = seriesObj.monitor_mode === 'none' ? 'skipped' : 'wanted';
+      const resetExtra = defaultState === 'wanted' ? { cbz_path: null, staging_path: null, attempts: 0 } : { cbz_path: null, staging_path: null };
+
+      for (const f of s.files || []) {
+        for (const issue of f.issues || []) {
+          const match = issue.match(/^Chapter (\d+(?:\.\d+)?) is registered in database but missing inside the CBZ$/);
+          if (match) {
+            const chNum = match[1];
+            const row = db.prepare('SELECT id FROM chapters WHERE series_id = ? AND number = ?').get(s.seriesId, chNum);
+            if (row) {
+              setChapterState(row.id, defaultState, resetExtra);
+              fixedCount++;
+            }
+          }
+        }
+      }
+    }
+
+    try {
+      if (existsSync(reportPath)) unlinkSync(reportPath);
+    } catch {}
+
+    if (fixedCount > 0) {
+      runOnce().catch(() => {});
+    }
+
+    return { ok: true, fixedCount };
+  });
   // --- Providers ---
   app.get('/api/providers', async () => {
     const states = Object.fromEntries(getProviderStates().map(p => [p.name, p]));

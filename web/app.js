@@ -1917,6 +1917,7 @@ function openBinderyAuditModal() {
         <p class="muted">Running integrity audit on bindery files…</p>
       </div>
       <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn sm" id="ba-fix" style="display:none;background:#238636;border-color:#238636;color:#fff">🔧 Fix Missing Chapters</button>
         <button class="btn sm" id="ba-copy" style="display:none">📋 Copy Report</button>
         <button class="btn sm primary" id="ba-cancel">Close</button>
       </div>
@@ -1925,6 +1926,7 @@ function openBinderyAuditModal() {
 
   const baBody = modal.querySelector('#ba-body');
   const copyBtn = modal.querySelector('#ba-copy');
+  const fixBtn = modal.querySelector('#ba-fix');
   const close = () => modal.remove();
   modal.querySelector('#ba-close').onclick = close;
   modal.querySelector('#ba-cancel').onclick = close;
@@ -1938,6 +1940,34 @@ function openBinderyAuditModal() {
     document.execCommand('copy');
     document.body.removeChild(temp);
     toast('Copied report to clipboard!');
+  };
+
+  fixBtn.onclick = async () => {
+    if (confirm('Are you sure you want to reset all missing chapters back to wanted state? They will be queued for redownload and the broken packages will be rebuilt.')) {
+      fixBtn.disabled = true;
+      fixBtn.textContent = 'Fixing…';
+      try {
+        const fixRes = await api('/audit/fix-missing', { method: 'POST' });
+        toast(`Successfully queued ${fixRes.fixedCount} chapters for redownload.`);
+        close();
+      } catch (e) {
+        toast('Failed to fix: ' + e.message);
+        fixBtn.disabled = false;
+        fixBtn.textContent = '🔧 Fix Missing Chapters';
+      }
+    }
+  };
+
+  const hasFixableIssues = (res) => {
+    if (!res.results) return false;
+    for (const s of res.results) {
+      for (const f of s.files) {
+        for (const issue of f.issues) {
+          if (issue.includes('missing inside the CBZ')) return true;
+        }
+      }
+    }
+    return false;
   };
 
   (async () => {
@@ -1987,6 +2017,9 @@ function openBinderyAuditModal() {
       
       reportText = lines.join('\n');
       copyBtn.style.display = 'inline-block';
+      if (hasFixableIssues(res)) {
+        fixBtn.style.display = 'inline-block';
+      }
     } catch (e) {
       baBody.innerHTML = `<p style="color:var(--warn)">Failed to run integrity audit: ${esc(e.message)}</p>`;
     }
@@ -2593,14 +2626,36 @@ async function viewSettings(v) {
   ibtnRow.appendChild(ilastRun);
   iform.appendChild(ibtnRow);
 
-  const iresults = h('<div style="display:none;flex-direction:column;gap:10px;margin-top:10px"></div>');
-  const itext = h('<textarea readonly style="width:100%;height:250px;background:#0d1117;border:1px solid #30363d;color:#fff;padding:10px;border-radius:8px;font-family:monospace;font-size:12px"></textarea>');
-  const icopy = h('<button class="btn sm" style="align-self:flex-start">📋 Copy to Clipboard</button>');
-  
-  icopy.onclick = () => {
-    itext.select();
-    document.execCommand('copy');
-    toast('Copied to clipboard!');
+  const ifixBtn = h('<button class="btn sm primary" style="align-self:flex-start;display:none;background:#238636;border-color:#238636;margin-right:10px">🔧 Fix Missing Chapters (Queue Redownload)</button>');
+
+  ifixBtn.onclick = async () => {
+    if (confirm('Are you sure you want to reset all missing chapters back to wanted state? They will be queued for redownload and the broken packages will be rebuilt.')) {
+      ifixBtn.disabled = true;
+      ifixBtn.textContent = 'Fixing…';
+      try {
+        const res = await api('/audit/fix-missing', { method: 'POST' });
+        toast(`Successfully queued ${res.fixedCount} chapters for redownload.`);
+        itext.value = 'Issues queued for fix. Re-run integrity audit to update report.';
+        ifixBtn.style.display = 'none';
+        ilastRun.textContent = 'Last run: Never';
+      } catch (e) {
+        toast('Failed to fix: ' + e.message);
+        ifixBtn.disabled = false;
+        ifixBtn.textContent = '🔧 Fix Missing Chapters (Queue Redownload)';
+      }
+    }
+  };
+
+  const hasFixableIssues = (res) => {
+    if (!res.results) return false;
+    for (const s of res.results) {
+      for (const f of s.files) {
+        for (const issue of f.issues) {
+          if (issue.includes('missing inside the CBZ')) return true;
+        }
+      }
+    }
+    return false;
   };
 
   const formatIntegrityLines = (res) => {
@@ -2636,6 +2691,7 @@ async function viewSettings(v) {
         const lines = formatIntegrityLines(res);
         itext.value = lines.join('\n');
         iresults.style.display = 'flex';
+        ifixBtn.style.display = hasFixableIssues(res) ? 'inline-block' : 'none';
       } else {
         ilastRun.textContent = 'Last run: Never';
       }
@@ -2654,6 +2710,7 @@ async function viewSettings(v) {
       const lines = formatIntegrityLines(res);
       itext.value = lines.join('\n');
       iresults.style.display = 'flex';
+      ifixBtn.style.display = hasFixableIssues(res) ? 'inline-block' : 'none';
       toast('Integrity audit completed successfully');
     } catch (e) {
       toast('Failed: ' + e.message);
@@ -2664,7 +2721,10 @@ async function viewSettings(v) {
   };
 
   iresults.appendChild(itext);
-  iresults.appendChild(icopy);
+  const ibtnRow2 = h('<div style="display:flex;gap:10px"></div>');
+  ibtnRow2.appendChild(ifixBtn);
+  ibtnRow2.appendChild(icopy);
+  iresults.appendChild(ibtnRow2);
   iform.appendChild(iresults);
   ic.appendChild(iform);
   container.appendChild(ic);
