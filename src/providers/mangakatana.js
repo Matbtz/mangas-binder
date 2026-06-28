@@ -29,23 +29,70 @@ function throttleMs() {
   return Number.isFinite(v) && v > 0 ? v : 1000;
 }
 
+let _cachedFlareSession = null; // { cookieString, userAgent, ts }
+const SESSION_TTL_MS = 25 * 60 * 1000; // 25 minutes
+const _inflightFetches = new Map(); // url -> Promise<{ html, imageHeaders }>
+
+export function _clearMangaKatanaCache() {
+  _cachedFlareSession = null;
+  _inflightFetches.clear();
+  if (typeof _seriesChaptersCache !== 'undefined') _seriesChaptersCache.clear();
+}
+
 /**
- * Fetch a page's HTML. Through FlareSolverr when configured (to clear Cloudflare),
- * else a plain browser-like fetch. Returns the HTML plus the headers to reuse for
- * subsequent image-CDN requests from the same site.
+ * Fetch a page's HTML. Reuses FlareSolverr session cookies when available
+ * to bypass Cloudflare without re-running full headless browser solves.
+ * Deduplicates inflight requests for the exact same URL.
  * @returns {Promise<{ html: string, imageHeaders: object }>}
  */
 async function fetchPage(url, { signal } = {}) {
+  let promise = _inflightFetches.get(url);
+  if (!promise) {
+    promise = _doFetchPage(url, { signal }).finally(() => _inflightFetches.delete(url));
+    _inflightFetches.set(url, promise);
+  }
+  return promise;
+}
+
+async function _doFetchPage(url, { signal } = {}) {
   await throttle('mangakatana', throttleMs());
   if (flareEnabled()) {
+    if (_cachedFlareSession && (Date.now() - _cachedFlareSession.ts < SESSION_TTL_MS)) {
+      try {
+        const res = await fetchRetry(url, {
+          headers: {
+            'User-Agent': _cachedFlareSession.userAgent,
+            Cookie: _cachedFlareSession.cookieString,
+            Referer: `${SITE}/`,
+            Accept: 'text/html,application/xhtml+xml',
+          },
+          retries: 1,
+          signal,
+        });
+        if (res.ok) {
+          const html = await res.text();
+          const imageHeaders = {
+            'User-Agent': _cachedFlareSession.userAgent,
+            Referer: `${SITE}/`,
+          };
+          if (_cachedFlareSession.cookieString) imageHeaders.Cookie = _cachedFlareSession.cookieString;
+          return { html, imageHeaders };
+        }
+      } catch { /* session expired or blocked, fall through to solve */ }
+    }
+
     try {
       const { html, cookies, userAgent } = await flareSolve(url, { signal });
+      const cookieStr = cookieHeader(cookies);
+      const ua = userAgent || BROWSER_UA;
+      if (cookieStr) {
+        _cachedFlareSession = { cookieString: cookieStr, userAgent: ua, ts: Date.now() };
+      }
       const imageHeaders = {
-        'User-Agent': userAgent || BROWSER_UA,
+        'User-Agent': ua,
         Referer: `${SITE}/`,
       };
-      const cookie = cookieHeader(cookies);
-      if (cookie) imageHeaders.Cookie = cookie;
+      if (cookieStr) imageHeaders.Cookie = cookieStr;
       return { html, imageHeaders };
     } catch (solveErr) {
       logHistory('flaresolverr.error', { message: `FlareSolverr failed to solve ${url}: ${solveErr.message}. Falling back to direct fetch.` });
@@ -168,11 +215,24 @@ export async function getSeries(idOrUrl) {
   };
 }
 
+const _seriesChaptersCache = new Map(); // url -> { chaptersMap, ts }
+const CHAPTERS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+async function getCachedChaptersMap(idOrUrl, { signal } = {}) {
+  const url = idOrUrl.startsWith('http') ? idOrUrl : `${SITE}${idOrUrl}`;
+  const cached = _seriesChaptersCache.get(url);
+  if (cached && (Date.now() - cached.ts < CHAPTERS_CACHE_TTL_MS)) {
+    return cached.chaptersMap;
+  }
+  const { html } = await fetchPage(url, { signal });
+  const chaptersMap = parseChapterList(html);
+  _seriesChaptersCache.set(url, { chaptersMap, ts: Date.now() });
+  return chaptersMap;
+}
+
 /** List chapters for a series URL. */
 export async function listChapters(idOrUrl, { lang = 'en' } = {}) {
-  const url = idOrUrl.startsWith('http') ? idOrUrl : `${SITE}${idOrUrl}`;
-  const { html } = await fetchPage(url);
-  const chaptersMap = parseChapterList(html);
+  const chaptersMap = await getCachedChaptersMap(idOrUrl);
   
   const out = [];
   for (const [num, chUrl] of chaptersMap.entries()) {
@@ -233,8 +293,7 @@ export function resolveChapterUrl(chapters, chapterNumber) {
  * @returns {Promise<{ urls: Array<{url, headers}> }>}
  */
 export async function findChapterPages(seriesUrl, chapterNumber, { signal } = {}) {
-  const { html } = await fetchPage(seriesUrl, { signal });
-  const chapters = parseChapterList(html);
+  const chapters = await getCachedChaptersMap(seriesUrl, { signal });
   const chapterUrl = resolveChapterUrl(chapters, chapterNumber);
   if (!chapterUrl) throw new Error(`MangaKatana has no chapter ${chapterNumber} for this series`);
 
