@@ -145,10 +145,15 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
     const isManuallyDefined = main.calculated === 0 && main.volume !== null && main.volume !== '';
     const nextVolume = isManuallyDefined ? null : (c.volume ?? null);
 
+    // When the provider now supplies a real volume, record it as authoritative
+    // (clear the `calculated` estimate flag) so a later resolveVolumes() keeps it
+    // as an anchor instead of re-extrapolating it away. A null provider volume
+    // leaves the existing flag untouched.
     if (main.language !== lang) {
       // Language upgrade/change: reset download state so the new language version is grabbed
       db.prepare(`UPDATE chapters SET
           volume = COALESCE(?, volume),
+          calculated = CASE WHEN ? IS NOT NULL THEN 0 ELSE calculated END,
           provider_chapter_id = COALESCE(?, provider_chapter_id),
           pages = COALESCE(?, pages),
           title = COALESCE(?, title),
@@ -160,18 +165,19 @@ export function upsertChapter(seriesId, c, initialState = 'wanted') {
           staging_path = NULL,
           updated_at = datetime('now')
         WHERE id = ?`)
-        .run(nextVolume, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, lang, initialState, main.id);
+        .run(nextVolume, nextVolume, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, lang, initialState, main.id);
       return false;
     } else {
       // Normal update
       db.prepare(`UPDATE chapters SET
           volume = COALESCE(?, volume),
+          calculated = CASE WHEN ? IS NOT NULL THEN 0 ELSE calculated END,
           provider_chapter_id = COALESCE(?, provider_chapter_id),
           pages = COALESCE(?, pages),
           title = COALESCE(?, title),
           updated_at = datetime('now')
         WHERE id = ?`)
-        .run(nextVolume, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, main.id);
+        .run(nextVolume, nextVolume, c.providerChapterId ?? null, c.pages ?? null, c.title ?? null, main.id);
       return false;
     }
   }

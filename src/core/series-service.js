@@ -2,7 +2,7 @@ import { getProvider, defaultDownloadProvider } from '../providers/index.js';
 import { provider as mangaupdates, fetchChapterVolumeMap } from '../providers/mangaupdates.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
-  upsertChapter, chapterStateCounts,
+  upsertChapter, chapterStateCounts, listChaptersForSeries, bulkSetChapterState,
 } from './repo.js';
 import { isProviderEnabled, getSetting } from './settings.js';
 import { scanLibrary } from './library-scan.js';
@@ -185,5 +185,24 @@ export async function refreshSeries(seriesId) {
   // synchronously because it's a fast DB-only pass and ensures volume data is ready
   // before the library scan that follows.
   resolveVolumes(seriesId);
+
+  // monitor_mode='from': chapters that arrived without a volume were skipped above
+  // (the threshold can't be judged yet) and were never re-checked. Now that volumes
+  // are assigned (provider tags + MangaUpdates + extrapolation), promote any
+  // skipped chapter whose volume now meets the threshold, so late-tagged chapters
+  // aren't silently left undownloaded.
+  if (fromMode && fromVolume != null) {
+    const promote = [];
+    for (const c of listChaptersForSeries(seriesId)) {
+      if (c.state !== 'skipped') continue;
+      const v = (c.volume != null && c.volume !== '') ? parseFloat(c.volume) : null;
+      if (v != null && v >= fromVolume) promote.push(c.id);
+    }
+    if (promote.length) {
+      bulkSetChapterState(promote, 'wanted', { resetAttempts: true });
+      logHistory('series.threshold_promoted', { seriesId, message: `${promote.length} chapter(s) now ≥ vol ${fromVolume} queued` });
+    }
+  }
+
   return { added, counts: chapterStateCounts(seriesId) };
 }

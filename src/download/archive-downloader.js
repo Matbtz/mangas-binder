@@ -6,6 +6,9 @@ import { chapterStagingDir } from './downloader.js';
 
 const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) mangas-binder/2.0';
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
+// Page naming the binder writes into volume CBZs, e.g. ch0012_p003.jpg — lets us
+// pull a single chapter back out of a multi-chapter volume archive.
+const CBZ_PAGE_RE = /^ch(\d+(?:\.\d+)?)_p\d+/i;
 
 function pad(n, w = 3) { return String(n).padStart(w, '0'); }
 
@@ -49,16 +52,30 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
  * dir, renumbered in archive order. Exposed for offline testing.
  * @returns {Promise<{ dir, pageCount }>}
  */
-export async function extractToStaging(zipBuffer, seriesId, number) {
+export async function extractToStaging(zipBuffer, seriesId, number, { onlyChapter = null } = {}) {
   let zip;
   try {
     zip = new AdmZip(zipBuffer);
   } catch {
     throw new Error('Downloaded file is not a readable zip/CBZ archive');
   }
-  const images = zip.getEntries()
+  let images = zip.getEntries()
     .filter(e => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase()))
     .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+
+  // When restoring a single chapter out of one of our own packaged (possibly
+  // multi-chapter) volume CBZs, keep only that chapter's pages. Foreign archives
+  // that don't use the ch{NNNN}_p naming are extracted whole (single-issue case).
+  if (onlyChapter != null) {
+    const want = String(parseFloat(onlyChapter));
+    const isPackaged = images.some(e => CBZ_PAGE_RE.test(path.basename(e.entryName)));
+    if (isPackaged) {
+      images = images.filter(e => {
+        const m = path.basename(e.entryName).match(CBZ_PAGE_RE);
+        return m && String(parseFloat(m[1])) === want;
+      });
+    }
+  }
   if (!images.length) throw new Error('Archive contains no page images');
 
   const dir = chapterStagingDir(seriesId, number);
