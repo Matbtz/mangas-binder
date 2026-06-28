@@ -1,0 +1,20 @@
+
+> mangas-binder@2.0.0 start
+> node src/server/app.js
+
+(node:43389) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+{"level":30,"time":"2026-06-28 09:12:01","pid":43389,"hostname":"devbox","msg":"Server listening at http://127.0.0.1:8787"}
+{"level":30,"time":"2026-06-28 09:12:01","pid":43389,"hostname":"devbox","msg":"Server listening at http://192.168.0.2:8787"}
+{"level":30,"time":"2026-06-28 09:12:01","pid":43389,"hostname":"devbox","msg":"mangas-binder UI on http://localhost:8787  | output: /app/data/output"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-1","req":{"method":"GET","url":"/","host":"localhost:8787","remoteAddress":"127.0.0.1","remotePort":44062},"msg":"incoming request"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-1","res":{"statusCode":200},"responseTime":9.88780099991709,"msg":"request completed"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-2","req":{"method":"GET","url":"/app.js","host":"localhost:8787","remoteAddress":"127.0.0.1","remotePort":44062},"msg":"incoming request"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-2","res":{"statusCode":200},"responseTime":3.919643000001088,"msg":"request completed"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-3","req":{"method":"GET","url":"/api/series","host":"localhost:8787","remoteAddress":"127.0.0.1","remotePort":44062},"msg":"incoming request"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-3","res":{"statusCode":200},"responseTime":2.335507999872789,"msg":"request completed"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-4","req":{"method":"GET","url":"/api/health","host":"localhost:8787","remoteAddress":"127.0.0.1","remotePort":44066},"msg":"incoming request"}
+{"level":30,"time":"2026-06-28 09:12:07","pid":43389,"hostname":"devbox","reqId":"req-4","res":{"statusCode":200},"responseTime":1.563962999964133,"msg":"request completed"}
+{"level":30,"time":"2026-06-28 09:12:08","pid":43389,"hostname":"devbox","reqId":"req-5","req":{"method":"GET","url":"/api/library/untracked","host":"localhost:8787","remoteAddress":"127.0.0.1","remotePort":44066},"msg":"incoming request"}
+{"level":30,"time":"2026-06-28 09:12:08","pid":43389,"hostname":"devbox","reqId":"req-5","res":{"statusCode":200},"responseTime":3.3082040001172572,"msg":"request completed"}
+Killed

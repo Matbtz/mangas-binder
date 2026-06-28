@@ -2068,10 +2068,6 @@ async function viewActivity(v) {
   startPolling(load, 2000);
 }
 
-  await load();
-  startPolling(load, 2000);
-}
-
 // --- Settings --------------------------------------------------------------
 async function viewSettings(v) {
   const [settings, providers] = await Promise.all([api('/settings'), api('/providers')]);
@@ -2261,7 +2257,6 @@ async function viewSettings(v) {
     pc.appendChild(wrap);
   }
   container.appendChild(pc);
-}
 }
 
 function openPackageAuditModal({ title, allVols, alerts, onProceed }) {
