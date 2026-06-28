@@ -26,6 +26,7 @@ export function seriesView(row, { withCounts = true } = {}) {
     packagingMode: row.packaging_mode,
     totalVolumesHint: row.total_volumes_hint,
     lastScanAt: row.last_scan_at,
+    externalLinks: row.externalLinks || (row.external_links_json ? JSON.parse(row.external_links_json) : {}),
     counts: withCounts ? chapterStateCounts(row.id) : undefined,
   };
 }

@@ -106,13 +106,13 @@ export default async function apiRoutes(app) {
     try {
       const res = await fetch(s.cover_path, { headers });
       if (!res.ok) {
-        return reply.redirect(302, s.cover_path);
+        return reply.redirect(s.cover_path);
       }
       reply.header('Content-Type', res.headers.get('Content-Type') || 'image/jpeg');
       reply.header('Cache-Control', 'public, max-age=86400');
       return Buffer.from(await res.arrayBuffer());
     } catch (err) {
-      return reply.redirect(302, s.cover_path);
+      return reply.redirect(s.cover_path);
     }
   });
 
