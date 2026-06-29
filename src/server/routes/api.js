@@ -25,6 +25,7 @@ import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFli
 import { chapterStagingDir } from '../../download/downloader.js';
 import { notify } from '../../core/notify.js';
 import { bus } from '../../core/events.js';
+import { getProviderStats } from '../../core/provider-stats.js';
 import { seriesView, chapterView } from '../views.js';
 import { normTitle, titlesMatch } from '../../core/library.js';
 
@@ -560,7 +561,7 @@ export default async function apiRoutes(app) {
         }
       }
 
-      bindery.push({
+bindery.push({
         cbzPath: pkg.cbzPath,
         fileName: path.basename(pkg.cbzPath),
         seriesId: pkg.seriesId,
@@ -571,6 +572,7 @@ export default async function apiRoutes(app) {
         packagedAt: packagedAt || new Date().toISOString(),
         size: fileSize,
         realChapters,
+        scanQualities: pkg.rows.map(r => r.scan_quality).filter(q => q && q !== 'unknown'),
         dbChapters: pkg.rows.map(r => ({
           id: r.id,
           number: r.number,
@@ -957,10 +959,23 @@ export default async function apiRoutes(app) {
 
     return { ok: true, fixedCount };
   });
-  // --- Providers ---
+// --- Providers ---
   app.get('/api/providers', async () => {
     const states = Object.fromEntries(getProviderStates().map(p => [p.name, p]));
-    return describeProviders().map(p => ({ ...p, enabled: states[p.name]?.enabled ?? false, config: states[p.name]?.config ?? {} }));
+    return describeProviders().map(p => {
+      const stats = getProviderStats(p.name);
+      return {
+        ...p,
+        enabled: states[p.name]?.enabled ?? false,
+        config: states[p.name]?.config ?? {},
+        chaptersOk: stats.chaptersOk,
+        chaptersFailed: stats.chaptersFailed,
+        qualityScore: stats.qualityScore,
+        qualitySamples: stats.qualitySamples,
+        healthStatus: stats.healthStatus,
+        warnings: stats.warnings
+      };
+    });
   });
   app.patch('/api/providers/:name', async (req) => {
     const { name } = req.params;

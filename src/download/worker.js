@@ -117,12 +117,12 @@ export async function runOnce({ limit = 200 } = {}) {
           lastWrite = now;
           setChapterProgress(ch.id, done, total);
         };
-        let dir, pageCount;
+        let dir, pageCount, scanQuality, minPageWidth;
         if (useArchive) {
           ({ dir, pageCount } = await downloadArchiveChapter(activeProvider, series, ch, { signal: controller.signal })); // comics: whole CBZ/ZIP → pages
         } else {
           try {
-            ({ dir, pageCount } = await downloadChapter(dlProvider, ch, { concurrency, dataSaver, mangaId: series.provider_series_id, signal: controller.signal, onProgress })); // manga: page images
+            ({ dir, pageCount, scanQuality, minPageWidth } = await downloadChapter(dlProvider, ch, { concurrency, dataSaver, mangaId: series.provider_series_id, signal: controller.signal, onProgress })); // manga: page images
           } catch (primaryErr) {
             // Capture "not available in EN/FR" before deciding whether to fallback.
             if (primaryErr.notAvailable) primaryNotAvailable = true;
@@ -130,12 +130,17 @@ export async function runOnce({ limit = 200 } = {}) {
             // for the same chapter (manga only, when the fallback is enabled).
             if (isAbort(primaryErr) || series.media_type !== 'manga' || !fallbackEnabled()) throw primaryErr;
             logHistory('fallback.attempt', { seriesId: series.id, chapterId: ch.id, message: `MangaDex failed (${primaryErr.message}); trying MangaKatana` });
-            ({ dir, pageCount } = await downloadChapterViaFallback(series, ch, { signal: controller.signal, onProgress, concurrency }));
+            ({ dir, pageCount, scanQuality, minPageWidth } = await downloadChapterViaFallback(series, ch, { signal: controller.signal, onProgress, concurrency }));
             logHistory('fallback.success', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} via MangaKatana` });
             primaryNotAvailable = false; // fallback succeeded — chapter is available
           }
         }
         setChapterState(ch.id, 'downloaded', { staging_path: dir, pages: pageCount, prog_done: pageCount, prog_total: pageCount });
+        if (scanQuality) {
+          setChapterQuality(ch.id, scanQuality, minPageWidth);
+          recordChapterSuccess(activeProvider.name, scanQuality);
+        }
+
         debugLog('chapter.finished', { seriesId: series.id, chapterId: ch.id, message: `Chapter ${ch.number} download finished, staging path: ${dir}` });
         processed++;
 
@@ -174,7 +179,10 @@ export async function runOnce({ limit = 200 } = {}) {
             : String(err.message || err);
           setChapterState(ch.id, exhausted ? 'failed' : 'wanted', { error: errMsg, prog_done: null, prog_total: null });
           logHistory('chapter.failed', { seriesId: series.id, chapterId: ch.id, message: errMsg });
-          if (exhausted) notifyError(series.title, `Chapter ${ch.number}`, errMsg);
+          if (exhausted) {
+             notifyError(series.title, `Chapter ${ch.number}`, errMsg);
+             recordChapterFailure(activeProvider.name, errMsg);
+          }
         }
       } finally {
         clearTimeout(chapterTimer);

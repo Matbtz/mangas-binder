@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS chapters (
   title               TEXT DEFAULT '',
   language            TEXT NOT NULL DEFAULT 'en',
   published_at        TEXT,
-  pages               INTEGER,
+pages               INTEGER,
   state               TEXT NOT NULL DEFAULT 'wanted',  -- wanted|queued|downloading|downloaded|packaged|imported|failed|skipped
   staging_path        TEXT,
   cbz_path            TEXT,
@@ -61,12 +61,24 @@ CREATE TABLE IF NOT EXISTS chapters (
   prog_done           INTEGER,                         -- live download progress (pages fetched)
   prog_total          INTEGER,                         -- live download progress (total pages); null = indeterminate
   started_at          TEXT,                            -- when the current download attempt began
+  scan_quality        TEXT DEFAULT 'unknown',
+  min_page_width      INTEGER,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(series_id, number, language)
 );
 CREATE INDEX IF NOT EXISTS idx_chapters_series ON chapters(series_id);
 CREATE INDEX IF NOT EXISTS idx_chapters_state  ON chapters(state);
+
+CREATE TABLE IF NOT EXISTS provider_stats (
+  provider_name   TEXT PRIMARY KEY,
+  chapters_ok     INTEGER NOT NULL DEFAULT 0,
+  chapters_failed INTEGER NOT NULL DEFAULT 0,
+  quality_score   REAL NOT NULL DEFAULT -1,
+  quality_samples INTEGER NOT NULL DEFAULT 0,
+  warnings_json   TEXT NOT NULL DEFAULT '[]',
+  last_updated    TEXT
+);
 
 CREATE TABLE IF NOT EXISTS settings (
   key        TEXT PRIMARY KEY,
@@ -107,9 +119,11 @@ function migrate(database) {
   const chCols = database.prepare('PRAGMA table_info(chapters)').all().map(c => c.name);
   const addCh = (name, ddl) => { if (!chCols.includes(name)) database.exec(`ALTER TABLE chapters ADD COLUMN ${ddl}`); };
   addCh('download_url', 'download_url TEXT');
-  addCh('prog_done', 'prog_done INTEGER');
+addCh('prog_done', 'prog_done INTEGER');
   addCh('prog_total', 'prog_total INTEGER');
   addCh('started_at', 'started_at TEXT');
+  addCh('scan_quality', "scan_quality TEXT DEFAULT 'unknown'");
+  addCh('min_page_width', 'min_page_width INTEGER');
 }
 
 export function getDb() {
