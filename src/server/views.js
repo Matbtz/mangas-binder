@@ -51,6 +51,8 @@ export function chapterView(row) {
     publishedAt: row.published_at,
     progDone: row.prog_done ?? null,
     progTotal: row.prog_total ?? null,
-    startedAt: row.started_at ?? null,
+startedAt: row.started_at ?? null,
+    scanQuality: row.scan_quality ?? 'unknown',
+    minPageWidth: row.min_page_width ?? null,
   };
 }
