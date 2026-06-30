@@ -776,6 +776,13 @@ bindery.push({
     const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
 
     for (const s of seriesList) {
+      // Reconcile this series against the library on disk first: the chapters
+      // table reflects the series' current chapter distribution (from the last
+      // provider refresh), but a CBZ's cbz_path mapping is only updated by a
+      // library scan. Without this, chapters added/reassigned since the last
+      // scan show up as false "present in CBZ but not mapped" / stale entries
+      // even though the file already matches the current distribution.
+      await scanLibrary({ seriesId: s.id });
       const chapters = listChaptersForSeries(s.id);
       const byCbz = new Map();
       for (const c of chapters) {
