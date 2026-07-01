@@ -1,5 +1,6 @@
 import { getProvider, defaultDownloadProvider } from '../providers/index.js';
 import { provider as mangaupdates, fetchChapterVolumeMap } from '../providers/mangaupdates.js';
+import { provider as fandom } from '../providers/fandom.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
   upsertChapter, chapterStateCounts, listChaptersForSeries, bulkSetChapterState,
@@ -144,7 +145,7 @@ export async function refreshSeries(seriesId) {
       // blind override.)
       if (mu?.seriesId) {
         try {
-          const muVolMap = await fetchChapterVolumeMap(mu.seriesId);
+          const { map: muVolMap } = await fetchChapterVolumeMap(mu.seriesId, mu.seriesTitle || series.title);
           if (muVolMap.size > 0) {
             for (const ch of chapters) {
               const v = muVolMap.get(String(parseFloat(ch.number)));
@@ -249,6 +250,9 @@ export async function previewRefreshSeries(seriesId) {
         latestChapterHint: mu?.latestChapter ?? null,
         gapFilledChapters: 0,
         volumeOverrides: 0,
+        releasesChecked: 0,
+        releasesVerified: 0,
+        releasesRejectedMismatch: 0,
       };
 
       if (mu?.latestChapter && mu.latestChapter > 0) {
@@ -263,7 +267,10 @@ export async function previewRefreshSeries(seriesId) {
 
       if (mu?.seriesId) {
         try {
-          const muVolMap = await fetchChapterVolumeMap(mu.seriesId);
+          const { map: muVolMap, checked, verified, rejected } = await fetchChapterVolumeMap(mu.seriesId, mu.seriesTitle || series.title);
+          mangaUpdates.releasesChecked = checked;
+          mangaUpdates.releasesVerified = verified;
+          mangaUpdates.releasesRejectedMismatch = rejected;
           for (const ch of chapters) {
             const v = muVolMap.get(String(parseFloat(ch.number)));
             if (v && v !== ch.volume) { ch.volume = v; ch.volumeSource = 'mangaupdates'; mangaUpdates.volumeOverrides++; }
@@ -278,9 +285,36 @@ export async function previewRefreshSeries(seriesId) {
         latestChapterHint: mangaUpdates.latestChapterHint,
         gapFilledChapters: mangaUpdates.gapFilledChapters,
         volumeOverrides: mangaUpdates.volumeOverrides,
+        releasesRejectedAsMismatch: mangaUpdates.releasesRejectedMismatch,
       });
     } catch {
       providersConsulted.push({ name: 'MangaUpdates', role: 'total-volume hint, gap-fill & volume overrides', error: 'lookup failed' });
+    }
+  }
+
+  // Fandom Wiki: informational cross-check only, never applied to any chapter
+  // or to total_volumes_hint — see providers/fandom.js for why (unverified
+  // against live wiki markup; disabled by default). Purely lets a human
+  // compare it against MangaUpdates' hint in the preview report.
+  if (series.media_type === 'manga' && isProviderEnabled('fandom')) {
+    try {
+      const fw = await fandom.fetchVolumeInfo(series.title);
+      if (fw) {
+        providersConsulted.push({
+          name: 'Fandom Wiki',
+          role: 'cross-check only (informational — never applied)',
+          wikiUrl: fw.wikiUrl,
+          totalVolumes: fw.totalVolumes,
+          totalChapters: fw.totalChapters,
+          agreesWithMangaUpdates: mangaUpdates?.totalVolumesHint != null && fw.totalVolumes != null
+            ? fw.totalVolumes === mangaUpdates.totalVolumesHint
+            : null,
+        });
+      } else {
+        providersConsulted.push({ name: 'Fandom Wiki', role: 'cross-check only (informational — never applied)', error: 'no matching wiki/page found' });
+      }
+    } catch {
+      providersConsulted.push({ name: 'Fandom Wiki', role: 'cross-check only (informational — never applied)', error: 'lookup failed' });
     }
   }
 

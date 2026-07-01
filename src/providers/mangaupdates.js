@@ -1,3 +1,5 @@
+import { titlesMatch } from '../core/text-match.js';
+
 const BASE_URL = 'https://api.mangaupdates.com/v1';
 
 async function apiFetch(url, options = {}) {
@@ -12,28 +14,53 @@ async function apiFetch(url, options = {}) {
  * giving us precise official volume boundaries that the MangaDex aggregate often
  * lacks for English simulpub series (e.g. Dandadan, One Piece).
  *
- * Returns a Map: chapterNumber(string) → volumeNumber(string)
- * Only entries where both fields are valid numbers are included.
+ * IMPORTANT: this endpoint has been observed in production to *not* reliably
+ * filter by the series-id filter we send — three unrelated series (Sakamoto
+ * Days, One Piece, Dandadan) all got an identical "chapter 10 -> vol 3 /
+ * chapter 54 -> vol 2 / chapter 69 -> vol 3" override, which is only possible
+ * if the request-side filter was ignored and some generic/most-recent release
+ * feed came back instead. So every record is independently verified against
+ * the series id or title before being trusted, regardless of whether the
+ * request filter worked — anything that can't be verified is dropped rather
+ * than risking cross-series contamination of another series' volume data.
+ *
+ * Returns { map, checked, verified, rejected }: map is
+ * chapterNumber(string) → volumeNumber(string); the counters describe how
+ * many release records were inspected/trusted/discarded so a misbehaving
+ * endpoint is visible (e.g. in the refresh-preview report) instead of silent.
  *
  * We cap at 100 pages (10 000 releases) to avoid runaway calls on very long
  * series; in practice even One Piece fits comfortably within that limit.
  */
-export async function fetchChapterVolumeMap(seriesId) {
+export async function fetchChapterVolumeMap(seriesId, expectedTitle = null) {
   const map = new Map();
   const perPage = 100;
   let page = 1;
   let hasMore = true;
+  let checked = 0, verified = 0, rejected = 0;
 
   while (hasMore && page <= 100) {
     const data = await apiFetch(`${BASE_URL}/releases/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ series_id: Number(seriesId), per_page: perPage, page }),
+      body: JSON.stringify({ series: [Number(seriesId)], perpage: perPage, page }),
     });
 
     const results = data.results || [];
     for (const r of results) {
       const rec = r.record || {};
+      checked++;
+
+      // Never assume the request-side filter actually worked — only trust a
+      // record once we can positively confirm it's for *this* series, via
+      // whichever series-identifying field the response happens to include.
+      const recSeriesId = rec.series_id ?? rec.series?.id ?? rec.series?.series_id ?? null;
+      const recSeriesTitle = rec.series_name ?? rec.series?.name ?? rec.title ?? null;
+      const idMatches = recSeriesId != null && Number(recSeriesId) === Number(seriesId);
+      const titleMatches = !idMatches && !!expectedTitle && !!recSeriesTitle && titlesMatch(recSeriesTitle, expectedTitle);
+      if (!idMatches && !titleMatches) { rejected++; continue; }
+      verified++;
+
       const ch = rec.chapter ? String(parseFloat(rec.chapter)) : null;
       const vol = rec.volume ? String(parseFloat(rec.volume)) : null;
       if (ch && vol && !Number.isNaN(parseFloat(ch)) && !Number.isNaN(parseFloat(vol))) {
@@ -46,7 +73,7 @@ export async function fetchChapterVolumeMap(seriesId) {
     if (hasMore) await new Promise(r => setTimeout(r, 200));
   }
 
-  return map;
+  return { map, checked, verified, rejected };
 }
 
 export async function searchMangaUpdates(title) {

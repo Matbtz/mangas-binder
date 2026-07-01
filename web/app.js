@@ -1537,11 +1537,18 @@ async function openRefreshPreviewModal({ seriesId, seriesTitle, andScan = false,
   }
 
   copyBtn.disabled = false;
-  copyBtn.onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
-      toast('Copied preview JSON to clipboard');
-    } catch { toast('Clipboard access denied'); }
+  copyBtn.onclick = () => {
+    // navigator.clipboard needs a secure context (HTTPS/localhost) and is
+    // unavailable when this app is reached over plain HTTP on a LAN address
+    // (the common self-hosted setup) — use the same textarea+execCommand
+    // fallback the rest of the app already relies on for copy buttons.
+    const temp = document.createElement('textarea');
+    temp.value = JSON.stringify(report, null, 2);
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand('copy');
+    document.body.removeChild(temp);
+    toast('Copied preview JSON to clipboard');
   };
 
   applyBtn.disabled = false;

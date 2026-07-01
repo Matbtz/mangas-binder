@@ -47,8 +47,10 @@ export function ensureSeeded() {
   seedSetting('outputDir', config.outputDir);
 
   // Most providers default to enabled; ToS-sensitive scrapers used only as a
-  // fallback (MangaKatana) default to disabled so they're opt-in.
-  const DISABLED_BY_DEFAULT = new Set(['mangakatana']);
+  // fallback (MangaKatana) and unverified best-effort cross-checks (Fandom —
+  // wiki markup varies per franchise and this hasn't been tested against live
+  // data) default to disabled so they're opt-in.
+  const DISABLED_BY_DEFAULT = new Set(['mangakatana', 'fandom']);
   const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, ?)');
   for (const p of allProviders()) ins.run(p.name, DISABLED_BY_DEFAULT.has(p.name) ? 0 : 1);
 
