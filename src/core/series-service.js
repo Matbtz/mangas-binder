@@ -8,6 +8,9 @@ import { isProviderEnabled, getSetting } from './settings.js';
 import { scanLibrary } from './library-scan.js';
 import { resolveVolumes } from './mapping.js';
 import { logHistory } from './db.js';
+import { buildVolumeMapFromChapters, sanitizeVolumeMap, getVolumeStats, extrapolateVolumes } from './extrapolate.js';
+
+const PACKAGED_STATES = new Set(['imported', 'bindery']);
 
 /**
  * Follow a new series: fetch metadata from the source, optionally enrich the
@@ -206,4 +209,162 @@ export async function refreshSeries(seriesId) {
   }
 
   return { added, counts: chapterStateCounts(seriesId) };
+}
+
+/**
+ * Read-only dry run of refreshSeries(): fetches exactly the same provider data
+ * (primary provider + MangaUpdates hint/overrides) but never writes to the DB.
+ * Returns a report citing what each provider contributed and what applying a
+ * real refresh would change, so the "Refresh" UI can show it before committing.
+ *
+ * The estimated-volume section re-runs the same buildVolumeMapFromChapters /
+ * sanitizeVolumeMap / extrapolateVolumes pipeline resolveVolumes() uses, over a
+ * simulated merge of "current DB chapters" + "what the providers just returned"
+ * — same math, same anchor/noisy-tag handling, just never persisted.
+ */
+export async function previewRefreshSeries(seriesId) {
+  const series = getSeries(seriesId);
+  if (!series) throw new Error(`No series ${seriesId}`);
+  const provider = getProvider(series.provider);
+
+  const providersConsulted = [];
+
+  const chapters = await provider.listChapters(series.provider_series_id, { lang: series.language });
+  for (const ch of chapters) ch.volumeSource = (ch.volume != null && ch.volume !== '') ? series.provider : null;
+  providersConsulted.push({
+    name: provider.label || series.provider,
+    role: 'primary chapter list & volume tags',
+    chaptersReturned: chapters.length,
+    chaptersWithVolume: chapters.filter(c => c.volumeSource).length,
+  });
+
+  let mangaUpdates = null;
+  if (series.media_type === 'manga' && isProviderEnabled('mangaupdates')) {
+    try {
+      const mu = await mangaupdates.getTotalVolumesForTitle(series.title);
+      mangaUpdates = {
+        matchedTitle: mu?.seriesTitle ?? null,
+        mangaUpdatesId: mu?.seriesId ?? null,
+        totalVolumesHint: mu?.totalVolumes ?? null,
+        latestChapterHint: mu?.latestChapter ?? null,
+        gapFilledChapters: 0,
+        volumeOverrides: 0,
+      };
+
+      if (mu?.latestChapter && mu.latestChapter > 0) {
+        const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
+        for (let i = 1; i <= mu.latestChapter; i++) {
+          if (!knownNums.has(String(i))) {
+            chapters.push({ id: `mu-synth-${seriesId}-${i}`, number: String(i), volume: null, volumeSource: null, title: `Chapter ${i}`, lang: series.language });
+            mangaUpdates.gapFilledChapters++;
+          }
+        }
+      }
+
+      if (mu?.seriesId) {
+        try {
+          const muVolMap = await fetchChapterVolumeMap(mu.seriesId);
+          for (const ch of chapters) {
+            const v = muVolMap.get(String(parseFloat(ch.number)));
+            if (v && v !== ch.volume) { ch.volume = v; ch.volumeSource = 'mangaupdates'; mangaUpdates.volumeOverrides++; }
+          }
+        } catch { mangaUpdates.volumeMapError = true; }
+      }
+
+      providersConsulted.push({
+        name: 'MangaUpdates',
+        role: 'total-volume hint, gap-fill & volume overrides',
+        totalVolumesHint: mangaUpdates.totalVolumesHint,
+        latestChapterHint: mangaUpdates.latestChapterHint,
+        gapFilledChapters: mangaUpdates.gapFilledChapters,
+        volumeOverrides: mangaUpdates.volumeOverrides,
+      });
+    } catch {
+      providersConsulted.push({ name: 'MangaUpdates', role: 'total-volume hint, gap-fill & volume overrides', error: 'lookup failed' });
+    }
+  }
+
+  // --- Diff against what's currently in the DB ---
+  const existing = listChaptersForSeries(seriesId);
+  const existingByNumber = new Map(existing.map(c => [c.number, c]));
+  const newChapters = [];
+  const volumeChanges = [];
+  const protectedSkipped = [];
+
+  for (const ch of chapters) {
+    const cur = existingByNumber.get(String(ch.number));
+    if (!cur) {
+      if (ch.volume != null && ch.volume !== '') newChapters.push({ number: ch.number, volume: ch.volume, source: ch.volumeSource });
+      continue;
+    }
+    const curVol = cur.volume ?? null;
+    const candVol = ch.volume ?? null;
+    if (candVol == null || candVol === curVol) continue;
+    if (PACKAGED_STATES.has(cur.state)) {
+      protectedSkipped.push({ number: ch.number, dbVolume: curVol, providerVolume: candVol, source: ch.volumeSource });
+    } else {
+      volumeChanges.push({ number: ch.number, from: curVol, to: candVol, source: ch.volumeSource });
+    }
+  }
+
+  // --- Simulate resolveVolumes()'s extrapolation over the merged pool ---
+  const mergedByNumber = new Map(existing.map(c => [c.number, { ...c }]));
+  for (const ch of chapters) {
+    const key = String(ch.number);
+    const cur = mergedByNumber.get(key);
+    if (cur) {
+      if (!PACKAGED_STATES.has(cur.state) && ch.volume != null && ch.volume !== '') { cur.volume = ch.volume; cur.calculated = 0; }
+    } else {
+      mergedByNumber.set(key, { number: key, volume: ch.volume ?? null, calculated: 0, state: 'wanted' });
+    }
+  }
+  const mergedChapters = [...mergedByNumber.values()];
+  const { volumeMap, unassigned } = buildVolumeMapFromChapters(mergedChapters);
+  const { noisy } = sanitizeVolumeMap(volumeMap);
+  const stats = getVolumeStats(volumeMap);
+  const totalVolumesHint = series.total_volumes_hint || mangaUpdates?.totalVolumesHint || null;
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null);
+
+  const volumeBreakdown = {};
+  for (const [v, chs] of Object.entries(volumeMap)) {
+    if (v === 'none') continue;
+    volumeBreakdown[v] = (volumeBreakdown[v] || 0) + chs.length;
+  }
+  for (const [v, chs] of Object.entries(calculated)) {
+    volumeBreakdown[v] = (volumeBreakdown[v] || 0) + chs.length;
+  }
+  const counts = Object.values(volumeBreakdown).sort((a, b) => a - b);
+  const median = counts.length ? counts[Math.floor(counts.length / 2)] : 0;
+  const outlierVolumes = Object.entries(volumeBreakdown)
+    .filter(([, count]) => median > 2 && count > median * 2)
+    .map(([volume, count]) => ({ volume, count }));
+
+  const TRUNCATE = 50;
+  return {
+    seriesId,
+    seriesTitle: series.title,
+    fetchedAt: new Date().toISOString(),
+    providersConsulted,
+    mangaUpdates,
+    summary: {
+      currentChapterCount: existing.length,
+      incomingChapterCount: chapters.length,
+      newChapterCount: newChapters.length,
+      volumeChangeCount: volumeChanges.length,
+      protectedSkippedCount: protectedSkipped.length,
+      chsPerVolUsed: stats.avgChsPerVol,
+      estimatedVolumeCount: Object.keys(calculated).filter(v => v !== 'Specials').length,
+      noisyTagsRejected: noisy.length,
+      overflowCount: overflow.length,
+    },
+    newChapters: newChapters.slice(0, TRUNCATE),
+    newChaptersTruncated: newChapters.length > TRUNCATE,
+    volumeChanges: volumeChanges.slice(0, TRUNCATE),
+    volumeChangesTruncated: volumeChanges.length > TRUNCATE,
+    protectedSkipped: protectedSkipped.slice(0, TRUNCATE),
+    protectedSkippedTruncated: protectedSkipped.length > TRUNCATE,
+    volumeBreakdown,
+    outlierVolumes,
+    noisyChapters: noisy,
+  };
 }

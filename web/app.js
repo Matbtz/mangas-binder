@@ -471,7 +471,7 @@ function libPoster(s, { onSelect } = {}) {
     refreshBtn.disabled = false; refreshBtn.textContent = '↻';
   };
   const more = menuButton('⋯', [
-    { label: 'Refresh & scan', icon: '↻', onClick: async () => { await api(`/series/${s.id}/refresh`, { method: 'POST' }); await api(`/series/${s.id}/scan-library`, { method: 'POST' }); toast('Refreshed & scanned'); } },
+    { label: 'Preview refresh…', icon: '🔍', onClick: () => openRefreshPreviewModal({ seriesId: s.id, seriesTitle: s.title, andScan: true }) },
     { label: 'Unfollow', icon: '🗑', danger: true, onClick: async () => { if (confirm(`Unfollow ${s.title}?`)) { await api(`/series/${s.id}`, { method: 'DELETE' }); toast('Unfollowed'); route(); } } },
   ]);
   poster.querySelector('.poster-actions').append(openBtn, refreshBtn, more);
@@ -539,11 +539,8 @@ async function showDetail(id) {
   </div>`);
 
   hero.querySelector('#hd-back').onclick = () => navigate('#/library');
-  hero.querySelector('#hd-refresh').onclick = async () => {
-    toast('Refreshing & scanning…');
-    await api(`/series/${id}/refresh`,{method:'POST'});
-    await api(`/series/${id}/scan-library`,{method:'POST'});
-    showDetail(id);
+  hero.querySelector('#hd-refresh').onclick = () => {
+    openRefreshPreviewModal({ seriesId: id, seriesTitle: s.title, andScan: true, onApplied: () => showDetail(id) });
   };
 
   const downloadsMenu = menuButton('Downloads ▾', [
@@ -1492,6 +1489,183 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
 
   document.body.appendChild(modal);
   fetchPreview();
+}
+
+// --- Refresh Preview modal ---
+// Shows exactly what a "Refresh" would fetch from each provider (and cite which
+// provider supplied which value) before anything is written to the DB, so a
+// wrong-looking volume/chapter distribution can be diagnosed per-series instead
+// of discovered after the fact.
+async function openRefreshPreviewModal({ seriesId, seriesTitle, andScan = false, onApplied }) {
+  const existing = document.getElementById('refresh-preview-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="refresh-preview-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.78);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto">
+    <div style="background:#1a1e24;border:1px solid #2e353f;border-radius:12px;width:100%;max-width:640px;display:flex;flex-direction:column;box-shadow:0 20px 40px rgba(0,0,0,0.8);margin:auto;max-height:90vh">
+      <div style="padding:16px 20px;border-bottom:1px solid #2e353f;display:flex;align-items:center;gap:12px;flex-shrink:0">
+        <h3 style="margin:0;font-size:16px;color:#fff">🔍 Refresh Preview</h3>
+        <span class="muted" style="font-size:13px">${esc(seriesTitle)}</span>
+        <button class="btn sm icon" id="rp-close" style="margin-left:auto">✕</button>
+      </div>
+      <div id="rp-body" style="padding:16px 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:16px">
+        <p class="muted">Fetching data from providers…</p>
+      </div>
+      <div style="padding:14px 20px;border-top:1px solid #2e353f;display:flex;justify-content:flex-end;gap:10px;flex-shrink:0">
+        <button class="btn sm" id="rp-cancel">Cancel</button>
+        <button class="btn sm" id="rp-copy" disabled>📋 Copy JSON</button>
+        <button class="btn sm primary" id="rp-apply" disabled>✓ Validate &amp; Apply</button>
+      </div>
+    </div>
+  </div>`);
+
+  const close = () => modal.remove();
+  modal.querySelector('#rp-close').onclick = close;
+  modal.querySelector('#rp-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+  document.body.appendChild(modal);
+
+  const body = modal.querySelector('#rp-body');
+  const copyBtn = modal.querySelector('#rp-copy');
+  const applyBtn = modal.querySelector('#rp-apply');
+
+  let report = null;
+  try {
+    report = await api(`/series/${seriesId}/refresh-preview`);
+  } catch (e) {
+    body.innerHTML = `<p style="color:var(--warn)">Failed to fetch preview: ${esc(e.message)}</p>`;
+    return;
+  }
+
+  copyBtn.disabled = false;
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+      toast('Copied preview JSON to clipboard');
+    } catch { toast('Clipboard access denied'); }
+  };
+
+  applyBtn.disabled = false;
+  applyBtn.onclick = async () => {
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Applying…';
+    try {
+      await api(`/series/${seriesId}/refresh`, { method: 'POST' });
+      if (andScan) await api(`/series/${seriesId}/scan-library`, { method: 'POST' });
+      toast('Refresh applied');
+      close();
+      if (onApplied) onApplied();
+    } catch (e) {
+      toast(e.message);
+      applyBtn.disabled = false;
+      applyBtn.textContent = '✓ Validate & Apply';
+    }
+  };
+
+  const statCard = (val, label, color = '#aaa') => `<div style="flex:1;min-width:90px;background:#0d1117;border:1px solid #2e353f;border-radius:8px;padding:10px 14px;text-align:center">
+    <div style="font-size:20px;font-weight:700;color:${color}">${esc(String(val))}</div>
+    <div style="font-size:11px;color:#666;margin-top:2px">${esc(label)}</div>
+  </div>`;
+
+  const sections = [];
+
+  // --- Providers consulted, with per-provider citations ---
+  const provCards = report.providersConsulted.map(p => {
+    const skip = new Set(['name', 'role', 'error']);
+    const details = Object.entries(p).filter(([k]) => !skip.has(k))
+      .map(([k, v]) => `${esc(k)}: <strong style="color:#fff">${esc(String(v))}</strong>`).join(' &middot; ');
+    return `<div style="padding:10px 14px;background:#0d1117;border:1px solid ${p.error ? '#d29922' : '#238636'};border-radius:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+        <strong style="color:#fff">${esc(p.name)}</strong>
+        <span class="muted" style="font-size:11px">${esc(p.role)}</span>
+      </div>
+      ${p.error
+        ? `<div style="color:#d29922;font-size:12px;margin-top:4px">⚠ ${esc(p.error)}</div>`
+        : `<div style="color:#aaa;font-size:12px;margin-top:4px">${details}</div>`}
+    </div>`;
+  }).join('');
+  sections.push(`<div>
+    <h4 style="margin:0 0 8px;font-size:13px;color:#fff">Providers consulted</h4>
+    <div style="display:flex;flex-direction:column;gap:8px">${provCards}</div>
+  </div>`);
+
+  // --- Impact summary ---
+  const s = report.summary;
+  const stats = [
+    statCard(s.newChapterCount, 'new chapters', 'var(--acc)'),
+    statCard(s.volumeChangeCount, 'volume changes', s.volumeChangeCount ? 'var(--warn)' : '#aaa'),
+    statCard(s.protectedSkippedCount, 'packaged (protected)', '#aaa'),
+    statCard(s.estimatedVolumeCount, 'estimated volumes', '#7ecc7e'),
+    statCard(s.chsPerVolUsed, 'ch. / vol used', 'var(--acc)'),
+    statCard(s.noisyTagsRejected, 'noisy tags rejected', s.noisyTagsRejected ? 'var(--warn)' : '#aaa'),
+  ].join('');
+  sections.push(`<div>
+    <h4 style="margin:0 0 8px;font-size:13px;color:#fff">Impact of applying this refresh</h4>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${stats}</div>
+  </div>`);
+
+  if (report.outlierVolumes.length) {
+    const items = report.outlierVolumes.map(o => `<span class="pill warn" style="margin:2px">Vol ${esc(o.volume)}: ${o.count} chapters</span>`).join('');
+    sections.push(`<div>
+      <h4 style="margin:0 0 8px;font-size:13px;color:var(--warn)">⚠ Unusually large volumes (worth a manual look)</h4>
+      <div>${items}</div>
+    </div>`);
+  }
+
+  const changeTable = (rows, cols) => `<div style="max-height:180px;overflow-y:auto;border:1px solid #2e353f;border-radius:8px">
+    <table style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead style="position:sticky;top:0;background:#111518"><tr>${cols.map(c => `<th style="text-align:left;padding:6px 10px;color:#888;font-weight:600">${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+
+  if (report.volumeChanges.length) {
+    const rows = report.volumeChanges.map(c => `<tr>
+      <td style="padding:4px 10px">Ch. ${esc(c.number)}</td>
+      <td style="padding:4px 10px;color:#888">${esc(c.from ?? '—')} → <strong style="color:#fff">${esc(c.to)}</strong></td>
+      <td style="padding:4px 10px" class="muted">${esc(c.source || '')}</td>
+    </tr>`).join('');
+    sections.push(`<div>
+      <h4 style="margin:0 0 8px;font-size:13px;color:#fff">Volume tag changes${report.volumeChangesTruncated ? ' (first 50 shown)' : ''}</h4>
+      ${changeTable(rows, ['Chapter', 'Change', 'Source'])}
+    </div>`);
+  }
+
+  if (report.protectedSkipped.length) {
+    const rows = report.protectedSkipped.map(c => `<tr>
+      <td style="padding:4px 10px">Ch. ${esc(c.number)}</td>
+      <td style="padding:4px 10px;color:#888">kept <strong style="color:#fff">${esc(c.dbVolume ?? '—')}</strong> (provider now says ${esc(c.providerVolume)})</td>
+      <td style="padding:4px 10px" class="muted">${esc(c.source || '')}</td>
+    </tr>`).join('');
+    sections.push(`<div>
+      <h4 style="margin:0 0 8px;font-size:13px;color:#fff">Provider disagrees on already-packaged chapters${report.protectedSkippedTruncated ? ' (first 50 shown)' : ''}</h4>
+      <p class="muted" style="font-size:11px;margin:0 0 6px">These are already bound into a CBZ, so the refresh leaves them untouched.</p>
+      ${changeTable(rows, ['Chapter', 'Resolution', 'Source'])}
+    </div>`);
+  }
+
+  if (report.newChapters.length) {
+    const rows = report.newChapters.map(c => `<tr>
+      <td style="padding:4px 10px">Ch. ${esc(c.number)}</td>
+      <td style="padding:4px 10px">Vol. ${esc(c.volume)}</td>
+      <td style="padding:4px 10px" class="muted">${esc(c.source || '')}</td>
+    </tr>`).join('');
+    sections.push(`<div>
+      <h4 style="margin:0 0 8px;font-size:13px;color:#fff">New chapters with a provider volume tag${report.newChaptersTruncated ? ' (first 50 shown)' : ''}</h4>
+      ${changeTable(rows, ['Chapter', 'Volume', 'Source'])}
+    </div>`);
+  }
+
+  if (Object.keys(report.volumeBreakdown || {}).length) {
+    const entries = Object.entries(report.volumeBreakdown).sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]));
+    const items = entries.map(([v, c]) => `<span class="pill" style="margin:2px">Vol ${esc(v)}: ${c} ch.</span>`).join('');
+    sections.push(`<div>
+      <h4 style="margin:0 0 8px;font-size:13px;color:#fff">Resulting volume distribution</h4>
+      <div>${items}</div>
+    </div>`);
+  }
+
+  body.innerHTML = '';
+  for (const html of sections) body.appendChild(h(html));
 }
 
 // --- Edit Metadata modal ---
