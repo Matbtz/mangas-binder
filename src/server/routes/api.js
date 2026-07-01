@@ -18,7 +18,7 @@ import {
 import { followSeries, refreshSeries } from '../../core/series-service.js';
 import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
-import { getVolumeStats, extrapolateVolumes } from '../../core/extrapolate.js';
+import { getVolumeStats, extrapolateVolumes, buildVolumeMapFromChapters } from '../../core/extrapolate.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning, packageCompleteVolumes } from '../../download/worker.js';
@@ -1022,15 +1022,7 @@ bindery.push({
     const { chaptersPerVolume, maxVolume } = req.body || {};
     const db = getDb();
     const chapters = listChaptersForSeries(s.id);
-    const volumeMap = {};
-    for (const c of chapters) {
-      const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
-      if (hasRealVolume) {
-        (volumeMap[c.volume] ||= []).push(c.number);
-      } else if (c.state === 'imported' && c.volume) {
-        (volumeMap[c.volume] ||= []).push(c.number);
-      }
-    }
+    const { volumeMap } = buildVolumeMapFromChapters(chapters);
     const stats = getVolumeStats(volumeMap);
     const finalChsPerVol = chaptersPerVolume ? Number(chaptersPerVolume) : (stats.avgChsPerVol || 10);
 
@@ -1067,18 +1059,7 @@ bindery.push({
     const chsPerVolOverride = req.query.chaptersPerVolume ? Number(req.query.chaptersPerVolume) : null;
     const maxVolume = req.query.maxVolume ? Number(req.query.maxVolume) : null;
     const chapters = listChaptersForSeries(s.id);
-    const volumeMap = {};
-    const unassigned = [];
-    for (const c of chapters) {
-      const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
-      if (hasRealVolume) {
-        (volumeMap[c.volume] ||= []).push(c.number);
-      } else if (c.state === 'imported' && c.volume) {
-        (volumeMap[c.volume] ||= []).push(c.number);
-      } else {
-        unassigned.push(c.number);
-      }
-    }
+    const { volumeMap, unassigned } = buildVolumeMapFromChapters(chapters);
     const stats = getVolumeStats(volumeMap);
     const finalChsPerVol = chsPerVolOverride || stats.avgChsPerVol || 10;
 

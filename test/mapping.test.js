@@ -13,7 +13,7 @@ process.env.STAGING_DIR = path.join(tmp, 'staging');
 const { ensureSeeded } = await import('../src/core/settings.js');
 const { createSeries, upsertChapter, listChaptersForSeries, setChapterState } = await import('../src/core/repo.js');
 const { resolveVolumes } = await import('../src/core/mapping.js');
-const { extrapolateVolumes } = await import('../src/core/extrapolate.js');
+const { extrapolateVolumes, sanitizeVolumeMap } = await import('../src/core/extrapolate.js');
 const { closeDb } = await import('../src/core/db.js');
 
 ensureSeeded();
@@ -53,6 +53,53 @@ test('resolveVolumes: assigns estimated volumes to untagged chapters, keeps real
   assert.equal(vol('6').volume, '2');
   assert.equal(vol('7').volume, '3');
   assert.equal(vol('9').volume, '3');
+});
+
+test('sanitizeVolumeMap: rejects a mistagged outlier that would overlap the next volume', () => {
+  // Mirrors a real MangaDex bug report: volume mins step cleanly by ~9, but one
+  // rogue chapter per volume balloons the max far past the next volume's start.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = {
+    '1': range(1, 7),
+    '2': [...range(8, 16), '54'],
+    '3': [...range(17, 25), '69'],
+    '4': range(26, 34),
+  };
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap);
+  assert.deepEqual(noisy.sort(), ['54', '69']);
+  assert.deepEqual(cleanVolumeMap['2'], range(8, 16));
+  assert.deepEqual(cleanVolumeMap['3'], range(17, 25));
+  // Ranges are now monotonic and non-overlapping.
+  const maxOf = v => Math.max(...cleanVolumeMap[v].map(Number));
+  const minOf = v => Math.min(...cleanVolumeMap[v].map(Number));
+  assert.ok(maxOf('2') < minOf('3'));
+  assert.ok(maxOf('3') < minOf('4'));
+});
+
+test('resolveVolumes: demotes a noisy "real" tag even when no chapter is unassigned', () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'map3', title: 'Map Three', language: 'en', monitored: true, packagingMode: 'volume' });
+  for (const n of ['1', '2', '3']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });
+  for (const n of ['4', '5', '6']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '2' });
+  // Chapter 50 is mistagged into volume 2 by MangaDex — every chapter has a
+  // volume already, so nothing is "unassigned", yet this tag is still bogus.
+  upsertChapter(s.id, { provider: 'mangadex', number: '50', volume: '2' });
+  for (const n of ['7', '8', '9']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '3' });
+
+  const { assigned } = resolveVolumes(s.id);
+  assert.ok(assigned >= 1);
+
+  const chs = listChaptersForSeries(s.id);
+  const ch50 = chs.find(c => c.number === '50');
+  assert.notEqual(ch50.volume, '2');
+  assert.equal(ch50.calculated, 1);
+});
+
+test('extrapolateVolumes: chapters beyond the last real volume are grouped into new sequential volumes (unreleased content)', () => {
+  const volumeMap = { '1': ['1', '2', '3'], '2': ['4', '5', '6'], '3': ['7', '8', '9'] };
+  // Nothing tags volume 4 yet — these are the not-yet-released chapters.
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, ['10', '11', '12', '13', '14', '15']);
+  assert.deepEqual(calculated, { '4': ['10', '11', '12'], '5': ['13', '14', '15'] });
+  assert.deepEqual(overflow, []);
 });
 
 test('resolveVolumes: never reassigns already-imported chapters', () => {

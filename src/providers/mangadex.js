@@ -29,6 +29,29 @@ function langScore(seriesLang, candidateLang) {
   return 1;
 }
 
+/**
+ * Reconciles the volume tag for one chapter number across every scanlation
+ * group that translated it, plus the curated /aggregate TOC. Volume tags are
+ * set per-translation-group on MangaDex, so a single group can mistag a
+ * chapter; trusting only the winning (highest language-priority) group's tag
+ * verbatim lets that mistake become "ground truth". Majority vote across all
+ * groups' tags is far more resistant to a lone bad entry. On a tie, the
+ * aggregate TOC wins since it's MangaDex's own curated cross-group mapping.
+ */
+function resolveVolumeVote(rawVolumes, aggVolume) {
+  const counts = new Map();
+  if (aggVolume != null) counts.set(aggVolume, 2); // curated TOC counts as 2 votes
+  for (const v of rawVolumes) {
+    if (v == null) continue;
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  let best = null, bestCount = 0;
+  for (const [v, count] of counts) {
+    if (count > bestCount) { best = v; bestCount = count; }
+  }
+  return best;
+}
+
 const HEADERS = { 'User-Agent': 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)' };
 
 async function apiFetch(url) {
@@ -219,7 +242,7 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
       candidatesByChapter.get(number).push({
         id: ch.id,
         number,
-        volume: a.volume || aggMap.get(number) || null,
+        rawVolume: a.volume || null,
         title: a.title || '',
         lang: a.translatedLanguage || 'en',
         publishedAt: a.publishAt || a.createdAt || null,
@@ -248,7 +271,14 @@ export async function listChapters(mangaId, { lang = 'en' } = {}) {
       return 0;
     });
 
-    out.push(candidates[0]);
+    const { rawVolume, ...winner } = candidates[0];
+    // The volume tag comes from a vote across every group's translation of this
+    // chapter (not just the winning language's), so one mistagged group can't
+    // silently corrupt the boundary. Falls back to the winner's own tag if no
+    // majority emerges (e.g. only one group reported a volume at all).
+    const resolvedVolume = resolveVolumeVote(candidates.map(c => c.rawVolume), aggMap.get(number) || null)
+      ?? rawVolume ?? null;
+    out.push({ ...winner, volume: resolvedVolume });
   }
 
   const seen = new Set(out.map(c => c.number));
