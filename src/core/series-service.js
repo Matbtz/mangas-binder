@@ -129,22 +129,23 @@ export async function refreshSeries(seriesId) {
         }
       }
 
-      // Backfill volume numbers that MangaDex left null using MangaUpdates' release
-      // records.  Each release record carries the chapter number AND the volume it
+      // Cross-check MangaDex's volume tags against MangaUpdates' release records.
+      // Each MU release record carries the chapter number AND the volume it
       // belongs to, giving authoritative boundaries for series where the MangaDex
-      // aggregate is sparse (e.g. Dandadan, One Piece English simulpubs).
-      // We only fill chapters that currently lack a volume — never overwrite a
-      // real provider-tagged assignment.
-      const hasNullVol = chapters.some(c => !c.volume);
-      if (hasNullVol && mu?.seriesId) {
+      // aggregate is sparse or its scanlation-group tags are inconsistent (e.g.
+      // Dandadan, One Piece English simulpubs). We always fill chapters MangaDex
+      // left null, and — since MU volumes reflect official releases rather than
+      // per-group tagging — we also prefer MU's value when it *disagrees* with
+      // MangaDex for a chapter, rather than only ever filling gaps. (extrapolate.js
+      // still sanitizes the result, so this is a second, independent vote, not a
+      // blind override.)
+      if (mu?.seriesId) {
         try {
           const muVolMap = await fetchChapterVolumeMap(mu.seriesId);
           if (muVolMap.size > 0) {
             for (const ch of chapters) {
-              if (!ch.volume) {
-                const v = muVolMap.get(String(parseFloat(ch.number)));
-                if (v) ch.volume = v;
-              }
+              const v = muVolMap.get(String(parseFloat(ch.number)));
+              if (v && v !== ch.volume) ch.volume = v;
             }
           }
         } catch { /* non-fatal — proceed without MU volume data */ }

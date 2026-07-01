@@ -1,4 +1,4 @@
-import { extrapolateVolumes } from './extrapolate.js';
+import { extrapolateVolumes, sanitizeVolumeMap, buildVolumeMapFromChapters } from './extrapolate.js';
 import { getSeries, listChaptersForSeries } from './repo.js';
 import { getDb } from './db.js';
 import { getSetting } from './settings.js';
@@ -6,11 +6,15 @@ import { getSetting } from './settings.js';
 /**
  * Resolve a volume number for every chapter of a series.
  *
- * Provider-tagged volumes are always authoritative. Chapters the source left
- * untagged (very common for English scanlations) are assigned to *estimated*
- * volumes via extrapolate.js, seeded by the real volumes and the MangaUpdates
- * total-volume hint. Estimated assignments are flagged `calculated = 1` so the
- * CBZ's ComicInfo.xml notes that the volume boundary is an estimate.
+ * Provider-tagged volumes are authoritative *unless* they're statistically
+ * inconsistent with the rest of that volume or overlap a neighboring volume
+ * (see extrapolate.js sanitizeVolumeMap) — a single mistagged chapter from a
+ * scanlation group is demoted back to "untagged" rather than trusted outright.
+ * Chapters the source left untagged (very common for English scanlations), plus
+ * any demoted noisy tags, are assigned to *estimated* volumes via extrapolate.js,
+ * seeded by the remaining real volumes and the MangaUpdates total-volume hint.
+ * Estimated assignments are flagged `calculated = 1` so the CBZ's ComicInfo.xml
+ * notes that the volume boundary is an estimate.
  *
  * Only non-imported chapters are (re)assigned, so volumes already packaged keep
  * their boundaries stable across rescans.
@@ -24,26 +28,18 @@ export function resolveVolumes(seriesId, { chaptersPerVolume = null } = {}) {
   if (!series) return { assigned: 0 };
 
   const chapters = listChaptersForSeries(seriesId);
+  const byNumber = new Map(chapters.map(c => [c.number, c]));
 
   // Authoritative base map (real tags + already-imported estimated volumes) and
   // the pool of chapters that still need a volume.
-  const volumeMap = {};
-  const unassigned = [];
-  const byNumber = new Map();
-  for (const c of chapters) {
-    byNumber.set(c.number, c);
-    const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
-    if (hasRealVolume) {
-      (volumeMap[c.volume] ||= []).push(c.number);
-    } else if (c.state === 'imported' && c.volume) {
-      // keep a previously-packaged estimated volume as part of the baseline
-      (volumeMap[c.volume] ||= []).push(c.number);
-    } else {
-      unassigned.push(c.number);
-    }
-  }
+  const { volumeMap, unassigned } = buildVolumeMapFromChapters(chapters);
 
-  if (!unassigned.length) return { assigned: 0 };
+  // Even when every chapter already carries a volume tag, a single mistagged
+  // chapter (e.g. a scanlation group's bad "Volume 2" label on chapter 54) can
+  // still corrupt the anchor set. Detect that case up front so it isn't
+  // silently skipped just because there's nothing "unassigned" to trigger a run.
+  const { noisy } = sanitizeVolumeMap(volumeMap);
+  if (!unassigned.length && !noisy.length) return { assigned: 0 };
 
   const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null, false, chaptersPerVolume);
 

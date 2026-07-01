@@ -1,8 +1,116 @@
 /**
+ * Splits noisy per-volume chapter lists into a clean, monotonic volumeMap.
+ *
+ * MangaDex volume tags are crowd-sourced per scanlation group, so a single
+ * mistagged chapter (e.g. chapter 54 mislabeled "Volume 2") can blow out
+ * that volume's min/max range far past where the *next* volume's chapters
+ * start, corrupting every anchor derived from it. This:
+ *  1. For each volume, keeps only chapters within a robust (median +
+ *     MAD-based) band of that volume's main cluster — outliers go to `noisy`.
+ *  2. Sweeps volumes in ascending order and drops any remaining chapter
+ *     whose number falls at or before the previous volume's cleaned max, or
+ *     at/after the next volume's cleaned min — guaranteeing non-overlapping,
+ *     monotonically increasing bands.
+ *
+ * Returns { cleanVolumeMap, noisy } where `noisy` is the flat list of
+ * chapter numbers (strings) that were pulled out of their volume.
+ */
+export function sanitizeVolumeMap(volumeMap) {
+  const noisy = [];
+  const cleanVolumeMap = {};
+  if (volumeMap.none) cleanVolumeMap.none = [...volumeMap.none];
+
+  // Non-numeric volume labels (e.g. "Specials") aren't part of the monotonic
+  // chapter-number sequence this function reasons about — pass them through
+  // untouched rather than silently dropping them.
+  for (const [k, chs] of Object.entries(volumeMap)) {
+    if (k !== 'none' && Number.isNaN(parseFloat(k))) cleanVolumeMap[k] = [...chs];
+  }
+
+  const knownVols = Object.entries(volumeMap)
+    .filter(([k]) => k !== 'none')
+    .map(([vStr, chs]) => [vStr, parseFloat(vStr), chs])
+    .filter(([, vNum]) => !Number.isNaN(vNum))
+    .sort((a, b) => a[1] - b[1]);
+
+  // Pass 1: per-volume median/MAD outlier trim (skip fractional "Specials"-like chapters).
+  const perVolume = knownVols.map(([vStr, vNum, chs]) => {
+    const nums = [];
+    const nonNumeric = [];
+    for (const c of chs) {
+      const n = parseFloat(c);
+      if (!Number.isNaN(n) && Number.isInteger(n) && !String(c).includes('.')) nums.push({ raw: c, n });
+      else nonNumeric.push(c);
+    }
+    nums.sort((a, b) => a.n - b.n);
+    let inliers = nums;
+    let outliers = [];
+    if (nums.length >= 3) {
+      const mid = nums[Math.floor(nums.length / 2)].n;
+      const deviations = nums.map(x => Math.abs(x.n - mid)).sort((a, b) => a - b);
+      const mad = deviations[Math.floor(deviations.length / 2)] || 0;
+      // Robust band: at least +/-5 chapters, widened by scaled MAD for large volumes.
+      const band = Math.max(5, mad * 3);
+      inliers = nums.filter(x => Math.abs(x.n - mid) <= band);
+      outliers = nums.filter(x => Math.abs(x.n - mid) > band);
+    }
+    return { vStr, vNum, inliers, outliers, nonNumeric };
+  });
+
+  // Pass 2: enforce monotonic, non-overlapping bands across volumes.
+  let prevMax = -Infinity;
+  for (let i = 0; i < perVolume.length; i++) {
+    const cur = perVolume[i];
+    const next = perVolume[i + 1];
+    const nextMin = next && next.inliers.length ? Math.min(...next.inliers.map(x => x.n)) : Infinity;
+
+    const kept = [];
+    for (const x of cur.inliers) {
+      if (x.n <= prevMax || x.n >= nextMin) cur.outliers.push(x);
+      else kept.push(x);
+    }
+    cur.inliers = kept;
+    if (cur.inliers.length) prevMax = Math.max(prevMax, ...cur.inliers.map(x => x.n));
+
+    const chs = [...cur.inliers.map(x => x.raw), ...cur.nonNumeric];
+    if (chs.length) cleanVolumeMap[cur.vStr] = chs;
+    for (const x of cur.outliers) noisy.push(x.raw);
+  }
+
+  return { cleanVolumeMap, noisy };
+}
+
+/**
+ * Splits a series' chapter rows into { volumeMap, unassigned } — the shared
+ * shape consumed by extrapolateVolumes/getVolumeStats. A chapter counts as a
+ * real anchor when it carries a non-calculated volume tag, or when it's an
+ * already-imported (packaged) chapter whose estimated volume must stay stable
+ * across rescans. Everything else is unassigned and needs (re)estimating.
+ * Used by mapping.js and the extrapolate-preview/apply API routes so all three
+ * build the anchor set identically.
+ */
+export function buildVolumeMapFromChapters(chapters) {
+  const volumeMap = {};
+  const unassigned = [];
+  for (const c of chapters) {
+    const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
+    if (hasRealVolume) {
+      (volumeMap[c.volume] ||= []).push(c.number);
+    } else if (c.state === 'imported' && c.volume) {
+      (volumeMap[c.volume] ||= []).push(c.number);
+    } else {
+      unassigned.push(c.number);
+    }
+  }
+  return { volumeMap, unassigned };
+}
+
+/**
  * Returns stats about the volume map useful for detecting outliers.
  * { lastConsecutive, avgChsPerVol, consecutiveVolSet }
  */
-export function getVolumeStats(volumeMap) {
+export function getVolumeStats(rawVolumeMap) {
+  const { cleanVolumeMap: volumeMap } = sanitizeVolumeMap(rawVolumeMap);
   const knownVols = Object.entries(volumeMap)
     .filter(([k]) => k !== 'none')
     .sort(([a], [b]) => parseFloat(a) - parseFloat(b));
@@ -35,8 +143,14 @@ export function getVolumeStats(volumeMap) {
  *
  * Returns { calculated, overflow }
  */
-export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHint = null, capAtHint = true, chsPerVolOverride = null) {
-  if (!unassignedChapters.length) return { calculated: {}, overflow: [] };
+export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolumesHint = null, capAtHint = true, chsPerVolOverride = null) {
+  // Reject anchor chapters that don't fit their volume's cluster or that overlap
+  // a neighboring volume — a single mistagged chapter must not corrupt every
+  // boundary derived from it. Rejected chapters rejoin the unassigned pool so
+  // they get a fresh, consistent estimate instead of keeping a bad tag.
+  const { cleanVolumeMap: volumeMap, noisy } = sanitizeVolumeMap(rawVolumeMap);
+  const effectiveUnassigned = noisy.length ? [...unassignedChapters, ...noisy] : unassignedChapters;
+  if (!effectiveUnassigned.length) return { calculated: {}, overflow: [] };
 
   const knownVols = Object.entries(volumeMap)
     .filter(([k]) => k !== 'none')
@@ -72,7 +186,7 @@ export function extrapolateVolumes(volumeMap, unassignedChapters, totalVolumesHi
     anchors.sort((a, b) => a.maxCh - b.maxCh);
   }
 
-  const sortedUnassigned = [...unassignedChapters].sort((a, b) => parseFloat(a) - parseFloat(b));
+  const sortedUnassigned = [...effectiveUnassigned].sort((a, b) => parseFloat(a) - parseFloat(b));
   const calculated = {};
   const overflow = [];
 

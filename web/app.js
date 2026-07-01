@@ -1637,10 +1637,14 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
   const existing = document.getElementById('vol-def-modal');
   if (existing) existing.remove();
 
-  // Pre-populate from existing non-specials volumes
+  // Pre-populate from existing non-specials volumes. Only genuine provider tags
+  // or already-packaged chapters count as reliable boundaries — estimated
+  // (calculated) assignments are left out so a prior extrapolation run can't
+  // seed the manual editor with its own (possibly wrong) guesses.
   const volRanges = new Map();
   for (const c of chapters) {
     if (c.volume == null || c.volume === '' || c.volume === 'none' || c.volume === 'Specials') continue;
+    if (c.calculated && c.state !== 'imported') continue;
     const num = parseFloat(c.number);
     if (Number.isNaN(num) || !Number.isInteger(num)) continue;
     if (!volRanges.has(c.volume)) volRanges.set(c.volume, { min: num, max: num });
