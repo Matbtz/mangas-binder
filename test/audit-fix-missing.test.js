@@ -51,3 +51,36 @@ test('audit reports a missing chapter structurally and fix-missing requeues it',
   const ch2 = listChaptersForSeries(s.id).find(c => c.number === '2');
   assert.equal(ch2.state, 'wanted', 'chapter 2 reset to wanted for redownload');
 });
+
+// Regression: a volume CBZ on disk can legitimately contain a chapter that was
+// added to the series' chapter distribution *after* the file was last scanned
+// (e.g. the provider's chapter list grew). The audit must reconcile against the
+// library before diffing, so an unscanned-but-already-present chapter doesn't
+// get misreported as "present in CBZ but not mapped in database".
+test('audit reconciles newly distributed chapters against the library before flagging mismatches', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'af2', title: 'Redistributed Series', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume', status: 'ongoing' });
+
+  const seriesDir = path.join(tmp, 'out', 'Redistributed Series');
+  mkdirSync(seriesDir, { recursive: true });
+  const cbz = path.join(seriesDir, 'Redistributed Series Vol. 01.cbz');
+  const zip = new AdmZip();
+  zip.addFile('ch0001_p001.png', PNG);
+  zip.addFile('ch0002_p001.png', PNG);
+  zip.writeZip(cbz);
+
+  // Only chapter 1 is registered & mapped to the file; chapter 2 was just added
+  // to the series' distribution (e.g. by a provider refresh) and hasn't been
+  // reconciled against the library yet, even though it's already in the CBZ.
+  upsertChapter(s.id, { provider: 'mangadex', providerChapterId: 'r1', number: '1', volume: '1' }, 'imported');
+  upsertChapter(s.id, { provider: 'mangadex', providerChapterId: 'r2', number: '2', volume: '1' }, 'wanted');
+  const ch1 = listChaptersForSeries(s.id).find(c => c.number === '1');
+  setChapterState(ch1.id, 'imported', { cbz_path: cbz });
+
+  const report = (await app.inject({ method: 'POST', url: '/api/audit-cbz-integrity' })).json();
+  const series = report.results.find(r => r.seriesTitle === 'Redistributed Series');
+  assert.equal(series, undefined, 'no issues once the library scan reconciles chapter 2 to the existing file');
+
+  const ch2 = listChaptersForSeries(s.id).find(c => c.number === '2');
+  assert.equal(ch2.state, 'imported', 'chapter 2 reconciled to the on-disk CBZ');
+  assert.ok(ch2.cbz_path?.endsWith('Redistributed Series Vol. 01.cbz'));
+});
