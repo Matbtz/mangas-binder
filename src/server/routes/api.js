@@ -15,7 +15,7 @@ import {
   getAllSettings, getSetting, setSetting, getProviderStates,
   setProviderEnabled, setProviderConfig, getProviderConfig, isProviderEnabled,
 } from '../../core/settings.js';
-import { followSeries, refreshSeries } from '../../core/series-service.js';
+import { followSeries, refreshSeries, previewRefreshSeries } from '../../core/series-service.js';
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, DEFAULT_PROFILE_CONFIG } from '../../core/profiles.js';
 import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
@@ -228,6 +228,19 @@ export default async function apiRoutes(app) {
     // Drain queue in the background so the request returns promptly.
     runOnce().catch(() => {});
     return r;
+  });
+
+  // Read-only dry run of /refresh: fetches the same provider data but never
+  // writes to the DB, so the UI can show what a refresh would change (and cite
+  // which provider supplied which value) before the user commits to it.
+  app.get('/api/series/:id/refresh-preview', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    try {
+      return await previewRefreshSeries(s.id);
+    } catch (e) {
+      return reply.code(502).send({ error: String(e?.message || e) });
+    }
   });
 
   app.post('/api/series/:id/link-mangadex', async (req, reply) => {
@@ -1174,15 +1187,19 @@ bindery.push({
     const { volumes = [] } = req.body || {};
     if (!Array.isArray(volumes)) return reply.code(400).send({ error: 'volumes array required' });
     const db = getDb();
-    
-    // Clear old volume assignments (excluding Specials) first
+
+    // Clear old volume assignments (excluding Specials) first. Chapters already
+    // packaged into a CBZ ('imported'/'bindery') are left untouched — the CBZ on
+    // disk was built with their current volume number, so silently reassigning
+    // it here would desync the DB from the file that already exists (mirrors the
+    // same protection resolveVolumes() applies in mapping.js).
     db.prepare(`
-      UPDATE chapters 
+      UPDATE chapters
       SET volume = NULL, calculated = 0, updated_at = datetime('now')
-      WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL)
+      WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL) AND state NOT IN ('imported', 'bindery')
     `).run(s.id);
 
-    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
+    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state NOT IN ('imported', 'bindery')");
     let totalChanges = 0;
     for (const { volume, from, to } of volumes) {
       if (!volume || from == null || to == null) continue;
@@ -1233,7 +1250,10 @@ bindery.push({
       }
     }
 
-    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
+    // Chapters already packaged into a CBZ ('imported'/'bindery') keep their
+    // existing volume — reassigning them here without repackaging would desync
+    // the DB from the file already on disk.
+    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state NOT IN ('imported', 'bindery')");
     const res = upd.run(String(volume), s.id, Number(from), Number(to));
     await refreshSeries(s.id);
     await autoPackageCompleteVolumes(s.id);

@@ -126,9 +126,15 @@ export function getVolumeStats(rawVolumeMap) {
   }
 
   const consecutiveVols = knownVols.filter(([k]) => parseFloat(k) <= lastConsecutive);
-  const totalConsecChapters = consecutiveVols.reduce((sum, [, chs]) => sum + chs.length, 0);
-  const avgChsPerVol = consecutiveVols.length > 0
-    ? Math.round(totalConsecChapters / consecutiveVols.length)
+  // Median rather than mean: a single oversized volume (a bad/rare provider tag
+  // spanning way more chapters than the rest) would otherwise drag the average up
+  // and inflate every subsequently-estimated volume, compounding the bad tag's
+  // damage instead of containing it.
+  const counts = consecutiveVols.map(([, chs]) => chs.length).sort((a, b) => a - b);
+  const avgChsPerVol = counts.length > 0
+    ? (counts.length % 2 === 1
+        ? counts[(counts.length - 1) / 2]
+        : Math.round((counts[counts.length / 2 - 1] + counts[counts.length / 2]) / 2))
     : 10;
   const consecutiveVolSet = new Set(consecutiveVols.map(([k]) => String(parseFloat(k))));
 
@@ -140,9 +146,16 @@ export function getVolumeStats(rawVolumeMap) {
  *
  * For any unassigned chapter:
  *  1. Finds the nearest preceding anchor volume (maxCh < chNum).
- *  2. Finds the nearest succeeding anchor volume (minCh > chNum).
- *  3. Calculates estimated volume = baseVol + ceil((chNum - anchorCh) / chsPerVol).
- *  4. Clamps estimated volume so it never overshoots the succeeding anchor volume.
+ *  2. Finds the nearest succeeding anchor volume (minCh > chNum), if any.
+ *  3. If both anchors exist, the chapters strictly between them are spread
+ *     *evenly* across the volume slots available between the two anchor
+ *     volumes (see localChsPerVol below) rather than walking forward with a
+ *     single chsPerVol and clamping overshoot into the last slot before the
+ *     next anchor — that clamp is what used to dump dozens of chapters into
+ *     one volume whenever known anchors were sparse (e.g. only volume 1 and
+ *     volume 10 tagged by the provider, with 90 untagged chapters between).
+ *  4. If there's no succeeding anchor (tail of the series), estimated volume
+ *     = baseVol + ceil((chNum - anchorCh) / chsPerVol), open-ended.
  *
  * Returns { calculated, overflow }
  */
@@ -185,6 +198,27 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
       const stats = getVolumeStats(volumeMap);
       chsPerVol = stats.avgChsPerVol || 10;
       if (chsPerVol < 3) chsPerVol = 10; // safety clamp to prevent sparse/erroneous metadata from causing 1-chapter volumes
+
+      // The historical average only reflects the *tagged* volumes, which for an
+      // ongoing series (MangaDex commonly only tags early volumes) can be a
+      // poor predictor of how many chapters are actually left to fit into the
+      // remaining volumes. When we know the series' real total volume count
+      // (e.g. from MangaUpdates) and there's still runway left after the last
+      // anchor, derive the tail's chsPerVol from that instead — this is what
+      // keeps the *last* estimated volume roughly matching the known total
+      // rather than drifting far past (or stopping far short of) it.
+      if (totalVolumesHint) {
+        const lastAnchor = anchors.reduce((best, a) => (!best || a.volNum > best.volNum ? a : best), null);
+        const lastAnchorVol = lastAnchor ? Math.floor(lastAnchor.volNum) : 0;
+        const lastAnchorCh = lastAnchor ? lastAnchor.maxCh : 0;
+        const remainingVols = totalVolumesHint - lastAnchorVol;
+        if (remainingVols > 0) {
+          const maxUnassignedCh = Math.max(0, ...effectiveUnassigned.map(c => parseFloat(c)).filter(n => !Number.isNaN(n) && Number.isInteger(n)));
+          if (maxUnassignedCh > lastAnchorCh) {
+            chsPerVol = Math.max(1, Math.ceil((maxUnassignedCh - lastAnchorCh) / remainingVols));
+          }
+        }
+      }
     }
     anchors.sort((a, b) => a.maxCh - b.maxCh);
   }
@@ -203,7 +237,7 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
     }
 
     let baseVol = 0, anchorCh = 0;
-    let nextVol = Infinity;
+    let nextVol = Infinity, nextMinCh = Infinity;
 
     for (let j = 0; j < anchors.length; j++) {
       if (anchors[j].maxCh < chNum) {
@@ -212,13 +246,30 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
       }
       if (anchors[j].minCh > chNum && anchors[j].volNum < nextVol) {
         nextVol = anchors[j].volNum;
+        nextMinCh = anchors[j].minCh;
       }
     }
+    baseVol = Math.floor(baseVol);
 
-    const diff = Math.max(1, chNum - anchorCh);
-    let estVol = Math.floor(baseVol) + Math.max(1, Math.ceil(diff / chsPerVol));
+    let estVol;
     if (nextVol < Infinity) {
-      estVol = Math.min(estVol, Math.floor(nextVol) - 1);
+      const boundedNextVol = Math.floor(nextVol);
+      // Number of whole volume "slots" strictly between the two anchors, and how
+      // many unassigned chapters have to fit in them. Sizing chsPerVol to this
+      // local gap (instead of a single global average) guarantees every slot gets
+      // a fair share instead of the last one absorbing whatever the global rate
+      // couldn't fit before hitting the next anchor.
+      const slots = Math.max(1, boundedNextVol - baseVol - 1);
+      const gapChapters = Math.max(1, nextMinCh - anchorCh - 1);
+      let localChsPerVol = chsPerVolOverride || Math.ceil(gapChapters / slots);
+      if (localChsPerVol * slots < gapChapters) localChsPerVol = Math.ceil(gapChapters / slots);
+
+      const diff = Math.max(1, chNum - anchorCh);
+      estVol = baseVol + Math.max(1, Math.ceil(diff / localChsPerVol));
+      estVol = Math.min(estVol, boundedNextVol - 1);
+    } else {
+      const diff = Math.max(1, chNum - anchorCh);
+      estVol = baseVol + Math.max(1, Math.ceil(diff / chsPerVol));
     }
 
     if (capAtHint && totalVolumesHint && estVol > totalVolumesHint) {

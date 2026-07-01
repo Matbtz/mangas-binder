@@ -1,0 +1,105 @@
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// previewRefreshSeries() is the read-only "dry run" behind the refresh-preview
+// modal: it must fetch exactly what refreshSeries() would, cite which provider
+// supplied which value, diff against the DB, and simulate the same
+// extrapolation resolveVolumes() would apply — all without writing anything.
+
+const tmp = mkdtempSync(path.join(os.tmpdir(), 'mb-refreshpreview-'));
+process.env.DB_PATH = path.join(tmp, 't.db');
+process.env.OUTPUT_DIR = path.join(tmp, 'out');
+process.env.STAGING_DIR = path.join(tmp, 'staging');
+process.env.LOG_LEVEL = 'silent';
+
+const { buildApp } = await import('../src/server/app.js');
+const { setSetting } = await import('../src/core/settings.js');
+const { createSeries, upsertChapter, listChaptersForSeries, setChapterState } = await import('../src/core/repo.js');
+const { previewRefreshSeries } = await import('../src/core/series-service.js');
+const { closeDb } = await import('../src/core/db.js');
+
+const app = await buildApp();
+setSetting('downloadsPaused', true);
+
+const realFetch = global.fetch;
+function mockProvidersFor(chapterVolumes, { totalVolumes = 10, latestChapter = null, muReleases = new Map() } = {}) {
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('mangadex.org') && u.includes('/aggregate')) return { ok: true, status: 200, json: async () => ({ volumes: {} }) };
+    if (u.includes('mangadex.org') && u.includes('/feed')) {
+      const data = Object.entries(chapterVolumes).map(([num, vol]) => ({
+        id: `c${num}`,
+        attributes: { chapter: num, volume: vol, translatedLanguage: 'en', pages: 20, publishAt: null },
+      }));
+      return { ok: true, status: 200, json: async () => ({ total: data.length, data }) };
+    }
+    if (u.includes('mangaupdates.com') && u.includes('series/search')) {
+      return { ok: true, status: 200, json: async () => ({ results: [{ record: { series_id: 999, title: 'Preview Series', url: '' } }] }) };
+    }
+    if (u.includes('mangaupdates.com') && u.includes('/series/999')) {
+      return { ok: true, status: 200, json: async () => ({ status: `${totalVolumes} Volumes (Ongoing)`, latest_chapter: latestChapter ? String(latestChapter) : null }) };
+    }
+    if (u.includes('mangaupdates.com') && u.includes('releases/search')) {
+      const results = [...muReleases.entries()].map(([ch, vol]) => ({ record: { chapter: ch, volume: vol } }));
+      return { ok: true, status: 200, json: async () => ({ results }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+}
+after(async () => { global.fetch = realFetch; await app.close(); closeDb(); rmSync(tmp, { recursive: true, force: true }); });
+
+test('previewRefreshSeries: cites both providers and reports new/changed/estimated chapters without writing to the DB', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv1', title: 'Preview Series', language: 'en', monitored: true, packagingMode: 'volume' });
+  const chapterVolumes = {};
+  for (let i = 1; i <= 14; i++) chapterVolumes[String(i)] = i <= 7 ? '1' : '2';
+  mockProvidersFor(chapterVolumes, { totalVolumes: 10, latestChapter: 40 });
+
+  const report = await previewRefreshSeries(s.id);
+
+  assert.equal(report.providersConsulted.some(p => p.name === 'MangaDex'), true);
+  assert.equal(report.providersConsulted.some(p => p.name === 'MangaUpdates'), true);
+  assert.equal(report.mangaUpdates.totalVolumesHint, 10);
+  // 40 chapters known via the MU latestChapter gap-fill, only 14 tagged directly
+  assert.equal(report.summary.incomingChapterCount, 40);
+  assert.equal(report.mangaUpdates.gapFilledChapters, 26);
+  assert.ok(report.summary.estimatedVolumeCount > 0);
+
+  // Nothing should have been written to the DB by a preview.
+  assert.equal(listChaptersForSeries(s.id).length, 0);
+});
+
+test('previewRefreshSeries: flags a volume-tag conflict for an already-packaged chapter as protected, not a plain change', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv2', title: 'Preview Series Two', language: 'en', monitored: true, packagingMode: 'volume' });
+  for (const n of ['1', '2', '3']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });
+  const ch1 = listChaptersForSeries(s.id).find(c => c.number === '1');
+  setChapterState(ch1.id, 'imported', { volume: '1', calculated: 0, cbz_path: '/tmp/fake.cbz' });
+
+  // Provider now (incorrectly) reports chapter 1 as volume 2.
+  mockProvidersFor({ '1': '2', '2': '1', '3': '1' }, { totalVolumes: null });
+
+  const report = await previewRefreshSeries(s.id);
+  assert.equal(report.protectedSkipped.length, 1);
+  assert.equal(report.protectedSkipped[0].number, '1');
+  assert.equal(report.protectedSkipped[0].dbVolume, '1');
+  assert.equal(report.protectedSkipped[0].providerVolume, '2');
+  assert.equal(report.volumeChanges.length, 0);
+
+  // Still nothing written.
+  const after1 = listChaptersForSeries(s.id).find(c => c.number === '1');
+  assert.equal(after1.volume, '1');
+  assert.equal(after1.state, 'imported');
+});
+
+test('GET /api/series/:id/refresh-preview returns the same report shape over HTTP', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv3', title: 'Preview Series Three', language: 'en', monitored: true, packagingMode: 'volume' });
+  mockProvidersFor({ '1': '1', '2': '1' }, { totalVolumes: null });
+
+  const res = await app.inject({ method: 'GET', url: `/api/series/${s.id}/refresh-preview` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.seriesTitle, 'Preview Series Three');
+  assert.ok(Array.isArray(body.providersConsulted));
+});

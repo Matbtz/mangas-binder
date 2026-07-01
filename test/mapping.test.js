@@ -13,7 +13,7 @@ process.env.STAGING_DIR = path.join(tmp, 'staging');
 const { ensureSeeded } = await import('../src/core/settings.js');
 const { createSeries, upsertChapter, listChaptersForSeries, setChapterState } = await import('../src/core/repo.js');
 const { resolveVolumes } = await import('../src/core/mapping.js');
-const { extrapolateVolumes, sanitizeVolumeMap } = await import('../src/core/extrapolate.js');
+const { extrapolateVolumes, sanitizeVolumeMap, getVolumeStats } = await import('../src/core/extrapolate.js');
 const { closeDb } = await import('../src/core/db.js');
 
 ensureSeeded();
@@ -29,10 +29,26 @@ test('extrapolate: no hint groups untagged chapters by avg chapters/volume', () 
 });
 
 test('extrapolate: hint caps volumes and overflows the rest', () => {
+  // Pin chsPerVol explicitly so this isolates the cap/overflow mechanism from
+  // the (separate) auto chsPerVol/hint blending covered below.
   const volumeMap = { '1': ['1', '2', '3'], '2': ['4', '5', '6'] };
-  const { calculated, overflow } = extrapolateVolumes(volumeMap, ['7', '8', '9', '10', '11', '12'], 3);
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, ['7', '8', '9', '10', '11', '12'], 3, true, 3);
   assert.deepEqual(calculated, { '3': ['7', '8', '9'] });
   assert.deepEqual(overflow, ['10', '11', '12']);
+});
+
+test('extrapolate: with no explicit chsPerVol, the total-volume hint reshapes the tail so the last estimated volume matches the known total', () => {
+  // MangaDex only tagged the first 3 volumes (7 chapters each); MangaUpdates
+  // says the series has 20 volumes total, and there are 200 more untagged
+  // chapters. The historical average (7/volume) would blow past volume 20
+  // (landing around volume 32); blending in the hint should instead spread
+  // the remaining chapters so the last one lands on volume 20.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = { '1': range(1, 7), '2': range(8, 14), '3': range(15, 21) };
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, range(22, 221), 20, false, null);
+  assert.deepEqual(overflow, []);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number);
+  assert.equal(Math.max(...volNums), 20);
 });
 
 test('resolveVolumes: assigns estimated volumes to untagged chapters, keeps real tags', () => {
@@ -92,6 +108,41 @@ test('resolveVolumes: demotes a noisy "real" tag even when no chapter is unassig
   const ch50 = chs.find(c => c.number === '50');
   assert.notEqual(ch50.volume, '2');
   assert.equal(ch50.calculated, 1);
+});
+
+test('extrapolateVolumes: sparse anchors spread the gap evenly instead of piling into the volume before the next anchor', () => {
+  // Only volume 1 (chapters 1-7) and volume 10 (chapters 100-102) are tagged;
+  // chapters 8-99 are untagged. Walking forward with a flat 7-chapters/volume
+  // rate and clamping at volume 10 used to dump everything that didn't fit
+  // into volume 9 alone (43 chapters). It should now spread evenly across the
+  // 8 available slots (volumes 2-9).
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = { '1': range(1, 7), '10': ['100', '101', '102'] };
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, range(8, 99), null, false, 7);
+  assert.deepEqual(overflow, []);
+  const counts = Object.entries(calculated)
+    .filter(([v]) => v !== 'Specials')
+    .map(([, chs]) => chs.length);
+  assert.equal(counts.reduce((a, b) => a + b, 0), 92);
+  // No single volume should absorb an outsized share of the gap.
+  assert.ok(Math.max(...counts) <= 12, `expected an even split, got a max of ${Math.max(...counts)}`);
+});
+
+test('getVolumeStats: a single oversized volume does not drag the average up (median, not mean)', () => {
+  const volumeMap = {
+    '1': ['1', '2', '3', '4', '5', '6', '7'],
+    '2': ['8', '9', '10', '11', '12', '13', '14'],
+    '3': ['15', '16', '17', '18', '19', '20', '21'],
+    '4': ['22', '23', '24', '25', '26', '27', '28'],
+    '5': Array.from({ length: 30 }, (_, i) => String(29 + i)), // one abnormally large volume
+    '6': ['59', '60', '61', '62', '63', '64', '65'],
+    '7': ['66', '67', '68', '69', '70', '71', '72'],
+    '8': ['73', '74', '75', '76', '77', '78', '79'],
+    '9': ['80', '81', '82', '83', '84', '85', '86'],
+  };
+  const stats = getVolumeStats(volumeMap);
+  // The mean would be dragged to 10; the median of the per-volume counts is 7.
+  assert.equal(stats.avgChsPerVol, 7);
 });
 
 test('extrapolateVolumes: chapters beyond the last real volume are grouped into new sequential volumes (unreleased content)', () => {
