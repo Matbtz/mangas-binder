@@ -1644,7 +1644,7 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
   const volRanges = new Map();
   for (const c of chapters) {
     if (c.volume == null || c.volume === '' || c.volume === 'none' || c.volume === 'Specials') continue;
-    if (c.calculated && c.state !== 'imported') continue;
+    if (c.calculated && c.state !== 'imported' && c.state !== 'bindery') continue;
     const num = parseFloat(c.number);
     if (Number.isNaN(num) || !Number.isInteger(num)) continue;
     if (!volRanges.has(c.volume)) volRanges.set(c.volume, { min: num, max: num });
@@ -1991,6 +1991,7 @@ function openBinderyAuditModal() {
         <p class="muted">Running integrity audit on bindery files…</p>
       </div>
       <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn sm" id="ba-repackage" style="display:none;background:#238636;border-color:#238636;color:#fff">🔁 Repackage Stale Volumes</button>
         <button class="btn sm" id="ba-fix" style="display:none;background:#238636;border-color:#238636;color:#fff">🔧 Fix Missing Chapters</button>
         <button class="btn sm" id="ba-copy" style="display:none">📋 Copy Report</button>
         <button class="btn sm primary" id="ba-cancel">Close</button>
@@ -2001,6 +2002,7 @@ function openBinderyAuditModal() {
   const baBody = modal.querySelector('#ba-body');
   const copyBtn = modal.querySelector('#ba-copy');
   const fixBtn = modal.querySelector('#ba-fix');
+  const repackageBtn = modal.querySelector('#ba-repackage');
   const close = () => modal.remove();
   modal.querySelector('#ba-close').onclick = close;
   modal.querySelector('#ba-cancel').onclick = close;
@@ -2030,6 +2032,36 @@ function openBinderyAuditModal() {
         fixBtn.textContent = '🔧 Fix Missing Chapters';
       }
     }
+  };
+
+  repackageBtn.onclick = async () => {
+    if (confirm('Are you sure you want to repackage every stale volume with its current chapter distribution? The old CBZs will be replaced.')) {
+      repackageBtn.disabled = true;
+      repackageBtn.textContent = 'Repackaging…';
+      try {
+        const res = await api('/audit/fix-stale-volumes', { method: 'POST' });
+        let msg = `Repackaged ${res.repackagedSeries} series with corrected volume boundaries.`;
+        if (res.orphanedFiles?.length) msg += ` ${res.orphanedFiles.length} old file(s) are now unused and can be deleted manually.`;
+        toast(msg);
+        close();
+      } catch (e) {
+        toast('Failed to repackage: ' + e.message);
+        repackageBtn.disabled = false;
+        repackageBtn.textContent = '🔁 Repackage Stale Volumes';
+      }
+    }
+  };
+
+  const hasStaleVolumeIssues = (res) => {
+    if (!res.results) return false;
+    for (const s of res.results) {
+      for (const f of s.files) {
+        for (const issue of f.issues) {
+          if (issue.includes('package is stale')) return true;
+        }
+      }
+    }
+    return false;
   };
 
   const hasFixableIssues = (res) => {
@@ -2093,6 +2125,9 @@ function openBinderyAuditModal() {
       copyBtn.style.display = 'inline-block';
       if (hasFixableIssues(res)) {
         fixBtn.style.display = 'inline-block';
+      }
+      if (hasStaleVolumeIssues(res)) {
+        repackageBtn.style.display = 'inline-block';
       }
     } catch (e) {
       baBody.innerHTML = `<p style="color:var(--warn)">Failed to run integrity audit: ${esc(e.message)}</p>`;
@@ -2779,6 +2814,7 @@ async function viewSettings(v) {
   iform.appendChild(ibtnRow);
 
   const ifixBtn = h('<button class="btn sm primary" style="align-self:flex-start;display:none;background:#238636;border-color:#238636;margin-right:10px">🔧 Fix Missing Chapters (Queue Redownload)</button>');
+  const irepackageBtn = h('<button class="btn sm primary" style="align-self:flex-start;display:none;background:#238636;border-color:#238636;margin-right:10px">🔁 Repackage Stale Volumes</button>');
   const iresults = h('<div style="display:none;flex-direction:column;gap:10px;margin-top:10px"></div>');
   const itext = h('<textarea readonly style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;color:#fff;padding:10px;border-radius:8px;font-family:monospace;font-size:12px"></textarea>');
   const icopy = h('<button class="btn sm" style="align-self:flex-start">📋 Copy to Clipboard</button>');
@@ -2819,6 +2855,38 @@ async function viewSettings(v) {
     return false;
   };
 
+  const hasStaleVolumeIssues = (res) => {
+    if (!res.results) return false;
+    for (const s of res.results) {
+      for (const f of s.files) {
+        for (const issue of f.issues) {
+          if (issue.includes('package is stale')) return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  irepackageBtn.onclick = async () => {
+    if (confirm('Are you sure you want to repackage every stale volume with its current chapter distribution? The old CBZs will be replaced.')) {
+      irepackageBtn.disabled = true;
+      irepackageBtn.textContent = 'Repackaging…';
+      try {
+        const res = await api('/audit/fix-stale-volumes', { method: 'POST' });
+        let msg = `Repackaged ${res.repackagedSeries} series with corrected volume boundaries.`;
+        if (res.orphanedFiles?.length) msg += ` ${res.orphanedFiles.length} old file(s) are now unused and can be deleted manually.`;
+        toast(msg);
+        itext.value = 'Issues queued for fix. Re-run integrity audit to update report.';
+        irepackageBtn.style.display = 'none';
+        ilastRun.textContent = 'Last run: Never';
+      } catch (e) {
+        toast('Failed to repackage: ' + e.message);
+        irepackageBtn.disabled = false;
+        irepackageBtn.textContent = '🔁 Repackage Stale Volumes';
+      }
+    }
+  };
+
   const formatIntegrityLines = (res) => {
     const lines = [];
     lines.push('=== mangas-binder CBZ integrity audit ===\n');
@@ -2853,6 +2921,7 @@ async function viewSettings(v) {
         itext.value = lines.join('\n');
         iresults.style.display = 'flex';
         ifixBtn.style.display = hasFixableIssues(res) ? 'inline-block' : 'none';
+        irepackageBtn.style.display = hasStaleVolumeIssues(res) ? 'inline-block' : 'none';
       } else {
         ilastRun.textContent = 'Last run: Never';
       }
@@ -2872,6 +2941,7 @@ async function viewSettings(v) {
       itext.value = lines.join('\n');
       iresults.style.display = 'flex';
       ifixBtn.style.display = hasFixableIssues(res) ? 'inline-block' : 'none';
+      irepackageBtn.style.display = hasStaleVolumeIssues(res) ? 'inline-block' : 'none';
       toast('Integrity audit completed successfully');
     } catch (e) {
       toast('Failed: ' + e.message);
@@ -2884,6 +2954,7 @@ async function viewSettings(v) {
   iresults.appendChild(itext);
   const ibtnRow2 = h('<div style="display:flex;gap:10px"></div>');
   ibtnRow2.appendChild(ifixBtn);
+  ibtnRow2.appendChild(irepackageBtn);
   ibtnRow2.appendChild(icopy);
   iresults.appendChild(ibtnRow2);
   iform.appendChild(iresults);

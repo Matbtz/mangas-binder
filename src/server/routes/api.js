@@ -18,7 +18,7 @@ import {
 import { followSeries, refreshSeries } from '../../core/series-service.js';
 import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
-import { getVolumeStats, extrapolateVolumes, buildVolumeMapFromChapters } from '../../core/extrapolate.js';
+import { getVolumeStats, extrapolateVolumes, buildVolumeMapFromChapters, sanitizeVolumeMap } from '../../core/extrapolate.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning, packageCompleteVolumes } from '../../download/worker.js';
@@ -715,44 +715,21 @@ bindery.push({
 
     for (const s of series) {
       const chapters = db.prepare('SELECT id, number, volume, calculated FROM chapters WHERE series_id = ? ORDER BY CAST(number AS REAL), number').all(s.id);
-      
+
       const volMap = {};
       for (const c of chapters) {
-        if (c.volume == null || c.volume === '' || c.volume === 'none') continue;
-        (volMap[c.volume] ||= []).push(c);
+        if (c.volume == null || c.volume === '' || c.volume === 'none' || c.volume === 'Specials') continue;
+        (volMap[c.volume] ||= []).push(c.number);
       }
 
-      const volKeys = Object.keys(volMap).sort((a, b) => parseFloat(a) - parseFloat(b));
-      const anomalies = [];
-
-      const ranges = [];
-      for (const vol of volKeys) {
-        const chs = volMap[vol];
-        const nums = chs.map(c => parseFloat(c.number)).filter(n => !isNaN(n));
-        if (!nums.length) continue;
-        const min = Math.min(...nums);
-        const max = Math.max(...nums);
-        ranges.push({ vol, min, max, chCount: chs.length });
-
-        const span = max - min;
-        if (span > 50 && chs.length < 30) {
-          anomalies.push(`Volume ${vol} spans chapter numbers ${min} to ${max} (span of ${span}) but only has ${chs.length} chapters.`);
-        }
-      }
-
-      for (let i = 0; i < ranges.length; i++) {
-        for (let j = i + 1; j < ranges.length; j++) {
-          const r1 = ranges[i];
-          const r2 = ranges[j];
-          const v1Num = parseFloat(r1.vol);
-          const v2Num = parseFloat(r2.vol);
-          if (!isNaN(v1Num) && !isNaN(v2Num) && v1Num < v2Num) {
-            if (r1.max > r2.min) {
-              anomalies.push(`Overlap anomaly: Volume ${r1.vol} goes up to Chapter ${r1.max}, but Volume ${r2.vol} starts at Chapter ${r2.min}.`);
-            }
-          }
-        }
-      }
+      // Reuse the same outlier/monotonicity detector that seeds extrapolation
+      // (extrapolate.js), so this audit can never disagree with what the actual
+      // assignment logic considers an anomaly — a chapter flagged here is exactly
+      // one that resolveVolumes would demote and re-estimate on the next refresh.
+      const { noisy } = sanitizeVolumeMap(volMap);
+      const anomalies = noisy.length
+        ? [`${noisy.length} chapter(s) look statistically inconsistent with their assigned volume's neighbors and would be re-estimated on the next refresh: chapter(s) ${[...noisy].sort((a, b) => parseFloat(a) - parseFloat(b)).join(', ')}.`]
+        : [];
 
       if (anomalies.length > 0) {
         results.push({
@@ -820,6 +797,12 @@ bindery.push({
         // The fixer reads this instead of regex-parsing the human-readable strings,
         // so reworded messages can't silently break `fix-missing`.
         const missingChapters = [];
+        // Chapters whose *current* distribution (chapters.volume) no longer matches
+        // the volume this file was actually bound as (parsed from its filename by
+        // readCbzInfo). This happens when a chapter is packaged under an estimated
+        // volume and a later refresh corrects it without repackaging — the DB says
+        // one thing, the CBZ on disk says another.
+        const staleVolumeChapters = [];
         let fileSize = 0;
         let fileExists = false;
 
@@ -863,6 +846,20 @@ bindery.push({
                   }
                 }
               }
+
+              // 3. Distribution drift: does each chapter's *current* volume still
+              // match the volume this file was actually bound as?
+              if (!info.error && info.volume != null) {
+                for (const c of dbChapters) {
+                  if (c.volume == null || c.volume === '' || c.volume === 'none' || c.volume === 'Specials') continue;
+                  const dbVol = String(parseFloat(c.volume));
+                  if (dbVol !== info.volume) {
+                    fileIssues.push(`Chapter ${c.number}'s current distribution assigns it to Volume ${c.volume}, but this file is packaged as Volume ${info.volume} — the package is stale and should be rebuilt`);
+                    staleVolumeChapters.push({ number: c.number, currentVolume: c.volume, packagedVolume: info.volume });
+                    issuesFound++;
+                  }
+                }
+              }
             }
           } catch (err) {
             fileIssues.push(`Error reading CBZ file: ${err.message}`);
@@ -877,7 +874,8 @@ bindery.push({
             size: fileSize,
             exists: fileExists,
             issues: fileIssues,
-            missingChapters
+            missingChapters,
+            staleVolumeChapters
           });
         }
       }
@@ -965,6 +963,62 @@ bindery.push({
     }
 
     return { ok: true, fixedCount };
+  });
+
+  app.post('/api/audit/fix-stale-volumes', async (req, reply) => {
+    const reportPath = path.join(path.dirname(config.dbPath), 'cbz_integrity_report.json');
+    if (!existsSync(reportPath)) {
+      return { ok: false, error: 'No integrity report found. Run audit first.' };
+    }
+
+    let report;
+    try {
+      report = JSON.parse(readFileSync(reportPath, 'utf-8'));
+    } catch {
+      return reply.code(500).send({ error: 'Failed to read integrity report' });
+    }
+
+    // Group stale files by series so each affected series is only repackaged once,
+    // and remember the pre-repackage paths so we can tell which ones end up with
+    // no current chapter pointing at them (i.e. fully superseded, safe to delete).
+    const staleBySeriesId = new Map();
+    for (const s of report.results || []) {
+      for (const f of s.files || []) {
+        if (Array.isArray(f.staleVolumeChapters) && f.staleVolumeChapters.length) {
+          if (!staleBySeriesId.has(s.seriesId)) staleBySeriesId.set(s.seriesId, new Set());
+          staleBySeriesId.get(s.seriesId).add(f.path);
+        }
+      }
+    }
+
+    const db = getDb();
+    let repackagedSeries = 0;
+    const orphanedFiles = [];
+
+    for (const [seriesId, oldPaths] of staleBySeriesId.entries()) {
+      if (!getSeries(seriesId)) continue;
+      try {
+        // force: regroups by the *current* chapters.volume and rebuilds any
+        // complete/closed volume, so the corrected distribution is baked into a
+        // fresh (correctly named) CBZ instead of leaving the stale one in place.
+        // A volume that isn't "closed" yet (still the latest, series not complete)
+        // is left alone by design — same rule as every other packaging path — so
+        // only count series where something was actually rebuilt.
+        const imported = await packageCompleteVolumes(seriesId, { force: true });
+        if (imported > 0) repackagedSeries++;
+      } catch { /* leave this series' drift for a retry rather than losing the report */ }
+
+      for (const oldPath of oldPaths) {
+        const stillReferenced = db.prepare('SELECT 1 FROM chapters WHERE series_id = ? AND cbz_path = ?').get(seriesId, oldPath);
+        if (!stillReferenced && existsSync(oldPath)) orphanedFiles.push(oldPath);
+      }
+    }
+
+    try {
+      if (existsSync(reportPath)) unlinkSync(reportPath);
+    } catch {}
+
+    return { ok: true, repackagedSeries, orphanedFiles };
   });
 // --- Providers ---
   app.get('/api/providers', async () => {
