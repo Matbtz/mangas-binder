@@ -92,6 +92,47 @@ test('sanitizeVolumeMap: rejects a mistagged outlier that would overlap the next
   assert.ok(maxOf('3') < minOf('4'));
 });
 
+test('sanitizeVolumeMap: demotes whole volumes whose size is a severe outlier vs. the series median', () => {
+  // Mirrors a real One Piece production case: a clean run of ~11 chapters/
+  // volume everywhere, except a handful of volumes a scanlation/digital-omnibus
+  // group tagged with 33 chapters each — internally consistent (no per-chapter
+  // deviation, no overlap with neighbors), so passes 1 and 2 never see anything
+  // to reject. Only the whole-volume size check catches this.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = {};
+  let ch = 1;
+  for (let v = 1; v <= 10; v++) { volumeMap[String(v)] = range(ch, ch + 10); ch += 11; }
+  for (let v = 28; v <= 32; v++) { volumeMap[String(v)] = range(ch, ch + 32); ch += 33; }
+  for (let v = 33; v <= 37; v++) { volumeMap[String(v)] = range(ch, ch + 10); ch += 11; }
+
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap);
+  for (let v = 28; v <= 32; v++) assert.equal(String(v) in cleanVolumeMap, false, `vol ${v} should have been demoted`);
+  assert.equal(noisy.length, 5 * 33);
+  // Untouched: the clean runs on either side are unaffected.
+  assert.equal(cleanVolumeMap['5'].length, 11);
+  assert.equal(cleanVolumeMap['35'].length, 11);
+});
+
+test('extrapolateVolumes: an oversized real block gets redistributed across a wider span once demoted, instead of staying a single 30+ chapter volume', () => {
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = {};
+  let ch = 1;
+  for (let v = 1; v <= 10; v++) { volumeMap[String(v)] = range(ch, ch + 10); ch += 11; }
+  const gapStart = ch;
+  ch += 17 * 11; // volumes 11-27 exist as chapters but were never tagged at all
+  for (let v = 28; v <= 32; v++) { volumeMap[String(v)] = range(ch, ch + 32); ch += 33; }
+  for (let v = 33; v <= 37; v++) { volumeMap[String(v)] = range(ch, ch + 10); ch += 11; }
+  const unassigned = range(gapStart, gapStart + 17 * 11 - 1);
+
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, null, false, null);
+  assert.deepEqual(overflow, []);
+  const allCounts = Object.values(calculated).map(chs => chs.length);
+  // Before the whole-volume demotion fix, volumes 28-32 stayed trusted anchors
+  // at 33 chapters each; now they're folded back into estimation and spread
+  // across the wider 11-32 span instead of remaining a single 33-chapter block.
+  assert.ok(Math.max(...allCounts) < 33, `expected no single volume to keep all 33 chapters, got ${Math.max(...allCounts)}`);
+});
+
 test('resolveVolumes: demotes a noisy "real" tag even when no chapter is unassigned', () => {
   const s = createSeries({ provider: 'mangadex', providerSeriesId: 'map3', title: 'Map Three', language: 'en', monitored: true, packagingMode: 'volume' });
   for (const n of ['1', '2', '3']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });

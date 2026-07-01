@@ -4,6 +4,7 @@ import path from 'path';
 import { config } from './config.js';
 import { getSetting } from './settings.js';
 import { createCbz } from './packager.js';
+export { normTitle, titlesMatch } from './text-match.js';
 
 /**
  * The Tome target: turns built CBZ entry lists into files inside OUTPUT_DIR,
@@ -18,18 +19,6 @@ export function sanitize(name) {
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/[. ]+$/, '');             // no trailing dot/space
-}
-
-/** Normalise a title for fuzzy comparison: lowercase, strip punctuation, collapse spaces. */
-export function normTitle(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-}
-
-/** True when two title strings are close enough to be the same series. */
-export function titlesMatch(a, b) {
-  const na = normTitle(a), nb = normTitle(b);
-  if (!na || !nb) return false;
-  return na === nb || na.startsWith(nb) || nb.startsWith(na);
 }
 
 /** Absolute path of a series' folder in the output (Tome) library. */

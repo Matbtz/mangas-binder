@@ -11,6 +11,12 @@
  *     whose number falls at or before the previous volume's cleaned max, or
  *     at/after the next volume's cleaned min — guaranteeing non-overlapping,
  *     monotonically increasing bands.
+ *  3. Demotes whole volumes whose *total size* is a severe outlier vs. the
+ *     typical volume across the series (e.g. a scanlation/digital-omnibus
+ *     group tagging 30+ chapters under one volume number, internally
+ *     consistently — so passes 1 and 2 never see a per-chapter or overlap
+ *     anomaly to reject). Observed in production on One Piece: volumes with
+ *     10-12 chapters everywhere except a handful tagged with 32-33 each.
  *
  * Returns { cleanVolumeMap, noisy } where `noisy` is the flat list of
  * chapter numbers (strings) that were pulled out of their volume.
@@ -75,6 +81,25 @@ export function sanitizeVolumeMap(volumeMap) {
     const chs = [...cur.inliers.map(x => x.raw), ...cur.nonNumeric];
     if (chs.length) cleanVolumeMap[cur.vStr] = chs;
     for (const x of cur.outliers) noisy.push(x.raw);
+  }
+
+  // Pass 3: whole-volume size outlier. A volume more than ~2x the series'
+  // typical (median) size almost never reflects a real publisher volume —
+  // demote it back to noisy so extrapolateVolumes() can spread it evenly
+  // across however many volumes it should actually have spanned, instead of
+  // it standing as a single 30+ chapter anchor.
+  const sizes = perVolume.map(v => v.inliers.length).filter(n => n > 0).sort((a, b) => a - b);
+  if (sizes.length >= 4) {
+    const median = sizes[Math.floor(sizes.length / 2)];
+    const threshold = Math.max(median * 1.8, median + 8);
+    for (const v of perVolume) {
+      if (v.inliers.length > threshold) {
+        noisy.push(...v.inliers.map(x => x.raw));
+        if (v.nonNumeric.length) cleanVolumeMap[v.vStr] = [...v.nonNumeric];
+        else delete cleanVolumeMap[v.vStr];
+        v.inliers = [];
+      }
+    }
   }
 
   return { cleanVolumeMap, noisy };
