@@ -1,10 +1,12 @@
-import { readFile, readdir, cp, mkdir } from 'fs/promises';
+import { readFile, readdir, cp, mkdir, mkdtemp, rm } from 'fs/promises';
 import { existsSync, statSync } from 'fs';
 import path from 'path';
 import { buildEntries, volumeCbzName, chapterCbzName, issueCbzName, downloadBuffer } from './packager.js';
 import { buildComicInfoXml } from './comicinfo.js';
 import { chapterStagingDir } from '../download/downloader.js';
 import { writeCbz, destPath } from './library.js';
+import { resolveProfileForMedia } from './profiles.js';
+import { config } from './config.js';
 import { extractToStaging } from '../download/archive-downloader.js';
 import { getSeries, getChapter, listChaptersForSeries, setChapterState } from './repo.js';
 import { getProvider } from '../providers/index.js';
@@ -63,6 +65,13 @@ async function maybeCover(coverUrl) {
   return downloadBuffer(coverUrl);
 }
 
+/** Create a scratch dir for processed pages, or null when no profile applies. */
+async function makeWorkDir(preprocess) {
+  if (!preprocess) return null;
+  await mkdir(config.stagingDir, { recursive: true });
+  return mkdtemp(path.join(config.stagingDir, '.proc-'));
+}
+
 /**
  * Bind a single chapter into its own CBZ (chapter packaging mode).
  * @returns {Promise<{ path, size, skipped }>}
@@ -73,10 +82,16 @@ export async function bindChapter(series, chapter, { coverUrl = null } = {}) {
   const localChapters = { [num]: chapterStagingDir(series.id, num) };
   const comicInfoXml = comicInfoFor(series, { chapterNum: num, title: chapter.title });
   const coverBuffer = await maybeCover(coverUrl);
-  const entries = await buildEntries([num], localChapters, { comicInfoXml, coverBuffer });
-  const fileName = isComic ? issueCbzName(series.title, num) : chapterCbzName(series.title, num);
-  const dest = destPath(series.title, fileName);
-  return writeCbz(entries, dest);
+  const preprocess = resolveProfileForMedia(series.media_type || 'manga');
+  const workDir = await makeWorkDir(preprocess);
+  try {
+    const entries = await buildEntries([num], localChapters, { comicInfoXml, coverBuffer, preprocess, workDir });
+    const fileName = isComic ? issueCbzName(series.title, num) : chapterCbzName(series.title, num);
+    const dest = destPath(series.title, fileName);
+    return await writeCbz(entries, dest);
+  } finally {
+    if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -101,9 +116,15 @@ export async function bindVolume(series, volumeLabel, chapters, { calculated = f
 
   const comicInfoXml = comicInfoFor(series, { volumeNum: volumeLabel === 'none' ? '' : volumeLabel, calculated });
   const coverBuffer = await maybeCover(coverUrl);
-  const entries = await buildEntries(nums, localChapters, { comicInfoXml, coverBuffer });
-  const dest = destPath(series.title, volumeCbzName(series.title, volumeLabel));
-  return writeCbz(entries, dest, { overwrite });
+  const preprocess = resolveProfileForMedia(series.media_type || 'manga');
+  const workDir = await makeWorkDir(preprocess);
+  try {
+    const entries = await buildEntries(nums, localChapters, { comicInfoXml, coverBuffer, preprocess, workDir });
+    const dest = destPath(series.title, volumeCbzName(series.title, volumeLabel));
+    return await writeCbz(entries, dest, { overwrite });
+  } finally {
+    if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /** Ensure chapter pages exist in staging, restoring from cbz_path if needed. */

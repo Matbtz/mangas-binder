@@ -40,6 +40,10 @@ than a chapter into a tankōbon). Comics default to **one CBZ per issue**.
 - 🗺️ **Smart volume mapping** — provider-tagged volumes are authoritative; units
   the source left untagged are assigned to *estimated* volumes (flagged in
   ComicInfo) so volume packaging still works for scanlations/issue runs.
+- 🖼️ **Image preprocessing** (optional, KCC-style) before packaging: resize to a
+  device resolution, turn double-page spreads into full **landscape** pages
+  (rotate or split), gamma, grayscale and JPEG re-encode. Build **profiles** in
+  Settings → Image Processing and assign one per book type (manga / comic).
 - 🔔 **Notifications** via **ntfy** and/or **Discord** when media is added (or on failures).
 - 📚 **Library reconciliation** — scans your existing CBZ library, detects what you
   already own (down to the chapter/issue, via MangaDex or ComicVine ids), marks it

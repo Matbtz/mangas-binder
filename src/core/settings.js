@@ -40,6 +40,8 @@ export function ensureSeeded() {
   seedSetting('notifyOnScan', d.notifyOnScan);
   seedSetting('notifyOnNewChapter', d.notifyOnNewChapter);
   seedSetting('debugLogs', d.debugLogs);
+  seedSetting('imageProcessingEnabled', d.imageProcessingEnabled);
+  seedSetting('imageProfileAssignments', d.imageProfileAssignments);
   seedSetting('libraryScanDirs', config.libraryScanDirs.join(', '));
   seedSetting('stagingDir', config.stagingDir);
   seedSetting('outputDir', config.outputDir);

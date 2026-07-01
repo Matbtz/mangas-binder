@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { createInterface } from 'readline/promises';
 import { existsSync } from 'fs';
+import { mkdir, mkdtemp, rm } from 'fs/promises';
+import path from 'path';
 import { program } from 'commander';
 import { searchManga, fetchVolumeMap, fetchMangaDetails, fetchVolumeCovers } from '../providers/mangadex.js';
 import { getTotalVolumesForTitle } from '../providers/mangaupdates.js';
@@ -8,6 +10,8 @@ import { extrapolateVolumes, getVolumeStats } from '../core/extrapolate.js';
 import { scanLocalChapters, matchChapterToVolume } from '../core/scanner.js';
 import { buildJob, createCbz, downloadBuffer } from '../core/packager.js';
 import { buildComicInfoXml } from '../core/comicinfo.js';
+import { resolveProfileForMedia } from '../core/profiles.js';
+import { config } from '../core/config.js';
 
 program
   .name('mangas-binder')
@@ -18,7 +22,8 @@ program
   .option('-r, --refresh', 'Force re-fetch the chapter/volume mapping')
   .option('--skip-unassigned', 'Skip chapters that cannot be assigned to any volume')
   .option('--no-extrapolate', 'Disable extrapolation for unassigned chapters')
-  .option('--no-metadata', 'Skip adding ComicInfo.xml and cover image to CBZ files');
+  .option('--no-metadata', 'Skip adding ComicInfo.xml and cover image to CBZ files')
+  .option('--no-preprocess', 'Skip image preprocessing even if a manga profile is configured');
 
 program.parse();
 const opts = program.opts();
@@ -58,6 +63,14 @@ async function processVolumes(volumes, byVolume, localChapters, mangaTitle, mang
   let created = 0;
   let totalSize = 0;
 
+  // Resolve the manga image profile once (CLI binds manga only). Disabled with
+  // --no-preprocess or when no profile is configured/assigned.
+  const preprocess = opts.preprocess === false ? null : resolveProfileForMedia('manga');
+  if (preprocess) {
+    await mkdir(config.stagingDir, { recursive: true });
+    console.log('  Image preprocessing: ON (manga profile)');
+  }
+
   for (const vol of volumes) {
     const label = vol === 'none'
       ? 'Volume not released'
@@ -93,26 +106,31 @@ async function processVolumes(volumes, byVolume, localChapters, mangaTitle, mang
       });
     }
 
-    const job = await buildJob(vol, chapters, localChapters, opts.output, mangaTitle, isCalculated && vol !== 'none', comicInfoXml, coverBuffer);
+    const workDir = preprocess ? await mkdtemp(path.join(config.stagingDir, '.proc-')) : null;
+    try {
+      const job = await buildJob(vol, chapters, localChapters, opts.output, mangaTitle, isCalculated && vol !== 'none', comicInfoXml, coverBuffer, { preprocess, workDir });
 
-    if (job.entries.filter(e => e.sourcePath).length === 0) {
-      console.log(`  [${label}] No images found, skipping.`);
-      continue;
+      if (job.entries.filter(e => e.sourcePath).length === 0) {
+        console.log(`  [${label}] No images found, skipping.`);
+        continue;
+      }
+
+      process.stdout.write(`  [${label}] ${progressBar(0, job.entries.length)}\r`);
+
+      await createCbz(job, ({ current, total }) => {
+        process.stdout.write(`  [${label}] ${progressBar(current, total)}\r`);
+      });
+
+      const { statSync } = await import('fs');
+      const size = statSync(job.outputPath).size;
+      totalSize += size;
+      const coverTag = coverBuffer ? ' +cover' : '';
+      const metaTag = comicInfoXml ? ' +meta' : '';
+      console.log(`  [${label}] Done - ${job.entries.filter(e => e.sourcePath).length} pages${coverTag}${metaTag}, ${(size / 1024 / 1024).toFixed(1)} MB`);
+      created++;
+    } finally {
+      if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
-
-    process.stdout.write(`  [${label}] ${progressBar(0, job.entries.length)}\r`);
-
-    await createCbz(job, ({ current, total }) => {
-      process.stdout.write(`  [${label}] ${progressBar(current, total)}\r`);
-    });
-
-    const { statSync } = await import('fs');
-    const size = statSync(job.outputPath).size;
-    totalSize += size;
-    const coverTag = coverBuffer ? ' +cover' : '';
-    const metaTag = comicInfoXml ? ' +meta' : '';
-    console.log(`  [${label}] Done - ${job.entries.filter(e => e.sourcePath).length} pages${coverTag}${metaTag}, ${(size / 1024 / 1024).toFixed(1)} MB`);
-    created++;
   }
 
   return { created, totalSize };
