@@ -1174,15 +1174,19 @@ bindery.push({
     const { volumes = [] } = req.body || {};
     if (!Array.isArray(volumes)) return reply.code(400).send({ error: 'volumes array required' });
     const db = getDb();
-    
-    // Clear old volume assignments (excluding Specials) first
+
+    // Clear old volume assignments (excluding Specials) first. Chapters already
+    // packaged into a CBZ ('imported'/'bindery') are left untouched — the CBZ on
+    // disk was built with their current volume number, so silently reassigning
+    // it here would desync the DB from the file that already exists (mirrors the
+    // same protection resolveVolumes() applies in mapping.js).
     db.prepare(`
-      UPDATE chapters 
+      UPDATE chapters
       SET volume = NULL, calculated = 0, updated_at = datetime('now')
-      WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL)
+      WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL) AND state NOT IN ('imported', 'bindery')
     `).run(s.id);
 
-    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
+    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state NOT IN ('imported', 'bindery')");
     let totalChanges = 0;
     for (const { volume, from, to } of volumes) {
       if (!volume || from == null || to == null) continue;
@@ -1233,7 +1237,10 @@ bindery.push({
       }
     }
 
-    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ?");
+    // Chapters already packaged into a CBZ ('imported'/'bindery') keep their
+    // existing volume — reassigning them here without repackaging would desync
+    // the DB from the file already on disk.
+    const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state NOT IN ('imported', 'bindery')");
     const res = upd.run(String(volume), s.id, Number(from), Number(to));
     await refreshSeries(s.id);
     await autoPackageCompleteVolumes(s.id);
