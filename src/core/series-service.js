@@ -354,13 +354,21 @@ export async function previewRefreshSeries(seriesId) {
   }
   const mergedChapters = [...mergedByNumber.values()];
   const { volumeMap, unassigned } = buildVolumeMapFromChapters(mergedChapters);
-  const { noisy } = sanitizeVolumeMap(volumeMap);
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap);
   const stats = getVolumeStats(volumeMap);
   const totalVolumesHint = series.total_volumes_hint || mangaUpdates?.totalVolumesHint || null;
   const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null);
 
+  // Use the *sanitized* map here, not the raw one: extrapolateVolumes() already
+  // re-sanitizes internally and reassigns noisy/outlier-volume chapters to a
+  // corrected slot inside `calculated`. Building this from the raw volumeMap
+  // would double-count those chapters (once under their rejected original
+  // volume, once under their corrected one) and would make whole-volume
+  // outliers that sanitizeVolumeMap already demoted (see its Pass 3) still show
+  // up at full size here — silently defeating that safeguard for anyone
+  // reading the preview instead of the eventual real refresh.
   const volumeBreakdown = {};
-  for (const [v, chs] of Object.entries(volumeMap)) {
+  for (const [v, chs] of Object.entries(cleanVolumeMap)) {
     if (v === 'none') continue;
     volumeBreakdown[v] = (volumeBreakdown[v] || 0) + chs.length;
   }

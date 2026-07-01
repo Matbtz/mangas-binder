@@ -93,6 +93,28 @@ test('previewRefreshSeries: flags a volume-tag conflict for an already-packaged 
   assert.equal(after1.state, 'imported');
 });
 
+test('previewRefreshSeries: volumeBreakdown does not double-count a demoted noisy chapter under both its rejected and corrected volume', async () => {
+  // Chapters 1-10 are a clean volume-1 cluster; chapter 500 is a wildly
+  // mistagged "volume 1" outlier (e.g. a scanlation group's bad tag) that
+  // sanitizeVolumeMap()'s per-chapter outlier check demotes back to noisy so
+  // extrapolateVolumes() can re-place it at a sane estimated volume instead.
+  // volumeBreakdown must reflect the *sanitized* count for volume 1 (10, not
+  // 11) and must not also double-count chapter 500 under whatever volume it
+  // gets re-estimated into on top of its original bad tag.
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv4', title: 'Preview Series Four', language: 'en', monitored: true, packagingMode: 'volume' });
+  const chapterVolumes = {};
+  for (let i = 1; i <= 10; i++) chapterVolumes[String(i)] = '1';
+  chapterVolumes['500'] = '1'; // mistagged outlier
+  mockProvidersFor(chapterVolumes, { totalVolumes: null });
+
+  const report = await previewRefreshSeries(s.id);
+
+  assert.ok(report.noisyChapters.includes('500'));
+  assert.equal(report.volumeBreakdown['1'], 10);
+  const totalChapters = Object.values(report.volumeBreakdown).reduce((a, b) => a + b, 0);
+  assert.equal(totalChapters, 11); // 10 clean + 1 re-estimated chapter 500, not 12
+});
+
 test('GET /api/series/:id/refresh-preview returns the same report shape over HTTP', async () => {
   const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv3', title: 'Preview Series Three', language: 'en', monitored: true, packagingMode: 'volume' });
   mockProvidersFor({ '1': '1', '2': '1' }, { totalVolumes: null });
