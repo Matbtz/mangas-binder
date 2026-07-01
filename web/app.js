@@ -2889,6 +2889,144 @@ async function viewSettings(v) {
   iform.appendChild(iresults);
   ic.appendChild(iform);
   container.appendChild(ic);
+
+  await renderImageProcessingCard(container, settings);
+}
+
+// Treatment blocks rendered in the Image Processing profile editor. Each entry
+// becomes a toggle-able module with its own input fields.
+const IMG_MODULES = [
+  { key: 'grayscale',    label: 'Grayscale (color mode off)', fields: [] },
+  { key: 'autocontrast', label: 'Autocontrast / black point',  fields: [['blackPoint', 'Black point %', 'number']] },
+  { key: 'gamma',        label: 'Gamma correction',            fields: [['value', 'Gamma (1.0–3.0)', 'number']] },
+  { key: 'crop',         label: 'Crop margins',                fields: [['power', 'Power', 'number'], ['preserveMarginPct', 'Preserve margin %', 'number']] },
+  { key: 'spread',       label: 'Double-spread handling',      fields: [['mode', 'Mode', ['rotate', 'split']], ['direction', 'Reading direction', ['rtl', 'ltr']]] },
+  { key: 'resize',       label: 'Resize to device',            fields: [['width', 'Width px', 'number'], ['height', 'Height px', 'number'], ['mode', 'Fit', ['fit', 'stretch']], ['upscale', 'Upscale', 'bool']] },
+  { key: 'encode',       label: 'Re-encode',                   fields: [['format', 'Format', ['jpeg', 'keep']], ['quality', 'JPEG quality', 'number']] },
+];
+
+async function renderImageProcessingCard(container, settings) {
+  const { profiles, defaultConfig } = await api('/profiles');
+  const assignments = settings.imageProfileAssignments || { manga: null, comic: null };
+
+  const card = h('<div class="card" style="grid-column: 1 / -1; margin-top:20px"><h2>Image Processing</h2><p class="muted" style="font-size:13px;margin:4px 0 14px 0">KCC-style page treatment applied just before packaging: resize to your device, rotate/split double-page spreads, gamma, grayscale and re-encode. Build profiles and assign one per book type.</p></div>');
+
+  // Master switch
+  const masterRow = h('<label class="field" style="display:flex;align-items:center;gap:10px;margin-bottom:14px"></label>');
+  const master = h(`<input type="checkbox" ${settings.imageProcessingEnabled ? 'checked' : ''}>`);
+  masterRow.append(master, h('<span>Enable image preprocessing <span class="muted" style="font-size:11px">— when off, pages are packaged untouched</span></span>'));
+  master.onchange = async () => { await api('/settings', { method: 'PATCH', body: { imageProcessingEnabled: master.checked } }); toast('Saved'); };
+  card.appendChild(masterRow);
+
+  // Assignment selects (manga / comic -> profile)
+  const assignWrap = h('<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:18px"></div>');
+  const profileOptions = (sel) => `<option value="">— none —</option>` +
+    profiles.map(p => `<option value="${p.id}" ${String(sel) === String(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+  for (const mt of ['manga', 'comic']) {
+    const row = h(`<label class="field">${mt[0].toUpperCase() + mt.slice(1)} profile</label>`);
+    const sel = h(`<select>${profileOptions(assignments[mt])}</select>`);
+    sel.onchange = async () => {
+      const next = { ...assignments, [mt]: sel.value ? Number(sel.value) : null };
+      await api('/settings', { method: 'PATCH', body: { imageProfileAssignments: next } });
+      assignments[mt] = next[mt];
+      toast('Saved');
+    };
+    row.appendChild(sel); assignWrap.appendChild(row);
+  }
+  card.appendChild(assignWrap);
+
+  // Profile picker + create/delete
+  const pickerRow = h('<div class="row" style="align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap"></div>');
+  const picker = h(`<select style="min-width:200px"><option value="">— select a profile —</option>${profiles.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>`);
+  const newBtn = h('<button class="btn sm">+ New profile</button>');
+  const delBtn = h('<button class="btn sm" style="color:#f88">Delete</button>');
+  pickerRow.append(picker, newBtn, delBtn);
+  card.appendChild(pickerRow);
+
+  const editor = h('<div style="display:none;flex-direction:column;gap:12px"></div>');
+  card.appendChild(editor);
+
+  newBtn.onclick = async () => {
+    const name = prompt('Profile name:', 'PocketBook');
+    if (name == null) return;
+    await api('/profiles', { method: 'POST', body: { name, config: defaultConfig } });
+    toast('Profile created'); viewSettings(document.querySelector('#view'));
+  };
+
+  delBtn.onclick = async () => {
+    if (!picker.value) return;
+    if (!confirm('Delete this profile? Any book-type assignment to it will be cleared.')) return;
+    await api(`/profiles/${picker.value}`, { method: 'DELETE' });
+    toast('Deleted'); viewSettings(document.querySelector('#view'));
+  };
+
+  picker.onchange = () => {
+    const p = profiles.find(x => String(x.id) === picker.value);
+    editor.innerHTML = '';
+    if (!p) { editor.style.display = 'none'; return; }
+    editor.style.display = 'flex';
+    renderProfileEditor(editor, p, defaultConfig);
+  };
+
+  container.appendChild(card);
+}
+
+function renderProfileEditor(editor, profile, defaultConfig) {
+  const cfg = { ...defaultConfig, ...(profile.config || {}) };
+
+  // Name field
+  const nameRow = h('<label class="field">Profile name</label>');
+  const nameInp = h(`<input value="${esc(profile.name)}" style="max-width:280px">`);
+  nameRow.appendChild(nameInp); editor.appendChild(nameRow);
+
+  const modulesWrap = h('<div style="display:flex;flex-direction:column;gap:10px"></div>');
+  const inputs = {}; // key -> { enabled, fields: { field -> el } }
+
+  for (const mod of IMG_MODULES) {
+    const block = cfg[mod.key] || { enabled: false };
+    const row = h('<div style="border:1px solid #30363d;border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px"></div>');
+    const head = h('<label class="field" style="display:flex;align-items:center;gap:10px;margin:0"></label>');
+    const chk = h(`<input type="checkbox" ${block.enabled ? 'checked' : ''}>`);
+    head.append(chk, h(`<span style="font-weight:600">${mod.label}</span>`));
+    row.appendChild(head);
+
+    const fieldEls = {};
+    if (mod.fields.length) {
+      const grid = h('<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;padding-left:26px"></div>');
+      for (const [fkey, flabel, ftype] of mod.fields) {
+        const f = h(`<label class="field" style="font-size:12px">${flabel}</label>`);
+        let inp;
+        const cur = block[fkey];
+        if (Array.isArray(ftype)) inp = h(`<select>${ftype.map(o => `<option ${o === cur ? 'selected' : ''}>${o}</option>`).join('')}</select>`);
+        else if (ftype === 'bool') { inp = h(`<select><option value="true">true</option><option value="false">false</option></select>`); inp.value = String(cur ?? false); }
+        else inp = h(`<input type="number" step="any" value="${esc(cur ?? '')}">`);
+        f.appendChild(inp); grid.appendChild(f); fieldEls[fkey] = { el: inp, type: ftype };
+      }
+      row.appendChild(grid);
+    }
+    inputs[mod.key] = { chk, fieldEls };
+    modulesWrap.appendChild(row);
+  }
+  editor.appendChild(modulesWrap);
+
+  const save = h('<button class="btn primary" style="align-self:flex-start">Save profile</button>');
+  save.onclick = async () => {
+    const config = {};
+    for (const mod of IMG_MODULES) {
+      const { chk, fieldEls } = inputs[mod.key];
+      const block = { enabled: chk.checked };
+      for (const [fkey, meta] of Object.entries(fieldEls)) {
+        const raw = meta.el.value;
+        if (Array.isArray(meta.type)) block[fkey] = raw;
+        else if (meta.type === 'bool') block[fkey] = raw === 'true';
+        else block[fkey] = raw === '' ? null : Number(raw);
+      }
+      config[mod.key] = block;
+    }
+    await api(`/profiles/${profile.id}`, { method: 'PATCH', body: { name: nameInp.value.trim() || profile.name, config } });
+    toast('Profile saved');
+  };
+  editor.appendChild(save);
 }
 
 function openPackageAuditModal({ title, allVols, alerts, onProceed }) {

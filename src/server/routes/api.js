@@ -16,6 +16,7 @@ import {
   setProviderEnabled, setProviderConfig, getProviderConfig, isProviderEnabled,
 } from '../../core/settings.js';
 import { followSeries, refreshSeries } from '../../core/series-service.js';
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, DEFAULT_PROFILE_CONFIG } from '../../core/profiles.js';
 import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
 import { getVolumeStats, extrapolateVolumes, buildVolumeMapFromChapters } from '../../core/extrapolate.js';
@@ -706,6 +707,23 @@ bindery.push({
     for (const [k, v] of Object.entries(body)) setSetting(k, v);
     if ('scanIntervalHours' in body) startScheduler(); // re-arm with new interval
     return getAllSettings();
+  });
+
+  // --- Image processing profiles ---
+  app.get('/api/profiles', async () => ({ profiles: listProfiles(), defaultConfig: DEFAULT_PROFILE_CONFIG }));
+  app.post('/api/profiles', async (req) => {
+    const { name, config: cfg } = req.body || {};
+    return createProfile(name || 'New profile', cfg || DEFAULT_PROFILE_CONFIG);
+  });
+  app.patch('/api/profiles/:id', async (req, reply) => {
+    const id = Number(req.params.id);
+    const updated = updateProfile(id, req.body || {});
+    if (!updated) return reply.code(404).send({ error: 'Profile not found' });
+    return updated;
+  });
+  app.delete('/api/profiles/:id', async (req) => {
+    deleteProfile(Number(req.params.id));
+    return { ok: true };
   });
 
   app.get('/api/audit-all', async (req, reply) => {

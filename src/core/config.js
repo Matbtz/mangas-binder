@@ -68,5 +68,10 @@ export const config = {
     notifyOnScan: process.env.NOTIFY_ON_SCAN === 'true',
     notifyOnNewChapter: process.env.NOTIFY_ON_NEW_CHAPTER === 'true',
     debugLogs: process.env.DEBUG_LOGS === 'true',
+    // Image preprocessing (KCC-style page treatment before packaging). Master
+    // switch is off by default so output is unchanged until a profile is set up.
+    imageProcessingEnabled: process.env.IMAGE_PROCESSING_ENABLED === 'true',
+    // Which image profile (by id) applies to each media type. null = no treatment.
+    imageProfileAssignments: { manga: null, comic: null },
   },
 };

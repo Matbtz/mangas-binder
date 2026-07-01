@@ -1,7 +1,8 @@
 import { ZipArchive } from 'archiver';
 import { createWriteStream, existsSync } from 'fs';
-import { readdir, mkdir } from 'fs/promises';
+import { readdir, mkdir, writeFile } from 'fs/promises';
 import path from 'path';
+import { processPage, isNoop } from './image-preprocess.js';
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
 
@@ -73,10 +74,15 @@ export function issueCbzName(seriesName, issueNum) {
  * `chapters` is a list of chapter numbers; `localChapters` maps number -> folder.
  * @returns {Promise<Array<{archiveName, sourcePath?, content?}>>}
  */
-export async function buildEntries(chapters, localChapters, { comicInfoXml = null, coverBuffer = null } = {}) {
+export async function buildEntries(chapters, localChapters, { comicInfoXml = null, coverBuffer = null, preprocess = null, workDir = null } = {}) {
   const entries = [];
+  // Only run the image pipeline when a profile with at least one active block is
+  // supplied and we have a scratch dir to stream processed pages from.
+  const doProcess = preprocess && workDir && !isNoop(preprocess);
+  if (doProcess) await mkdir(workDir, { recursive: true });
 
-  // Cover image — sorts before all chapter pages alphabetically
+  // Cover image — sorts before all chapter pages alphabetically. Left untouched
+  // (provider art, not a scanned page).
   if (coverBuffer) {
     entries.push({ archiveName: '000_cover.jpg', content: coverBuffer });
   }
@@ -96,11 +102,36 @@ export async function buildEntries(chapters, localChapters, { comicInfoXml = nul
         .sort();
     } catch { continue; }
     if (!files.length) continue;
-    files.forEach((file, idx) => {
+
+    const chKey = chapterKey(chNum);
+    // Page counter is incremented per *output* image so a split spread yields two
+    // correctly numbered, contiguous pages.
+    let page = 0;
+    for (const file of files) {
+      const sourcePath = path.join(folderPath, file);
+      if (doProcess) {
+        let outputs;
+        try {
+          outputs = await processPage(sourcePath, preprocess);
+        } catch {
+          // A page that can't be processed is packed as-is rather than lost.
+          outputs = null;
+        }
+        if (outputs) {
+          for (const { buffer, ext } of outputs) {
+            page += 1;
+            const tmpName = `ch${chKey}_p${padNum(page, 3)}${ext}`;
+            const tmpPath = path.join(workDir, tmpName);
+            await writeFile(tmpPath, buffer);
+            entries.push({ archiveName: tmpName, sourcePath: tmpPath });
+          }
+          continue;
+        }
+      }
+      page += 1;
       const ext = path.extname(file);
-      const archiveName = `ch${chapterKey(chNum)}_p${padNum(idx + 1, 3)}${ext}`;
-      entries.push({ archiveName, sourcePath: path.join(folderPath, file) });
-    });
+      entries.push({ archiveName: `ch${chKey}_p${padNum(page, 3)}${ext}`, sourcePath });
+    }
   }
 
   // ComicInfo.xml — must be at root of the ZIP
@@ -111,9 +142,9 @@ export async function buildEntries(chapters, localChapters, { comicInfoXml = nul
   return entries;
 }
 
-export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null) {
+export async function buildJob(volumeLabel, chapters, localChapters, outputDir, mangaName, isCalculated = false, comicInfoXml = null, coverBuffer = null, { preprocess = null, workDir = null } = {}) {
   const outputPath = path.join(outputDir, volumeCbzName(mangaName, volumeLabel));
-  const entries = await buildEntries(chapters, localChapters, { comicInfoXml, coverBuffer });
+  const entries = await buildEntries(chapters, localChapters, { comicInfoXml, coverBuffer, preprocess, workDir });
   return { outputPath, entries };
 }
 
