@@ -94,9 +94,12 @@ export function buildVolumeMapFromChapters(chapters) {
   const unassigned = [];
   for (const c of chapters) {
     const hasRealVolume = c.volume != null && c.volume !== '' && !c.calculated;
+    // 'bindery' is a chapter already bound into a CBZ awaiting the next library
+    // scan to flip it to 'imported' — treat it the same as 'imported' so its
+    // volume stays a stable anchor rather than being re-estimated mid-flight.
     if (hasRealVolume) {
       (volumeMap[c.volume] ||= []).push(c.number);
-    } else if (c.state === 'imported' && c.volume) {
+    } else if ((c.state === 'imported' || c.state === 'bindery') && c.volume) {
       (volumeMap[c.volume] ||= []).push(c.number);
     } else {
       unassigned.push(c.number);

@@ -115,3 +115,18 @@ test('resolveVolumes: never reassigns already-imported chapters', () => {
   assert.equal(after.volume, '99'); // unchanged
   assert.equal(after.state, 'imported');
 });
+
+test('resolveVolumes: never reassigns chapters already packaged into "bindery"', () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'map4', title: 'Map Four', language: 'en', monitored: true, packagingMode: 'volume' });
+  for (const n of ['1', '2', '3']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });
+  for (const n of ['4', '5', '6']) upsertChapter(s.id, { provider: 'mangadex', number: n });
+  // ch4 was just bound into a CBZ but hasn't been promoted to 'imported' by the
+  // next library scan yet — it must be just as protected as 'imported'.
+  const ch4 = listChaptersForSeries(s.id).find(c => c.number === '4');
+  setChapterState(ch4.id, 'bindery', { volume: '99', calculated: 1, cbz_path: '/tmp/fake.cbz' });
+
+  resolveVolumes(s.id);
+  const after = listChaptersForSeries(s.id).find(c => c.number === '4');
+  assert.equal(after.volume, '99'); // unchanged
+  assert.equal(after.state, 'bindery');
+});

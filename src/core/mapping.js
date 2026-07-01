@@ -16,8 +16,10 @@ import { getSetting } from './settings.js';
  * Estimated assignments are flagged `calculated = 1` so the CBZ's ComicInfo.xml
  * notes that the volume boundary is an estimate.
  *
- * Only non-imported chapters are (re)assigned, so volumes already packaged keep
- * their boundaries stable across rescans.
+ * Only chapters that aren't already packaged (state 'imported' or 'bindery')
+ * are (re)assigned, so volumes already bound into a CBZ — or awaiting the next
+ * library scan to be marked as such — keep their boundaries stable across
+ * rescans.
  *
  * @returns {{ assigned: number }}  count of chapters given an estimated volume
  */
@@ -44,13 +46,14 @@ export function resolveVolumes(seriesId, { chaptersPerVolume = null } = {}) {
   const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null, false, chaptersPerVolume);
 
   const upd = getDb().prepare(
-    "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ? AND (state != 'imported' OR volume IS NULL OR volume = '')"
+    "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ? AND (state NOT IN ('imported', 'bindery') OR volume IS NULL OR volume = '')"
   );
   let assigned = 0;
+  const isPackaged = c => c.state === 'imported' || c.state === 'bindery';
   for (const [vol, nums] of Object.entries(calculated)) {
     for (const n of nums) {
       const c = byNumber.get(n);
-      if (c && (c.state !== 'imported' || c.volume == null || c.volume === '')) { upd.run(vol, c.id); assigned++; }
+      if (c && (!isPackaged(c) || c.volume == null || c.volume === '')) { upd.run(vol, c.id); assigned++; }
     }
   }
   return { assigned };
