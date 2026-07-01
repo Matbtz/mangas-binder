@@ -29,17 +29,25 @@ async function apiFetch(url, options = {}) {
  * many release records were inspected/trusted/discarded so a misbehaving
  * endpoint is visible (e.g. in the refresh-preview report) instead of silent.
  *
- * We cap at 100 pages (10 000 releases) to avoid runaway calls on very long
- * series; in practice even One Piece fits comfortably within that limit.
+ * Confirmed in production: because the series filter is ignored, this comes
+ * back as a firehose of mostly-unrelated releases (one real refresh checked
+ * 10,000 records for 6 verified matches, taking over two minutes — the whole
+ * refresh looked "stuck" from the UI). Paginating deep into a feed we already
+ * know isn't scoped to this series has a terrible cost/benefit ratio, so this
+ * now caps hard at a handful of pages *and* bails out as soon as a couple of
+ * consecutive pages verify nothing, instead of exhausting the old 100-page
+ * ceiling on every single refresh.
  */
 export async function fetchChapterVolumeMap(seriesId, expectedTitle = null) {
   const map = new Map();
   const perPage = 100;
+  const maxPages = 5;
+  const maxConsecutiveEmptyPages = 2;
   let page = 1;
   let hasMore = true;
-  let checked = 0, verified = 0, rejected = 0;
+  let checked = 0, verified = 0, rejected = 0, consecutiveEmptyPages = 0;
 
-  while (hasMore && page <= 100) {
+  while (hasMore && page <= maxPages) {
     const data = await apiFetch(`${BASE_URL}/releases/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -47,6 +55,7 @@ export async function fetchChapterVolumeMap(seriesId, expectedTitle = null) {
     });
 
     const results = data.results || [];
+    const verifiedBeforePage = verified;
     for (const r of results) {
       const rec = r.record || {};
       checked++;
@@ -68,7 +77,8 @@ export async function fetchChapterVolumeMap(seriesId, expectedTitle = null) {
       }
     }
 
-    hasMore = results.length === perPage;
+    consecutiveEmptyPages = verified === verifiedBeforePage ? consecutiveEmptyPages + 1 : 0;
+    hasMore = results.length === perPage && consecutiveEmptyPages < maxConsecutiveEmptyPages;
     page++;
     if (hasMore) await new Promise(r => setTimeout(r, 200));
   }

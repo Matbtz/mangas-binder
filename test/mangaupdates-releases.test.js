@@ -75,3 +75,31 @@ test('fetchChapterVolumeMap: fails closed (keeps nothing) when a record has no v
   assert.equal(verified, 0);
   assert.equal(rejected, 1);
 });
+
+test('fetchChapterVolumeMap: bails out early on an unfiltered firehose instead of paging through 10,000 records', async () => {
+  // Reproduces a real production report: with the series filter ignored, every
+  // page keeps coming back full (100 records) of entirely unrelated releases,
+  // so the old 100-page ceiling meant checking 10,000 records and taking over
+  // two minutes per refresh for a handful (or zero) of actual matches. It
+  // must now stop after a couple of pages that verify nothing rather than
+  // exhausting the full cap.
+  let pagesFetched = 0;
+  global.fetch = async () => {
+    pagesFetched++;
+    const records = Array.from({ length: 100 }, (_, i) => ({
+      series_id: 999999, series_name: 'Some Unrelated Series', chapter: String(i + 1), volume: '1',
+    }));
+    return releasesPage(records);
+  };
+
+  const start = Date.now();
+  const { map, checked, verified, rejected } = await fetchChapterVolumeMap(12345, 'Sakamoto Days');
+  const elapsedMs = Date.now() - start;
+
+  assert.equal(map.size, 0);
+  assert.equal(verified, 0);
+  assert.equal(rejected, checked);
+  assert.ok(pagesFetched <= 3, `expected an early bail-out, but fetched ${pagesFetched} pages`);
+  assert.ok(checked <= 300, `expected far fewer than 10,000 records checked, got ${checked}`);
+  assert.ok(elapsedMs < 2000, `expected this to resolve in well under a second of artificial delay, took ${elapsedMs}ms`);
+});
