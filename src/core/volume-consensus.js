@@ -140,6 +140,7 @@ export async function consultVolumeProviders(seriesTitle) {
       providerReports.push({
         name: r.label, role,
         matchedTitle: r.info.matchedTitle ?? null,
+        ...(r.info.wikiUrl ? { sourceUrl: r.info.wikiUrl } : {}),
         totalVolumes: r.info.totalVolumes, totalChapters: r.info.totalChapters,
       });
     }

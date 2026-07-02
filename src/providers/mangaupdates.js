@@ -2,9 +2,38 @@ import { normTitle } from '../core/text-match.js';
 
 const BASE_URL = 'https://api.mangaupdates.com/v1';
 
-async function apiFetch(url, options = {}) {
-  const res = await fetch(url, { ...options, signal: AbortSignal.timeout(10000) });
-  if (!res.ok) throw new Error(`MangaUpdates API error ${res.status}: ${url}`);
+/**
+ * A transient failure here (timeout, connection reset, 429, 5xx) must not be
+ * indistinguishable from a genuine "this series isn't on MangaUpdates" — a
+ * real production report showed MangaUpdates erroring out on a lookup for
+ * Dandadan (a series unquestionably in its database — confirmed live) while
+ * every other provider found it fine, most likely a momentary rate-limit or
+ * timeout under concurrent refresh load. A couple of short retries absorb
+ * that instead of silently dropping MangaUpdates' vote for the whole refresh
+ * cycle and mislabeling it as "not found" (see getTotalVolumesForTitle,
+ * which — unlike this function — must NOT swallow a still-failing request
+ * into null, so the caller can tell "lookup failed" apart from "no match").
+ */
+async function apiFetch(url, options = {}, attempt = 1) {
+  const maxAttempts = 3;
+  let res;
+  try {
+    res = await fetch(url, { ...options, signal: AbortSignal.timeout(10000) });
+  } catch (err) {
+    if (attempt < maxAttempts) {
+      await new Promise(r => setTimeout(r, attempt * 400));
+      return apiFetch(url, options, attempt + 1);
+    }
+    throw err;
+  }
+  if (!res.ok) {
+    const retryable = res.status === 429 || res.status >= 500;
+    if (retryable && attempt < maxAttempts) {
+      await new Promise(r => setTimeout(r, attempt * 400));
+      return apiFetch(url, options, attempt + 1);
+    }
+    throw new Error(`MangaUpdates API error ${res.status}: ${url}`);
+  }
   return res.json();
 }
 
@@ -150,25 +179,22 @@ export async function fetchTotalVolumes(seriesId) {
 
 /**
  * Convenience: search + fetch metadata for a title.
- * Returns { totalVolumes, latestChapter, seriesTitle, seriesId } or null if not found.
+ * Returns { totalVolumes, latestChapter, seriesTitle, seriesId } if a series
+ * genuinely matched the search, or null if the search came back empty.
+ *
+ * Deliberately does NOT catch-and-null a request failure the way this used
+ * to: a thrown network/API error is a different situation from "MangaUpdates
+ * has no such series" and callers (see core/volume-consensus.js) need to
+ * tell them apart, so a lookup failure propagates as a real exception
+ * instead of masquerading as "not found".
  */
 export async function getTotalVolumesForTitle(title) {
-  let results;
-  try {
-    results = await searchMangaUpdates(title);
-  } catch {
-    return null;
-  }
+  const results = await searchMangaUpdates(title);
   if (!results.length) return null;
 
   const best = results.find(r => r.title.toLowerCase() === title.toLowerCase()) || results[0];
-
-  try {
-    const meta = await fetchSeriesMetadata(best.id);
-    return { totalVolumes: meta.totalVolumes, latestChapter: meta.latestChapter, seriesTitle: best.title, seriesId: best.id };
-  } catch {
-    return null;
-  }
+  const meta = await fetchSeriesMetadata(best.id);
+  return { totalVolumes: meta.totalVolumes, latestChapter: meta.latestChapter, seriesTitle: best.title, seriesId: best.id };
 }
 
 /** Lightweight reachability check for the Settings "Test connection" button. */

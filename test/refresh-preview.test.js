@@ -167,6 +167,37 @@ test('previewRefreshSeries: with only MangaUpdates answering, its lone opinion i
   assert.equal(report.mangaUpdates.latestChapterConfidence, 1);
 });
 
+test('previewRefreshSeries: a transient MangaUpdates failure is reported as "lookup failed", not misreported as "no matching series found", and the other providers still resolve a consensus', async () => {
+  // Reproduces a real production report: MangaUpdates errored out on a
+  // lookup for a series (Dandadan) confirmed live to actually be in its
+  // database, most likely a momentary timeout/rate-limit under concurrent
+  // refresh load — and the report labeled it "no matching series found",
+  // which is misleading (it implies MangaUpdates was reached and searched,
+  // not that the request itself failed).
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv7', title: 'Preview Series', language: 'en', monitored: true, packagingMode: 'volume' });
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('mangadex.org') && u.includes('/aggregate')) return { ok: true, status: 200, json: async () => ({ volumes: {} }) };
+    if (u.includes('mangadex.org') && u.includes('/feed')) return { ok: true, status: 200, json: async () => ({ total: 0, data: [] }) };
+    if (u.includes('mangaupdates.com')) throw new Error('ETIMEDOUT'); // keeps failing through every retry
+    if (u.includes('graphql.anilist.co')) {
+      return { ok: true, status: 200, json: async () => ({ data: { Media: { title: { romaji: 'Preview Series', english: null }, volumes: 24, chapters: 239, status: 'RELEASING' } } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+
+  const report = await previewRefreshSeries(s.id);
+
+  const muReport = report.providersConsulted.find(p => p.name === 'MangaUpdates');
+  assert.equal(muReport.error, 'lookup failed');
+  assert.notEqual(muReport.error, 'no matching series found');
+
+  // MangaUpdates being unreachable must not block a consensus from the
+  // providers that did answer.
+  assert.equal(report.mangaUpdates.totalVolumesHint, 24);
+  assert.equal(report.mangaUpdates.latestChapterHint, 239);
+});
+
 test('GET /api/series/:id/refresh-preview returns the same report shape over HTTP', async () => {
   const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv3', title: 'Preview Series Three', language: 'en', monitored: true, packagingMode: 'volume' });
   mockProvidersFor({ '1': '1', '2': '1' }, { totalVolumes: null });
