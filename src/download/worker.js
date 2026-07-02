@@ -2,7 +2,7 @@ import { rm } from 'fs/promises';
 import { getProvider } from '../providers/index.js';
 import {
   getSeries, getChapter, chaptersReadyToDownload, listChaptersForSeries, listChaptersInStates,
-  setChapterState, bumpChapterAttempt, setChapterProgress, resetStaleDownloads,
+  setChapterState, bumpChapterAttempt, setChapterProgress, resetStaleDownloads, setChapterQuality,
 } from '../core/repo.js';
 import { getSetting } from '../core/settings.js';
 import { logHistory } from '../core/db.js';
@@ -12,6 +12,7 @@ import { downloadChapterViaFallback, fallbackEnabled } from './fallback.js';
 import { bindChapter, bindVolume } from '../core/binder.js';
 import { resolveVolumes } from '../core/mapping.js';
 import { notifyBindery, notifyError } from '../core/notify.js';
+import { recordChapterSuccess, recordChapterFailure } from '../core/provider-stats.js';
 import { pLimit } from './limit.js';
 
 const MAX_ATTEMPTS = 5;
