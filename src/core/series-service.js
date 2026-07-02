@@ -1,6 +1,6 @@
 import { getProvider, defaultDownloadProvider } from '../providers/index.js';
-import { provider as mangaupdates, fetchChapterVolumeMap } from '../providers/mangaupdates.js';
-import { provider as fandom } from '../providers/fandom.js';
+import { fetchChapterVolumeMap } from '../providers/mangaupdates.js';
+import { consultVolumeProviders } from './volume-consensus.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
   upsertChapter, chapterStateCounts, listChaptersForSeries, bulkSetChapterState,
@@ -36,11 +36,14 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
 
   const details = await provider.getSeries(providerSeriesId);
 
-  // Volume-count hint (for estimated grouping) only applies to manga via MangaUpdates.
+  // Volume-count hint (for estimated grouping) only applies to manga, resolved
+  // across every enabled total-volume provider (see volume-consensus.js) so a
+  // freshly-followed series gets a trustworthy hint from the start rather
+  // than whatever a single provider happens to report.
   let totalVolumesHint = null;
-  if (mediaType === 'manga' && isProviderEnabled('mangaupdates')) {
-    const mu = await mangaupdates.getTotalVolumesForTitle(details.title).catch(() => null);
-    totalVolumesHint = mu?.totalVolumes ?? null;
+  if (mediaType === 'manga') {
+    const { totalVolumes } = await consultVolumeProviders(details.title).catch(() => ({ totalVolumes: { value: null } }));
+    totalVolumesHint = totalVolumes.value;
   }
 
   // Comics default to per-issue packaging (collected editions aren't deterministic).
@@ -112,18 +115,24 @@ export async function refreshSeries(seriesId) {
 
   const chapters = await provider.listChapters(series.provider_series_id, { lang: series.language });
 
-  if (series.media_type === 'manga' && isProviderEnabled('mangaupdates')) {
+  if (series.media_type === 'manga') {
     try {
-      const mu = await mangaupdates.getTotalVolumesForTitle(series.title);
-      if (mu?.totalVolumes && series.total_volumes_hint !== mu.totalVolumes) {
-        updateSeries(seriesId, { totalVolumesHint: mu.totalVolumes });
+      // Cross-check every enabled total-volume/chapter provider instead of
+      // trusting MangaUpdates alone (see volume-consensus.js: a real bug had
+      // MangaUpdates' own latest_chapter badly stale for an older completed
+      // series while AniList/MangaBaka/Fandom all independently agreed on
+      // the real number). The resolved consensus both sets the volume hint
+      // and bounds how far chapters are gap-filled.
+      const { totalVolumes, totalChapters, mangaUpdatesRef } = await consultVolumeProviders(series.title);
+      if (totalVolumes.value && series.total_volumes_hint !== totalVolumes.value) {
+        updateSeries(seriesId, { totalVolumesHint: totalVolumes.value });
       }
-      if (mu?.latestChapter && mu.latestChapter > 0) {
+      if (totalChapters.value && totalChapters.value > 0) {
         const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
-        for (let i = 1; i <= mu.latestChapter; i++) {
+        for (let i = 1; i <= totalChapters.value; i++) {
           if (!knownNums.has(String(i))) {
             chapters.push({
-              id: `mu-synth-${seriesId}-${i}`,
+              id: `synth-${seriesId}-${i}`,
               number: String(i),
               volume: null,
               title: `Chapter ${i}`,
@@ -142,10 +151,12 @@ export async function refreshSeries(seriesId) {
       // per-group tagging — we also prefer MU's value when it *disagrees* with
       // MangaDex for a chapter, rather than only ever filling gaps. (extrapolate.js
       // still sanitizes the result, so this is a second, independent vote, not a
-      // blind override.)
-      if (mu?.seriesId) {
+      // blind override.) This per-chapter mapping stays MangaUpdates-exclusive —
+      // the other cross-checks only supply total counts, not a chapter-by-chapter
+      // breakdown.
+      if (mangaUpdatesRef?.seriesId) {
         try {
-          const { map: muVolMap } = await fetchChapterVolumeMap(mu.seriesId, mu.seriesTitle || series.title);
+          const { map: muVolMap } = await fetchChapterVolumeMap(mangaUpdatesRef.seriesId, mangaUpdatesRef.seriesTitle || series.title);
           if (muVolMap.size > 0) {
             for (const ch of chapters) {
               const v = muVolMap.get(String(parseFloat(ch.number)));
@@ -239,83 +250,68 @@ export async function previewRefreshSeries(seriesId) {
     chaptersWithVolume: chapters.filter(c => c.volumeSource).length,
   });
 
+  // Cross-check every enabled total-volume/chapter provider and resolve a
+  // consensus instead of trusting MangaUpdates alone (see
+  // core/volume-consensus.js: MangaUpdates' own latest_chapter has been
+  // observed badly stale for an older completed series while
+  // AniList/MangaBaka/Fandom all independently agreed on the real number).
+  // `mangaUpdates` keeps its historical shape/name here since it also drives
+  // the per-chapter volume-override mechanic, which stays MangaUpdates-only.
   let mangaUpdates = null;
-  if (series.media_type === 'manga' && isProviderEnabled('mangaupdates')) {
-    try {
-      const mu = await mangaupdates.getTotalVolumesForTitle(series.title);
-      mangaUpdates = {
-        matchedTitle: mu?.seriesTitle ?? null,
-        mangaUpdatesId: mu?.seriesId ?? null,
-        totalVolumesHint: mu?.totalVolumes ?? null,
-        latestChapterHint: mu?.latestChapter ?? null,
-        gapFilledChapters: 0,
-        volumeOverrides: 0,
-        releasesChecked: 0,
-        releasesVerified: 0,
-        releasesRejectedMismatch: 0,
-      };
+  if (series.media_type === 'manga') {
+    const { providerReports, totalVolumes, totalChapters, mangaUpdatesRef } = await consultVolumeProviders(series.title);
+    providersConsulted.push(...providerReports);
 
-      if (mu?.latestChapter && mu.latestChapter > 0) {
-        const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
-        for (let i = 1; i <= mu.latestChapter; i++) {
-          if (!knownNums.has(String(i))) {
-            chapters.push({ id: `mu-synth-${seriesId}-${i}`, number: String(i), volume: null, volumeSource: null, title: `Chapter ${i}`, lang: series.language });
-            mangaUpdates.gapFilledChapters++;
-          }
+    mangaUpdates = {
+      totalVolumesHint: totalVolumes.value,
+      totalVolumesConfidence: totalVolumes.confidence,
+      totalVolumesAgreeing: totalVolumes.agreeing,
+      totalVolumesDissenting: totalVolumes.dissenting,
+      latestChapterHint: totalChapters.value,
+      latestChapterConfidence: totalChapters.confidence,
+      latestChapterAgreeing: totalChapters.agreeing,
+      latestChapterDissenting: totalChapters.dissenting,
+      gapFilledChapters: 0,
+      volumeOverrides: 0,
+      releasesChecked: 0,
+      releasesVerified: 0,
+      releasesRejectedMismatch: 0,
+    };
+
+    if (totalChapters.value && totalChapters.value > 0) {
+      const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
+      for (let i = 1; i <= totalChapters.value; i++) {
+        if (!knownNums.has(String(i))) {
+          chapters.push({ id: `synth-${seriesId}-${i}`, number: String(i), volume: null, volumeSource: null, title: `Chapter ${i}`, lang: series.language });
+          mangaUpdates.gapFilledChapters++;
         }
       }
-
-      if (mu?.seriesId) {
-        try {
-          const { map: muVolMap, checked, verified, rejected } = await fetchChapterVolumeMap(mu.seriesId, mu.seriesTitle || series.title);
-          mangaUpdates.releasesChecked = checked;
-          mangaUpdates.releasesVerified = verified;
-          mangaUpdates.releasesRejectedMismatch = rejected;
-          for (const ch of chapters) {
-            const v = muVolMap.get(String(parseFloat(ch.number)));
-            if (v && v !== ch.volume) { ch.volume = v; ch.volumeSource = 'mangaupdates'; mangaUpdates.volumeOverrides++; }
-          }
-        } catch { mangaUpdates.volumeMapError = true; }
-      }
-
-      providersConsulted.push({
-        name: 'MangaUpdates',
-        role: 'total-volume hint, gap-fill & volume overrides',
-        totalVolumesHint: mangaUpdates.totalVolumesHint,
-        latestChapterHint: mangaUpdates.latestChapterHint,
-        gapFilledChapters: mangaUpdates.gapFilledChapters,
-        volumeOverrides: mangaUpdates.volumeOverrides,
-        releasesRejectedAsMismatch: mangaUpdates.releasesRejectedMismatch,
-      });
-    } catch {
-      providersConsulted.push({ name: 'MangaUpdates', role: 'total-volume hint, gap-fill & volume overrides', error: 'lookup failed' });
     }
-  }
 
-  // Fandom Wiki: informational cross-check only, never applied to any chapter
-  // or to total_volumes_hint — see providers/fandom.js for why (unverified
-  // against live wiki markup; disabled by default). Purely lets a human
-  // compare it against MangaUpdates' hint in the preview report.
-  if (series.media_type === 'manga' && isProviderEnabled('fandom')) {
-    try {
-      const fw = await fandom.fetchVolumeInfo(series.title);
-      if (fw) {
-        providersConsulted.push({
-          name: 'Fandom Wiki',
-          role: 'cross-check only (informational — never applied)',
-          wikiUrl: fw.wikiUrl,
-          totalVolumes: fw.totalVolumes,
-          totalChapters: fw.totalChapters,
-          agreesWithMangaUpdates: mangaUpdates?.totalVolumesHint != null && fw.totalVolumes != null
-            ? fw.totalVolumes === mangaUpdates.totalVolumesHint
-            : null,
-        });
-      } else {
-        providersConsulted.push({ name: 'Fandom Wiki', role: 'cross-check only (informational — never applied)', error: 'no matching wiki/page found' });
-      }
-    } catch {
-      providersConsulted.push({ name: 'Fandom Wiki', role: 'cross-check only (informational — never applied)', error: 'lookup failed' });
+    if (mangaUpdatesRef?.seriesId) {
+      try {
+        const { map: muVolMap, checked, verified, rejected } = await fetchChapterVolumeMap(mangaUpdatesRef.seriesId, mangaUpdatesRef.seriesTitle || series.title);
+        mangaUpdates.releasesChecked = checked;
+        mangaUpdates.releasesVerified = verified;
+        mangaUpdates.releasesRejectedMismatch = rejected;
+        for (const ch of chapters) {
+          const v = muVolMap.get(String(parseFloat(ch.number)));
+          if (v && v !== ch.volume) { ch.volume = v; ch.volumeSource = 'mangaupdates'; mangaUpdates.volumeOverrides++; }
+        }
+      } catch { mangaUpdates.volumeMapError = true; }
     }
+
+    providersConsulted.push({
+      name: 'Consensus',
+      role: 'resolved total-volume/chapter count across all providers above',
+      totalVolumesHint: mangaUpdates.totalVolumesHint,
+      totalVolumesConfidence: mangaUpdates.totalVolumesConfidence,
+      latestChapterHint: mangaUpdates.latestChapterHint,
+      latestChapterConfidence: mangaUpdates.latestChapterConfidence,
+      gapFilledChapters: mangaUpdates.gapFilledChapters,
+      volumeOverrides: mangaUpdates.volumeOverrides,
+      releasesRejectedAsMismatch: mangaUpdates.releasesRejectedMismatch,
+    });
   }
 
   // --- Diff against what's currently in the DB ---
@@ -354,13 +350,21 @@ export async function previewRefreshSeries(seriesId) {
   }
   const mergedChapters = [...mergedByNumber.values()];
   const { volumeMap, unassigned } = buildVolumeMapFromChapters(mergedChapters);
-  const { noisy } = sanitizeVolumeMap(volumeMap);
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap);
   const stats = getVolumeStats(volumeMap);
   const totalVolumesHint = series.total_volumes_hint || mangaUpdates?.totalVolumesHint || null;
   const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null);
 
+  // Use the *sanitized* map here, not the raw one: extrapolateVolumes() already
+  // re-sanitizes internally and reassigns noisy/outlier-volume chapters to a
+  // corrected slot inside `calculated`. Building this from the raw volumeMap
+  // would double-count those chapters (once under their rejected original
+  // volume, once under their corrected one) and would make whole-volume
+  // outliers that sanitizeVolumeMap already demoted (see its Pass 3) still show
+  // up at full size here — silently defeating that safeguard for anyone
+  // reading the preview instead of the eventual real refresh.
   const volumeBreakdown = {};
-  for (const [v, chs] of Object.entries(volumeMap)) {
+  for (const [v, chs] of Object.entries(cleanVolumeMap)) {
     if (v === 'none') continue;
     volumeBreakdown[v] = (volumeBreakdown[v] || 0) + chs.length;
   }
