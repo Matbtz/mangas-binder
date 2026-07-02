@@ -25,7 +25,7 @@ const app = await buildApp();
 setSetting('downloadsPaused', true);
 
 const realFetch = global.fetch;
-function mockProvidersFor(chapterVolumes, { totalVolumes = 10, latestChapter = null, muReleases = new Map() } = {}) {
+function mockProvidersFor(chapterVolumes, { totalVolumes = 10, latestChapter = null, muReleases = new Map(), crossChecks = {} } = {}) {
   global.fetch = async (url) => {
     const u = String(url);
     if (u.includes('mangadex.org') && u.includes('/aggregate')) return { ok: true, status: 200, json: async () => ({ volumes: {} }) };
@@ -45,6 +45,23 @@ function mockProvidersFor(chapterVolumes, { totalVolumes = 10, latestChapter = n
     if (u.includes('mangaupdates.com') && u.includes('releases/search')) {
       const results = [...muReleases.entries()].map(([ch, vol]) => ({ record: { chapter: ch, volume: vol } }));
       return { ok: true, status: 200, json: async () => ({ results }) };
+    }
+    // AniList/MangaBaka cross-checks, only wired up when a test explicitly
+    // provides one via `crossChecks` — otherwise they fall through to the
+    // catch-all below, matching current real-world behavior when a provider
+    // has no verified match.
+    if (u.includes('graphql.anilist.co')) {
+      const c = crossChecks.anilist;
+      const media = c ? { title: { romaji: c.title, english: null }, volumes: c.volumes ?? null, chapters: c.chapters ?? null, status: c.status || 'FINISHED' } : null;
+      return { ok: true, status: 200, json: async () => ({ data: { Media: media } }) };
+    }
+    if (u.includes('api.mangabaka.dev') && u.includes('/series/search')) {
+      const c = crossChecks.mangabaka;
+      return { ok: true, status: 200, json: async () => ({ data: c ? [{ id: 1, title: c.title }] : [] }) };
+    }
+    if (u.includes('api.mangabaka.dev') && u.includes('/series/1')) {
+      const c = crossChecks.mangabaka;
+      return { ok: true, status: 200, json: async () => ({ data: c ? { id: 1, title: c.title, status: c.status || 'completed', final_volume: c.volumes != null ? String(c.volumes) : null, total_chapters: c.chapters ?? null } : null }) };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   };
@@ -91,6 +108,63 @@ test('previewRefreshSeries: flags a volume-tag conflict for an already-packaged 
   const after1 = listChaptersForSeries(s.id).find(c => c.number === '1');
   assert.equal(after1.volume, '1');
   assert.equal(after1.state, 'imported');
+});
+
+test('previewRefreshSeries: volumeBreakdown does not double-count a demoted noisy chapter under both its rejected and corrected volume', async () => {
+  // Chapters 1-10 are a clean volume-1 cluster; chapter 500 is a wildly
+  // mistagged "volume 1" outlier (e.g. a scanlation group's bad tag) that
+  // sanitizeVolumeMap()'s per-chapter outlier check demotes back to noisy so
+  // extrapolateVolumes() can re-place it at a sane estimated volume instead.
+  // volumeBreakdown must reflect the *sanitized* count for volume 1 (10, not
+  // 11) and must not also double-count chapter 500 under whatever volume it
+  // gets re-estimated into on top of its original bad tag.
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv4', title: 'Preview Series Four', language: 'en', monitored: true, packagingMode: 'volume' });
+  const chapterVolumes = {};
+  for (let i = 1; i <= 10; i++) chapterVolumes[String(i)] = '1';
+  chapterVolumes['500'] = '1'; // mistagged outlier
+  mockProvidersFor(chapterVolumes, { totalVolumes: null });
+
+  const report = await previewRefreshSeries(s.id);
+
+  assert.ok(report.noisyChapters.includes('500'));
+  assert.equal(report.volumeBreakdown['1'], 10);
+  const totalChapters = Object.values(report.volumeBreakdown).reduce((a, b) => a + b, 0);
+  assert.equal(totalChapters, 11); // 10 clean + 1 re-estimated chapter 500, not 12
+});
+
+test('previewRefreshSeries: when MangaUpdates disagrees with the other providers, the majority consensus is used for gap-filling', async () => {
+  // Reproduces the real "20th Century Boys" bug: MangaUpdates' own
+  // latest_chapter was stale (13) for a finished series that AniList and
+  // MangaBaka both correctly reported as 249 chapters / 22 volumes. The
+  // resolved consensus — not MangaUpdates alone — must drive gap-filling.
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv5', title: 'Preview Series', language: 'en', monitored: true, packagingMode: 'volume' });
+  mockProvidersFor({ '1': '1' }, {
+    totalVolumes: 13, // MangaUpdates' status field also lowballs it here
+    latestChapter: 13,
+    crossChecks: {
+      anilist: { title: 'Preview Series', volumes: 22, chapters: 249, status: 'FINISHED' },
+      mangabaka: { title: 'Preview Series', volumes: 22, chapters: 249, status: 'completed' },
+    },
+  });
+
+  const report = await previewRefreshSeries(s.id);
+
+  assert.equal(report.mangaUpdates.latestChapterHint, 249);
+  assert.equal(report.mangaUpdates.totalVolumesHint, 22);
+  assert.deepEqual(report.mangaUpdates.latestChapterDissenting, ['mangaupdates']);
+  assert.equal(report.summary.incomingChapterCount, 249); // gap-filled to the consensus value, not MU's stale 13
+  assert.ok(report.providersConsulted.some(p => p.name === 'AniList' && p.totalChapters === 249));
+  assert.ok(report.providersConsulted.some(p => p.name === 'MangaBaka' && p.totalChapters === 249));
+  assert.ok(report.providersConsulted.some(p => p.name === 'Consensus' && p.latestChapterHint === 249));
+});
+
+test('previewRefreshSeries: with only MangaUpdates answering, its lone opinion is still used (no other providers to outvote it)', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv6', title: 'Preview Series', language: 'en', monitored: true, packagingMode: 'volume' });
+  mockProvidersFor({ '1': '1' }, { totalVolumes: 13, latestChapter: 13 });
+
+  const report = await previewRefreshSeries(s.id);
+  assert.equal(report.mangaUpdates.latestChapterHint, 13);
+  assert.equal(report.mangaUpdates.latestChapterConfidence, 1);
 });
 
 test('GET /api/series/:id/refresh-preview returns the same report shape over HTTP', async () => {

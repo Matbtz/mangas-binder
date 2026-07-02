@@ -1,4 +1,4 @@
-import { titlesMatch } from '../core/text-match.js';
+import { normTitle } from '../core/text-match.js';
 
 const BASE_URL = 'https://api.mangaupdates.com/v1';
 
@@ -14,39 +14,78 @@ async function apiFetch(url, options = {}) {
  * giving us precise official volume boundaries that the MangaDex aggregate often
  * lacks for English simulpub series (e.g. Dandadan, One Piece).
  *
- * IMPORTANT: this endpoint has been observed in production to *not* reliably
- * filter by the series-id filter we send — three unrelated series (Sakamoto
- * Days, One Piece, Dandadan) all got an identical "chapter 10 -> vol 3 /
- * chapter 54 -> vol 2 / chapter 69 -> vol 3" override, which is only possible
- * if the request-side filter was ignored and some generic/most-recent release
- * feed came back instead. So every record is independently verified against
- * the series id or title before being trusted, regardless of whether the
- * request filter worked — anything that can't be verified is dropped rather
- * than risking cross-series contamination of another series' volume data.
+ * ROOT CAUSE (found by empirically probing the live API, not guessing): none
+ * of `series_id`, `series: [id]`, `series: { id }` — or in fact any unknown
+ * field name at all — has any effect on `/v1/releases/search`. Every one of
+ * those bodies returns the exact same 10,000-record, most-recent-first feed
+ * regardless of which series (or garbage) is sent, which is exactly the
+ * cross-series contamination bug this whole saga started with (three
+ * unrelated series all got the identical override). The endpoint has no
+ * server-side series-id filter at all — there is nothing to guess correctly.
+ *
+ * The one parameter that *does* narrow results is a free-text `search`
+ * (title) query: confirmed live against Dandadan (10,000 unrelated records ->
+ * 247, all titled "Dandadan") and One Piece (results stayed 100% on-title
+ * through ~23 pages of 100 before degrading into unrelated title-word
+ * matches, e.g. "One Hundred Storey Tower", "The 31st Piece Turns the
+ * Tables" — MangaUpdates tokenizes on words rather than matching the full
+ * phrase, so it's a relevance pre-filter, not an exact scope). `stype` was
+ * confirmed to have no observable effect (title vs author vs garbage all
+ * returned identical results for the same `search` text), so it's sent for
+ * documentation purposes only.
+ *
+ * Because that pre-filter is fuzzy, per-record verification below is still
+ * required — and it is now the *only* verification, not defense-in-depth:
+ * every real record sampled live (Dandadan/One Piece/Death Note, ~1,500
+ * records) had no `series_id`/`series` field whatsoever, just a bare `title`
+ * string. The id-matching branch is kept only in case the API ever adds that
+ * field back. Verification also had to be tightened from the shared
+ * `titlesMatch()`'s startsWith-based fuzzy fallback (used elsewhere for
+ * genuinely looser matching) to strict normalized-title equality: real
+ * "Death Note" search results included ~100 "Death Note dj - <name>"
+ * fan-doujinshi entries, and `titlesMatch('Death Note dj - Light Note',
+ * 'Death Note')` returns true, because the normalized doujinshi title starts
+ * with the normalized target title. Since every real series record observed
+ * carried the canonical title verbatim (never abbreviated or prefixed),
+ * strict equality loses nothing here while closing that false-positive path.
  *
  * Returns { map, checked, verified, rejected }: map is
  * chapterNumber(string) → volumeNumber(string); the counters describe how
  * many release records were inspected/trusted/discarded so a misbehaving
  * endpoint is visible (e.g. in the refresh-preview report) instead of silent.
  *
- * We cap at 100 pages (10 000 releases) to avoid runaway calls on very long
- * series; in practice even One Piece fits comfortably within that limit.
+ * Pagination: since `search` is a real (if fuzzy) pre-filter instead of a
+ * no-op, most series resolve in a handful of pages rather than the old
+ * 100-page firehose. The cap is raised to cover long-running series (One
+ * Piece's on-title results ran ~23 pages of 100) while the early bail-out
+ * after a couple of fully-unverified pages still protects against paging
+ * into the tail of title-word noise once real matches run out.
  */
 export async function fetchChapterVolumeMap(seriesId, expectedTitle = null) {
   const map = new Map();
+  // The only param that meaningfully narrows /releases/search is a title
+  // text query (see root-cause note above) — without a title there is
+  // nothing to search for, and falling back to an id-only request would just
+  // re-trigger the unfiltered 10,000-record firehose.
+  if (!expectedTitle) return { map, checked: 0, verified: 0, rejected: 0 };
+
   const perPage = 100;
+  const maxPages = 30;
+  const maxConsecutiveEmptyPages = 2;
+  const expectedNorm = normTitle(expectedTitle);
   let page = 1;
   let hasMore = true;
-  let checked = 0, verified = 0, rejected = 0;
+  let checked = 0, verified = 0, rejected = 0, consecutiveEmptyPages = 0;
 
-  while (hasMore && page <= 100) {
+  while (hasMore && page <= maxPages) {
     const data = await apiFetch(`${BASE_URL}/releases/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ series: [Number(seriesId)], perpage: perPage, page }),
+      body: JSON.stringify({ search: expectedTitle, stype: 'title', perpage: perPage, page }),
     });
 
     const results = data.results || [];
+    const verifiedBeforePage = verified;
     for (const r of results) {
       const rec = r.record || {};
       checked++;
@@ -57,7 +96,7 @@ export async function fetchChapterVolumeMap(seriesId, expectedTitle = null) {
       const recSeriesId = rec.series_id ?? rec.series?.id ?? rec.series?.series_id ?? null;
       const recSeriesTitle = rec.series_name ?? rec.series?.name ?? rec.title ?? null;
       const idMatches = recSeriesId != null && Number(recSeriesId) === Number(seriesId);
-      const titleMatches = !idMatches && !!expectedTitle && !!recSeriesTitle && titlesMatch(recSeriesTitle, expectedTitle);
+      const titleMatches = !idMatches && !!recSeriesTitle && normTitle(recSeriesTitle) === expectedNorm;
       if (!idMatches && !titleMatches) { rejected++; continue; }
       verified++;
 
@@ -68,7 +107,8 @@ export async function fetchChapterVolumeMap(seriesId, expectedTitle = null) {
       }
     }
 
-    hasMore = results.length === perPage;
+    consecutiveEmptyPages = verified === verifiedBeforePage ? consecutiveEmptyPages + 1 : 0;
+    hasMore = results.length === perPage && consecutiveEmptyPages < maxConsecutiveEmptyPages;
     page++;
     if (hasMore) await new Promise(r => setTimeout(r, 200));
   }
