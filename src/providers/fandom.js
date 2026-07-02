@@ -182,6 +182,13 @@ function toResult(domain, pageTitle, counts) {
   return {
     wikiUrl: `https://${domain}/wiki/${encodeURIComponent(pageTitle.replace(/ /g, '_'))}`,
     pageTitle,
+    // Alias of pageTitle so this shares a { matchedTitle, totalVolumes,
+    // totalChapters } shape with the anilist/mangabaka cross-checks — without
+    // it, a result citing real data would still show up as "matchedTitle:
+    // null" in the refresh-preview report (a real citation gap, confirmed
+    // live: Fandom found Dandadan's volume count but the report couldn't
+    // say which page it came from).
+    matchedTitle: pageTitle,
     totalVolumes: counts.totalVolumes,
     totalChapters: counts.totalChapters,
   };
