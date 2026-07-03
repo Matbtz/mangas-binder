@@ -6,7 +6,7 @@ import { buildComicInfoXml } from './comicinfo.js';
 import { chapterStagingDir } from '../download/downloader.js';
 import { writeCbz, destPath } from './library.js';
 import { describeProfileForMedia } from './profiles.js';
-import { isNoop, describeConfig } from './image-preprocess.js';
+import { isNoop, describeConfig, probeSharp } from './image-preprocess.js';
 import { config } from './config.js';
 import { extractToStaging } from '../download/archive-downloader.js';
 import { getSeries, getChapter, listChaptersForSeries, setChapterState } from './repo.js';
@@ -74,35 +74,72 @@ async function makeWorkDir(preprocess) {
 }
 
 /**
- * Log, to Activity > Logs, whether post-processing applies to this packaging
- * action and — if so — which profile and which attributes it's applying. This
- * is the single chokepoint every packaging path (worker auto-package, manual
- * single/batch package) runs through, so it always reflects what actually ran.
+ * Resolve what post-processing will actually happen for this packaging action
+ * and log the decision to Activity > Logs. This is the single chokepoint every
+ * packaging path (worker auto-package, manual single/batch package) runs
+ * through, so the log always reflects what really ran.
+ *
+ * Crucially, when a profile is active it first probes sharp: if the image
+ * library is unavailable it logs one clear `<event>.error` and returns no
+ * config, so pages are packed unmodified deliberately instead of every page
+ * throwing and falling back silently.
+ *
+ * @returns {Promise<{ cfg: object|null, status: string, profile: string|null, error: string|null }>}
+ *   status ∈ 'disabled' | 'unassigned' | 'noop' | 'unavailable' | 'active'
  */
-function logPostprocessDecision(event, label, series) {
+async function resolvePreprocess(baseEvent, label, series) {
   const mediaType = series.media_type || 'manga';
   const { enabled, profile, config: cfg } = describeProfileForMedia(mediaType);
-  let message;
-  if (!enabled) {
-    message = `${label}: post-processing disabled — pages packed unmodified`;
-  } else if (!profile) {
-    message = `${label}: post-processing enabled but no profile assigned for ${mediaType} — pages packed unmodified`;
-  } else if (isNoop(cfg)) {
-    message = `${label}: profile "${profile.name}" (${mediaType}) has no active treatments — pages packed unmodified`;
-  } else {
-    message = `${label}: profile "${profile.name}" (${mediaType}) — ${describeConfig(cfg).join(', ')}`;
+  const log = (event, message) => logHistory(event, { seriesId: series.id, message });
+  const none = (status, message, error = null) => {
+    log(status === 'unavailable' ? `${baseEvent}.error` : baseEvent, message);
+    return { cfg: null, status, profile: profile ? profile.name : null, error };
+  };
+
+  if (!enabled) return none('disabled', `${label}: post-processing disabled — pages packed unmodified`);
+  if (!profile) return none('unassigned', `${label}: post-processing enabled but no profile assigned for ${mediaType} — pages packed unmodified`);
+  if (isNoop(cfg)) return none('noop', `${label}: profile "${profile.name}" (${mediaType}) has no active treatments — pages packed unmodified`);
+
+  // Profile is active — confirm the image library actually works here before
+  // promising the treatments. A broken/missing sharp is the usual reason a
+  // "post-processed" volume comes out byte-identical to an unprocessed one.
+  const probe = await probeSharp();
+  if (!probe.ok) {
+    return none('unavailable', `${label}: profile "${profile.name}" active but image processing is unavailable (sharp: ${probe.error}) — all pages packed unmodified`, probe.error);
   }
-  logHistory(event, { seriesId: series.id, message });
-  return cfg;
+
+  log(baseEvent, `${label}: profile "${profile.name}" (${mediaType}) — ${describeConfig(cfg).join(', ')}`);
+  return { cfg, status: 'active', profile: profile.name, error: null };
 }
 
-/** Log a warning when some pages silently fell back to unprocessed (see buildEntries `stats`). */
-function logPostprocessFallback(event, label, series, stats) {
+/**
+ * Log the outcome when pages fell back to unprocessed despite an active profile
+ * (see buildEntries `stats`). Distinguishes a total pipeline failure (every
+ * page) from a few isolated bad pages, and includes the first error so the log
+ * shows the cause, not just a count.
+ */
+function logPostprocessFallback(baseEvent, label, series, stats) {
   if (!stats || !stats.failed) return;
-  logHistory(event, {
+  const total = stats.failed + stats.processed;
+  const allFailed = stats.processed === 0;
+  const reason = stats.firstError ? ` (first error: ${stats.firstError})` : '';
+  logHistory(`${baseEvent}.${allFailed ? 'error' : 'warning'}`, {
     seriesId: series.id,
-    message: `${label}: ${stats.failed} of ${stats.failed + stats.processed} page(s) failed processing and were packed unmodified`,
+    message: allFailed
+      ? `${label}: image processing failed for all ${total} page(s) — packed unmodified${reason}`
+      : `${label}: ${stats.failed} of ${total} page(s) failed processing and were packed unmodified${reason}`,
   });
+}
+
+/** Compact, machine-readable post-processing outcome for API/UI (no log parsing). */
+function summarizePostprocess(resolved, stats) {
+  return {
+    status: resolved.status,          // active | disabled | unassigned | noop | unavailable
+    profile: resolved.profile,
+    processed: stats.processed,
+    failed: stats.failed,
+    error: resolved.error || stats.firstError || null,
+  };
 }
 
 /**
@@ -116,15 +153,16 @@ export async function bindChapter(series, chapter, { coverUrl = null } = {}) {
   const localChapters = { [num]: chapterStagingDir(series.id, num) };
   const comicInfoXml = comicInfoFor(series, { chapterNum: num, title: chapter.title });
   const coverBuffer = await maybeCover(coverUrl);
-  const preprocess = logPostprocessDecision('chapter.postprocess', label, series);
-  const workDir = await makeWorkDir(preprocess);
+  const resolved = await resolvePreprocess('chapter.postprocess', label, series);
+  const workDir = await makeWorkDir(resolved.cfg);
   try {
-    const stats = { processed: 0, failed: 0 };
-    const entries = await buildEntries([num], localChapters, { comicInfoXml, coverBuffer, preprocess, workDir, stats });
-    logPostprocessFallback('chapter.postprocess.warning', label, series, stats);
+    const stats = { processed: 0, failed: 0, firstError: null };
+    const entries = await buildEntries([num], localChapters, { comicInfoXml, coverBuffer, preprocess: resolved.cfg, workDir, stats });
+    logPostprocessFallback('chapter.postprocess', label, series, stats);
     const fileName = isComic ? issueCbzName(series.title, num) : chapterCbzName(series.title, num);
     const dest = destPath(series.title, fileName);
-    return await writeCbz(entries, dest);
+    const res = await writeCbz(entries, dest);
+    return { ...res, postprocess: summarizePostprocess(resolved, stats) };
   } finally {
     if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -153,14 +191,15 @@ export async function bindVolume(series, volumeLabel, chapters, { calculated = f
   const comicInfoXml = comicInfoFor(series, { volumeNum: volumeLabel === 'none' ? '' : volumeLabel, calculated });
   const coverBuffer = await maybeCover(coverUrl);
   const label = `${series.title} Vol. ${volumeLabel}`;
-  const preprocess = logPostprocessDecision('volume.postprocess', label, series);
-  const workDir = await makeWorkDir(preprocess);
+  const resolved = await resolvePreprocess('volume.postprocess', label, series);
+  const workDir = await makeWorkDir(resolved.cfg);
   try {
-    const stats = { processed: 0, failed: 0 };
-    const entries = await buildEntries(nums, localChapters, { comicInfoXml, coverBuffer, preprocess, workDir, stats });
-    logPostprocessFallback('volume.postprocess.warning', label, series, stats);
+    const stats = { processed: 0, failed: 0, firstError: null };
+    const entries = await buildEntries(nums, localChapters, { comicInfoXml, coverBuffer, preprocess: resolved.cfg, workDir, stats });
+    logPostprocessFallback('volume.postprocess', label, series, stats);
     const dest = destPath(series.title, volumeCbzName(series.title, volumeLabel));
-    return await writeCbz(entries, dest, { overwrite });
+    const res = await writeCbz(entries, dest, { overwrite });
+    return { ...res, postprocess: summarizePostprocess(resolved, stats) };
   } finally {
     if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }

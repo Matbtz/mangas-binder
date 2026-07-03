@@ -894,7 +894,12 @@ async function showDetail(id) {
         e.stopPropagation();
         toast(`Packaging Volume ${vk}…`);
         const res = await api(`/series/${id}/volumes/${encodeURIComponent(vk)}/package`, { method: 'POST' });
-        if (res?.ok) toast(`📦 Created CBZ: ${res.path}`);
+        if (res?.ok) {
+          const pp = res.postprocess;
+          if (pp && pp.status === 'unavailable') toast(`⚠ CBZ created, but image processing was unavailable — pages packed unmodified`);
+          else if (pp && pp.failed > 0) toast(`⚠ CBZ created — ${pp.failed} page(s) failed processing, packed unmodified`);
+          else toast(`📦 Created CBZ: ${res.path}`);
+        }
       };
       volHead.querySelector('.vol-pkg-slot').appendChild(pkgVolBtn);
     }

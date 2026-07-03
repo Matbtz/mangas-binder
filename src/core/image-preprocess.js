@@ -29,6 +29,35 @@ export function isNoop(cfg) {
   return !BLOCKS.some(b => cfg[b] && cfg[b].enabled);
 }
 
+let _sharpProbe = null;
+
+/**
+ * Verify that sharp can actually decode+encode in this runtime, caching the
+ * result for the process lifetime. A missing or ABI-mismatched native binary
+ * (the usual reason a "post-processed" volume comes out byte-identical to an
+ * unprocessed one) makes every `processPage` throw; probing once lets callers
+ * report a single clear reason up front instead of a silent per-page fallback
+ * repeated across a whole volume.
+ * @returns {Promise<{ ok: boolean, error: string|null }>}
+ */
+export async function probeSharp() {
+  if (_sharpProbe) return _sharpProbe;
+  try {
+    await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 0, g: 0, b: 0 } } })
+      .jpeg()
+      .toBuffer();
+    _sharpProbe = { ok: true, error: null };
+  } catch (err) {
+    _sharpProbe = { ok: false, error: err?.message || String(err) };
+  }
+  return _sharpProbe;
+}
+
+/** Test hook: forget a cached probe result so the next probe re-runs. */
+export function _resetSharpProbe() {
+  _sharpProbe = null;
+}
+
 /**
  * Human-readable list of the treatment blocks a config has active, for activity
  * logs. Mirrors the same clamp/fallback math `runPipeline` actually applies

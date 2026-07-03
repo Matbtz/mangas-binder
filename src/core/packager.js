@@ -114,10 +114,15 @@ export async function buildEntries(chapters, localChapters, { comicInfoXml = nul
         try {
           outputs = await processPage(sourcePath, preprocess);
           if (stats) stats.processed++;
-        } catch {
-          // A page that can't be processed is packed as-is rather than lost.
+        } catch (err) {
+          // A page that can't be processed is packed as-is rather than lost, but
+          // keep the first error so the caller can surface *why* it fell back
+          // instead of silently shipping unprocessed pages.
           outputs = null;
-          if (stats) stats.failed++;
+          if (stats) {
+            stats.failed++;
+            if (!stats.firstError) stats.firstError = err?.message || String(err);
+          }
         }
         if (outputs) {
           for (const { buffer, ext } of outputs) {

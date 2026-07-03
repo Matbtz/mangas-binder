@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 
-import { processPage, isNoop } from '../src/core/image-preprocess.js';
+import { processPage, isNoop, probeSharp, _resetSharpProbe } from '../src/core/image-preprocess.js';
 
 const tmp = mkdtempSync(path.join(os.tmpdir(), 'mb-imgproc-'));
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -23,6 +23,15 @@ test('isNoop: all-disabled config is a no-op', () => {
   assert.equal(isNoop(null), true);
   assert.equal(isNoop({ resize: { enabled: false }, gamma: { enabled: false } }), true);
   assert.equal(isNoop({ resize: { enabled: true, width: 100, height: 100 } }), false);
+});
+
+test('probeSharp reports the library is usable and caches the result', async () => {
+  _resetSharpProbe();
+  const first = await probeSharp();
+  assert.equal(first.ok, true);
+  assert.equal(first.error, null);
+  const second = await probeSharp();
+  assert.equal(second, first, 'probe result is cached (same object, no re-run)');
 });
 
 test('portrait page: resized within device bounds, grayscale, jpeg', async () => {

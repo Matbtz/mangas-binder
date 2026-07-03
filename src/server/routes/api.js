@@ -1268,26 +1268,35 @@ bindery.push({
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const res = await packageSingleChapter(s.id, Number(req.params.chapterId));
-    return { ok: true, path: res.path };
+    return { ok: true, path: res.path, postprocess: res.postprocess };
   });
   app.post('/api/series/:id/volumes/:volKey/package', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const res = await packageSingleVolume(s.id, req.params.volKey);
-    return { ok: true, path: res.path };
+    return { ok: true, path: res.path, postprocess: res.postprocess };
   });
   app.post('/api/series/:id/package-volumes', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const { volumes = [] } = req.body || {};
     let packagedCount = 0;
+    // Surface a post-processing problem across the batch (e.g. sharp unavailable,
+    // or pages that failed to process) so the UI can warn instead of the failure
+    // hiding in the activity log.
+    let ppIssues = 0, ppError = null;
     for (const vk of volumes) {
       try {
-        await packageSingleVolume(s.id, String(vk));
+        const res = await packageSingleVolume(s.id, String(vk));
         packagedCount++;
+        const pp = res.postprocess;
+        if (pp && (pp.status === 'unavailable' || pp.failed > 0)) {
+          ppIssues++;
+          ppError = ppError || pp.error;
+        }
       } catch {}
     }
-    return { ok: true, packagedCount };
+    return { ok: true, packagedCount, postprocessIssues: ppIssues, postprocessError: ppError };
   });
   app.get('/api/series/:id/manual-search', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
