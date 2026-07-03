@@ -90,3 +90,40 @@ test('encode keep preserves PNG', async () => {
   const meta = await sharp(out[0].buffer).metadata();
   assert.equal(meta.format, 'png');
 });
+
+test('gamma > 1 brightens the page (output-gamma lift, not a no-op)', async () => {
+  // Regression: single-arg sharp.gamma(g) is tonally neutral, so the gamma block
+  // used to do nothing. It must now visibly lift a flat mid-gray page.
+  const src = await makeImage('gamma.png', 400, 600); // flat r/g/b = 120
+  const plain = await processPage(src, { encode: { enabled: true, format: 'jpeg', quality: 95 } });
+  const lifted = await processPage(src, {
+    gamma: { enabled: true, value: 2.2 },
+    encode: { enabled: true, format: 'jpeg', quality: 95 },
+  });
+  const before = (await sharp(plain[0].buffer).stats()).channels[0].mean;
+  const after = (await sharp(lifted[0].buffer).stats()).channels[0].mean;
+  assert.ok(after > before + 20, `gamma should brighten: ${before.toFixed(1)} -> ${after.toFixed(1)}`);
+});
+
+test('crop margin + resize keeps the page within device bounds', async () => {
+  // Regression: within one sharp pipeline, resize is applied before extend, so a
+  // re-added crop margin used to push the page back over the device bounds and
+  // silently defeat the resize. A bordered page larger than the device exercises
+  // trim -> margin -> resize together.
+  const inner = await sharp({ create: { width: 1500, height: 2100, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+    .png().toBuffer();
+  const src = path.join(tmp, 'bordered.png');
+  await sharp({ create: { width: 1600, height: 2200, channels: 3, background: { r: 255, g: 255, b: 255 } } })
+    .composite([{ input: inner, left: 50, top: 50 }])
+    .png().toFile(src);
+  const out = await processPage(src, {
+    crop: { enabled: true, power: 1, preserveMarginPct: 1 },
+    resize: { enabled: true, width: 1404, height: 1872, mode: 'fit', upscale: true },
+    encode: { enabled: true, format: 'jpeg', quality: 90 },
+  });
+  const meta = await sharp(out[0].buffer).metadata();
+  assert.ok(
+    meta.width <= 1404 && meta.height <= 1872,
+    `page must fit device bounds, got ${meta.width}x${meta.height}`,
+  );
+});

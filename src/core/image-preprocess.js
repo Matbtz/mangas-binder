@@ -114,7 +114,11 @@ async function runPipeline(makeSource, cfg, target) {
 
   if (cfg.gamma?.enabled) {
     const g = clamp(Number(cfg.gamma.value) || 1, 1, 3);
-    if (g !== 1) pipe = pipe.gamma(g);
+    // gamma(1.0, g) applies output-gamma encoding only (out = in^(1/g)), which
+    // brightens midtones/shadows for g>1 — the KCC-style lift the profile intends.
+    // Single-arg sharp.gamma(g) linearises then re-encodes with the same value, so
+    // it is tonally a no-op (a flat mid-gray stays put) and must not be used here.
+    if (g !== 1) pipe = pipe.gamma(1.0, g);
   }
 
   if (cfg.crop?.enabled) {
@@ -129,10 +133,17 @@ async function runPipeline(makeSource, cfg, target) {
       const m = await sharp(buf).metadata();
       const mx = Math.round((m.width || 0) * pct / 100);
       const my = Math.round((m.height || 0) * pct / 100);
-      pipe = sharp(buf).extend({
+      // Materialise the extend to a buffer and re-open it as the new pipeline
+      // baseline. Within a single sharp pipeline, resize is always applied before
+      // extend regardless of call order, so a later .resize() would run on the
+      // un-extended raster and the re-added margin would then push the page back
+      // over the device bounds (the resize step ends up a no-op). Flushing here
+      // guarantees the subsequent resize sees the already-extended image.
+      const extended = await sharp(buf).extend({
         top: my, bottom: my, left: mx, right: mx,
         background: cfg.grayscale?.enabled ? '#ffffff' : { r: 255, g: 255, b: 255 },
-      });
+      }).toBuffer();
+      pipe = sharp(extended);
     }
   }
 
