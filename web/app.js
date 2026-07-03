@@ -2637,7 +2637,10 @@ const qualLabels = ['unknown', 'low', 'ok', 'high'];
       const history = data.history;
       const hi = h(`<div class="card" style="margin-top:0"><div class="table-wrap"><table><thead><tr><th style="width:160px">When</th><th style="width:180px">Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div></div>`);
       const tb = $('tbody', hi);
-      for (const e of history) tb.appendChild(h(`<tr><td class="muted" style="font-size:12px">${esc(formatParis(e.ts))}</td><td><span class="pill">${esc(e.event)}</span></td><td>${esc(e.message||'')}</td></tr>`));
+      // Colour the event pill by severity so errors/warnings (e.g. post-process
+      // fallbacks) stand out instead of blending into the log.
+      const evClass = ev => ev.endsWith('.error') ? 'pill err' : ev.endsWith('.warning') ? 'pill warn' : 'pill';
+      for (const e of history) tb.appendChild(h(`<tr><td class="muted" style="font-size:12px">${esc(formatParis(e.ts))}</td><td><span class="${evClass(e.event)}">${esc(e.event)}</span></td><td>${esc(e.message||'')}</td></tr>`));
       if (!history.length) tb.appendChild(h('<tr><td colspan="3" class="muted">Nothing yet.</td></tr>'));
       tabContent.appendChild(hi);
     }
