@@ -5,7 +5,8 @@ import { buildEntries, volumeCbzName, chapterCbzName, issueCbzName, downloadBuff
 import { buildComicInfoXml } from './comicinfo.js';
 import { chapterStagingDir } from '../download/downloader.js';
 import { writeCbz, destPath } from './library.js';
-import { resolveProfileForMedia } from './profiles.js';
+import { describeProfileForMedia } from './profiles.js';
+import { isNoop, describeConfig } from './image-preprocess.js';
 import { config } from './config.js';
 import { extractToStaging } from '../download/archive-downloader.js';
 import { getSeries, getChapter, listChaptersForSeries, setChapterState } from './repo.js';
@@ -67,9 +68,41 @@ async function maybeCover(coverUrl) {
 
 /** Create a scratch dir for processed pages, or null when no profile applies. */
 async function makeWorkDir(preprocess) {
-  if (!preprocess) return null;
+  if (!preprocess || isNoop(preprocess)) return null;
   await mkdir(config.stagingDir, { recursive: true });
   return mkdtemp(path.join(config.stagingDir, '.proc-'));
+}
+
+/**
+ * Log, to Activity > Logs, whether post-processing applies to this packaging
+ * action and — if so — which profile and which attributes it's applying. This
+ * is the single chokepoint every packaging path (worker auto-package, manual
+ * single/batch package) runs through, so it always reflects what actually ran.
+ */
+function logPostprocessDecision(event, label, series) {
+  const mediaType = series.media_type || 'manga';
+  const { enabled, profile, config: cfg } = describeProfileForMedia(mediaType);
+  let message;
+  if (!enabled) {
+    message = `${label}: post-processing disabled — pages packed unmodified`;
+  } else if (!profile) {
+    message = `${label}: post-processing enabled but no profile assigned for ${mediaType} — pages packed unmodified`;
+  } else if (isNoop(cfg)) {
+    message = `${label}: profile "${profile.name}" (${mediaType}) has no active treatments — pages packed unmodified`;
+  } else {
+    message = `${label}: profile "${profile.name}" (${mediaType}) — ${describeConfig(cfg).join(', ')}`;
+  }
+  logHistory(event, { seriesId: series.id, message });
+  return cfg;
+}
+
+/** Log a warning when some pages silently fell back to unprocessed (see buildEntries `stats`). */
+function logPostprocessFallback(event, label, series, stats) {
+  if (!stats || !stats.failed) return;
+  logHistory(event, {
+    seriesId: series.id,
+    message: `${label}: ${stats.failed} of ${stats.failed + stats.processed} page(s) failed processing and were packed unmodified`,
+  });
 }
 
 /**
@@ -78,14 +111,17 @@ async function makeWorkDir(preprocess) {
  */
 export async function bindChapter(series, chapter, { coverUrl = null } = {}) {
   const num = chapter.number;
+  const label = `${series.title} #${num}`;
   const isComic = (series.media_type || 'manga') === 'comic';
   const localChapters = { [num]: chapterStagingDir(series.id, num) };
   const comicInfoXml = comicInfoFor(series, { chapterNum: num, title: chapter.title });
   const coverBuffer = await maybeCover(coverUrl);
-  const preprocess = resolveProfileForMedia(series.media_type || 'manga');
+  const preprocess = logPostprocessDecision('chapter.postprocess', label, series);
   const workDir = await makeWorkDir(preprocess);
   try {
-    const entries = await buildEntries([num], localChapters, { comicInfoXml, coverBuffer, preprocess, workDir });
+    const stats = { processed: 0, failed: 0 };
+    const entries = await buildEntries([num], localChapters, { comicInfoXml, coverBuffer, preprocess, workDir, stats });
+    logPostprocessFallback('chapter.postprocess.warning', label, series, stats);
     const fileName = isComic ? issueCbzName(series.title, num) : chapterCbzName(series.title, num);
     const dest = destPath(series.title, fileName);
     return await writeCbz(entries, dest);
@@ -116,10 +152,13 @@ export async function bindVolume(series, volumeLabel, chapters, { calculated = f
 
   const comicInfoXml = comicInfoFor(series, { volumeNum: volumeLabel === 'none' ? '' : volumeLabel, calculated });
   const coverBuffer = await maybeCover(coverUrl);
-  const preprocess = resolveProfileForMedia(series.media_type || 'manga');
+  const label = `${series.title} Vol. ${volumeLabel}`;
+  const preprocess = logPostprocessDecision('volume.postprocess', label, series);
   const workDir = await makeWorkDir(preprocess);
   try {
-    const entries = await buildEntries(nums, localChapters, { comicInfoXml, coverBuffer, preprocess, workDir });
+    const stats = { processed: 0, failed: 0 };
+    const entries = await buildEntries(nums, localChapters, { comicInfoXml, coverBuffer, preprocess, workDir, stats });
+    logPostprocessFallback('volume.postprocess.warning', label, series, stats);
     const dest = destPath(series.title, volumeCbzName(series.title, volumeLabel));
     return await writeCbz(entries, dest, { overwrite });
   } finally {

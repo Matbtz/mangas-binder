@@ -29,6 +29,41 @@ export function isNoop(cfg) {
   return !BLOCKS.some(b => cfg[b] && cfg[b].enabled);
 }
 
+/**
+ * Human-readable list of the treatment blocks a config has active, for activity
+ * logs. Mirrors the same clamp/fallback math `runPipeline` actually applies
+ * (not just the raw stored value) so the log can't claim a setting that isn't
+ * really what gets used — e.g. a stray `power: 0` really runs as `power: 1`.
+ */
+export function describeConfig(cfg) {
+  if (!cfg) return [];
+  const parts = [];
+  if (cfg.grayscale?.enabled) parts.push('grayscale');
+  if (cfg.autocontrast?.enabled) {
+    const bp = clamp(Number(cfg.autocontrast.blackPoint) || 0, 0, 100);
+    parts.push(`autocontrast(blackPoint=${bp})`);
+  }
+  if (cfg.gamma?.enabled) {
+    const g = clamp(Number(cfg.gamma.value) || 1, 1, 3);
+    parts.push(`gamma(${g})`);
+  }
+  if (cfg.crop?.enabled) {
+    const power = clamp(Number(cfg.crop.power) || 1, 0.1, 5);
+    const pct = clamp(Number(cfg.crop.preserveMarginPct) || 0, 0, 100);
+    parts.push(`crop(power=${power}, margin=${pct}%)`);
+  }
+  if (cfg.spread?.enabled) parts.push(`spread(${cfg.spread.mode || 'rotate'}/${cfg.spread.direction || 'rtl'})`);
+  if (cfg.resize?.enabled) {
+    parts.push(`resize(${cfg.resize.width}x${cfg.resize.height} ${cfg.resize.mode || 'fit'}${cfg.resize.upscale ? '+upscale' : ''})`);
+  }
+  if (cfg.encode?.enabled) {
+    const fmt = cfg.encode.format || 'jpeg';
+    const quality = clamp(Math.round(cfg.encode.quality ?? 90), 1, 100);
+    parts.push(fmt === 'jpeg' ? `encode(jpeg q${quality})` : `encode(${fmt})`);
+  }
+  return parts;
+}
+
 function extForFormat(format) {
   switch (format) {
     case 'png': return '.png';

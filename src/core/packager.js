@@ -74,7 +74,7 @@ export function issueCbzName(seriesName, issueNum) {
  * `chapters` is a list of chapter numbers; `localChapters` maps number -> folder.
  * @returns {Promise<Array<{archiveName, sourcePath?, content?}>>}
  */
-export async function buildEntries(chapters, localChapters, { comicInfoXml = null, coverBuffer = null, preprocess = null, workDir = null } = {}) {
+export async function buildEntries(chapters, localChapters, { comicInfoXml = null, coverBuffer = null, preprocess = null, workDir = null, stats = null } = {}) {
   const entries = [];
   // Only run the image pipeline when a profile with at least one active block is
   // supplied and we have a scratch dir to stream processed pages from.
@@ -113,9 +113,11 @@ export async function buildEntries(chapters, localChapters, { comicInfoXml = nul
         let outputs;
         try {
           outputs = await processPage(sourcePath, preprocess);
+          if (stats) stats.processed++;
         } catch {
           // A page that can't be processed is packed as-is rather than lost.
           outputs = null;
+          if (stats) stats.failed++;
         }
         if (outputs) {
           for (const { buffer, ext } of outputs) {
