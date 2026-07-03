@@ -72,15 +72,29 @@ export function deleteProfile(id) {
 }
 
 /**
+ * Diagnostic view of what would be applied for a media type: whether the master
+ * switch is on, which profile (if any) is assigned, and its config. Used both to
+ * resolve the actual treatment and to explain the decision in activity logs.
+ * @param {string} mediaType  'manga' | 'comic'
+ * @returns {{ enabled: boolean, profile: {id, name}|null, config: object|null }}
+ */
+export function describeProfileForMedia(mediaType) {
+  const mt = mediaType || 'manga';
+  const enabled = getSetting('imageProcessingEnabled', false);
+  if (!enabled) return { enabled: false, profile: null, config: null };
+  const assignments = getSetting('imageProfileAssignments', {});
+  const id = assignments?.[mt];
+  if (id == null) return { enabled: true, profile: null, config: null };
+  const profile = getProfile(id);
+  if (!profile) return { enabled: true, profile: null, config: null };
+  return { enabled: true, profile: { id: profile.id, name: profile.name }, config: profile.config };
+}
+
+/**
  * The profile config to apply for a media type, or null when preprocessing is
  * disabled, no profile is assigned, or the assigned profile no longer exists.
  * @param {string} mediaType  'manga' | 'comic'
  */
 export function resolveProfileForMedia(mediaType) {
-  if (!getSetting('imageProcessingEnabled', false)) return null;
-  const assignments = getSetting('imageProfileAssignments', {});
-  const id = assignments?.[mediaType || 'manga'];
-  if (id == null) return null;
-  const profile = getProfile(id);
-  return profile ? profile.config : null;
+  return describeProfileForMedia(mediaType).config;
 }
