@@ -517,7 +517,7 @@ async function showDetail(id) {
           <span class="status-badge ${s.status==='completed'?'imported':'queued'}">${esc(s.status||'ongoing')}</span>
           ${s.publisher ? `<span class="status-badge skipped">${esc(s.publisher)}</span>` : ''}
           <span class="status-badge ${s.monitored && s.monitorMode !== 'none' ? 'imported' : 'skipped'}">${s.monitored && s.monitorMode !== 'none' ? '🏷 Monitored' : '⏸ Unmonitored'}</span>
-          <a href="${s.provider==='mangadex'?`https://mangadex.org/title/${s.providerSeriesId}`:`https://comicvine.gamespot.com/volume/4050-${s.providerSeriesId}/`}" target="_blank" class="status-badge skipped" style="color:var(--acc)">↗ ${esc(s.provider)}</a>
+          <a href="${s.provider==='mangadex'?`https://mangadex.org/title/${s.providerSeriesId}`:s.provider==='comicvine'?`https://comicvine.gamespot.com/volume/4050-${s.providerSeriesId}/`:esc(s.providerSeriesId||'')}" target="_blank" class="status-badge skipped" style="color:var(--acc)">↗ ${esc(s.provider)}</a>
           <span class="status-badge ${s.folderPath?'imported':'skipped'}" style="cursor:pointer" id="folder-pill" title="Click to link local folder">📁 ${esc(s.folderPath||'Default Folder')}</span>
         </div>
         <p class="hero-desc">${esc(s.description||'No description available.')}</p>

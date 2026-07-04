@@ -11,7 +11,7 @@ process.env.OUTPUT_DIR = path.join(tmp, 'out');
 process.env.STAGING_DIR = path.join(tmp, 'staging');
 
 const { ensureSeeded } = await import('../src/core/settings.js');
-const { parseSearchResults, parseChapterList, parseChapterImages, resolveChapterUrl } = await import('../src/providers/mangakatana.js');
+const { parseSearchResults, parseChapterList, parseChapterImages, resolveChapterUrl, provider: mangakatanaProvider } = await import('../src/providers/mangakatana.js');
 const { isImageBuffer } = await import('../src/download/downloader.js');
 const { throttle, _resetThrottle } = await import('../src/download/throttle.js');
 const { cookieHeader } = await import('../src/download/flaresolverr.js');
@@ -168,4 +168,37 @@ test('titlesMatch / normTitle handle punctuation and prefixes', () => {
 
 test('MangaKatana provider is registered but disabled by default', () => {
   assert.equal(isProviderEnabled('mangakatana'), false, 'opt-in scraper stays disabled until enabled');
+});
+
+test('MangaKatana: provider exposes a standard search() so the Add tab / Follow works', () => {
+  // Regression guard: the /api/search route calls provider.search() and the
+  // Follow button sends providerSeriesId = result.id. A missing search() (or one
+  // returning { url } instead of { id }) yields a 400 "providerSeriesId is required".
+  assert.equal(typeof mangakatanaProvider.search, 'function', 'search() must exist');
+  assert.equal(mangakatanaProvider.capabilities.metadata, true, 'listed as a primary metadata provider');
+});
+
+test('MangaKatana: search() returns { id, title } with the series URL as id', async () => {
+  _resetThrottle();
+  const searchHtml = `
+    <div id="book_list">
+      <div class="item"><h3 class="title"><a href="https://mangakatana.com/manga/pet.12345">Pet</a></h3></div>
+      <div class="item"><h3 class="title"><a href="https://mangakatana.com/manga/pet-of-love.67890">Pet of Love</a></h3></div>
+    </div>`;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => searchHtml });
+  try {
+    const results = await mangakatanaProvider.search('pet');
+    assert.equal(results.length, 2, 'both series parsed');
+    // Every result must carry a truthy id (this is what Follow sends as providerSeriesId).
+    assert.ok(results.every(r => r.id && r.title), 'each result has id + title');
+    assert.deepEqual(
+      results.map(r => r.id),
+      ['https://mangakatana.com/manga/pet.12345', 'https://mangakatana.com/manga/pet-of-love.67890'],
+      'id is the series URL (accepted directly by getSeries/listChapters)'
+    );
+    assert.equal(results[0].title, 'Pet');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });
