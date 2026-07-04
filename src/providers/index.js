@@ -72,3 +72,23 @@ export function describeProviders() {
     capabilities: p.capabilities,
   }));
 }
+
+/**
+ * Best-effort provider + series-ID detection from a pasted URL, so "Add a
+ * series" can follow one specific series directly instead of only by title
+ * search. Returns null when the URL doesn't match a known source.
+ */
+export function detectProviderFromUrl(input) {
+  const url = String(input || '').trim();
+  if (!/^https?:\/\//i.test(url)) return null;
+
+  const mangadexMatch = url.match(/mangadex\.org.*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  if (mangadexMatch) return { provider: 'mangadex', providerSeriesId: mangadexMatch[1] };
+
+  if (/mangakatana\.com\/manga\//i.test(url)) return { provider: 'mangakatana', providerSeriesId: url };
+
+  const comicvineMatch = url.match(/comicvine\.gamespot\.com\/[^/]*\/volume\/4050-(\d+)/i);
+  if (comicvineMatch) return { provider: 'comicvine', providerSeriesId: comicvineMatch[1] };
+
+  return null;
+}
