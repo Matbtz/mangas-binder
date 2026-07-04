@@ -10,7 +10,7 @@ process.env.DB_PATH = path.join(tmp, 't.db');
 process.env.OUTPUT_DIR = path.join(tmp, 'out');
 process.env.STAGING_DIR = path.join(tmp, 'staging');
 
-const { detectProviderFromUrl, getProvider, metadataProviders } = await import('../src/providers/index.js');
+const { detectProviderFromUrl, getProvider, metadataProviders, allProviders } = await import('../src/providers/index.js');
 const { closeDb } = await import('../src/core/db.js');
 
 after(() => { closeDb(); rmSync(tmp, { recursive: true, force: true }); });
@@ -45,4 +45,17 @@ test('mangaupdates has no getSeries, so it must not be offered as a followable m
   assert.equal(typeof mu.getSeries, 'undefined');
   assert.equal(mu.capabilities.metadata, false);
   assert.ok(!metadataProviders().some(p => p.name === 'mangaupdates'));
+});
+
+test('every metadata-capable provider exposes search() — /api/search and the Add tab call it by that name', () => {
+  for (const p of allProviders()) {
+    if (!p.capabilities.metadata) continue;
+    assert.equal(typeof p.search, 'function', `${p.name}.search must be a function`);
+  }
+});
+
+test('mangakatana.search is wired up (regression: it only exposed searchSeries, not search)', () => {
+  const mk = getProvider('mangakatana');
+  assert.equal(typeof mk.search, 'function');
+  assert.equal(mk.search, mk.searchSeries);
 });
