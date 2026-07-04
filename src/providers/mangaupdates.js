@@ -208,14 +208,19 @@ export async function testConnection() {
 }
 
 /**
- * Metadata-only provider conforming to providers/base.js.
- * Supplies the total-volume hint that feeds core/extrapolate.js; it cannot
- * download pages, so it is never selected as a download source.
+ * Volume-hint-only provider: it supplies the total-volume/chapter consensus
+ * that feeds core/extrapolate.js (see core/volume-consensus.js) and has a
+ * `search` for that purpose, but it has no `getSeries` — it can't return the
+ * full { title, authors, description, ... } shape a "Follow" needs. So unlike
+ * providers/base.js's { download, metadata } doc, `metadata` here stays false:
+ * that flag gates which sources the Add tab offers as a followable search
+ * source (see providers/index.js), and offering this one there previously
+ * crashed with "provider.getSeries is not a function".
  */
 export const provider = {
   name: 'mangaupdates',
   label: 'MangaUpdates',
-  capabilities: { download: false, metadata: true },
+  capabilities: { download: false, metadata: false },
   search: searchMangaUpdates,
   getTotalVolumesForTitle,
   testConnection,

@@ -2119,6 +2119,29 @@ async function viewAdd(v) {
   $('#prov', card).onchange = updateHint;
   updateHint();
 
+  const urlCard = h(`<div class="card"><h2>Or add by URL</h2><div class="row">
+    <input id="add-url" placeholder="https://mangadex.org/title/…  ·  https://mangakatana.com/manga/…  ·  https://comicvine.gamespot.com/…/volume/4050-…/" style="flex:1;min-width:260px" />
+    <button class="btn primary" id="add-url-go">Add</button></div>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">Paste a series page URL to follow that exact series directly, skipping search. Supports MangaDex, MangaKatana and ComicVine links.</p></div>`);
+  v.appendChild(urlCard);
+  const addUrlBtn = $('#add-url-go', urlCard);
+  const addByUrl = async () => {
+    const url = $('#add-url', urlCard).value.trim();
+    if (!url) return;
+    addUrlBtn.disabled = true; addUrlBtn.textContent = 'Adding…';
+    try {
+      const series = await api('/series', { method: 'POST', body: { url } });
+      toast('Following ' + series.title);
+      navigate('#/library');
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      addUrlBtn.disabled = false; addUrlBtn.textContent = 'Add';
+    }
+  };
+  addUrlBtn.onclick = addByUrl;
+  $('#add-url', urlCard).addEventListener('keydown', e => { if (e.key === 'Enter') addByUrl(); });
+
   const doSearch = async () => {
     const q = $('#q', card).value.trim(); if (!q) return;
     results.innerHTML = '<p class="muted">Searching…</p>';

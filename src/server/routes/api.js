@@ -1,7 +1,7 @@
 import { readdirSync, existsSync, statSync, unlinkSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { config } from '../../core/config.js';
-import { getProvider, describeProviders } from '../../providers/index.js';
+import { getProvider, describeProviders, detectProviderFromUrl } from '../../providers/index.js';
 import { searchManga } from '../../providers/mangadex.js';
 import { searchVolumes } from '../../providers/comicvine.js';
 import { provider as hardcover } from '../../providers/hardcover.js';
@@ -83,7 +83,13 @@ export default async function apiRoutes(app) {
   app.get('/api/series', async () => listSeries().map(s => seriesView(s)));
 
   app.post('/api/series', async (req, reply) => {
-    const { provider = 'mangadex', providerSeriesId, monitorMode, monitorFromVolume, packagingMode, language } = req.body || {};
+    let { provider = 'mangadex', providerSeriesId, url, monitorMode, monitorFromVolume, packagingMode, language } = req.body || {};
+    if (url && !providerSeriesId) {
+      const detected = detectProviderFromUrl(url);
+      if (!detected) return reply.code(400).send({ error: 'Could not recognize a provider from that URL' });
+      provider = detected.provider;
+      providerSeriesId = detected.providerSeriesId;
+    }
     if (!providerSeriesId) return reply.code(400).send({ error: 'providerSeriesId is required' });
     const series = await followSeries(provider, providerSeriesId, { monitorMode, monitorFromVolume, packagingMode, language });
     return reply.code(201).send(seriesView(series));

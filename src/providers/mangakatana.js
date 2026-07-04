@@ -329,6 +329,9 @@ export const provider = {
   label: 'MangaKatana',
   mediaType: 'manga',
   capabilities: { download: true, metadata: true, archive: false, pageFallback: true },
+  // `search` is the base.js interface name the Add tab / /api/search call; it
+  // returns { id, title } so the Follow button's providerSeriesId is populated.
+  // `searchSeries` stays too since download/fallback.js imports it directly.
   search,
   searchSeries,
   getSeries,
