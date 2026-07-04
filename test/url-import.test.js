@@ -56,6 +56,11 @@ test('every metadata-capable provider exposes search() — /api/search and the A
 
 test('mangakatana.search is wired up (regression: it only exposed searchSeries, not search)', () => {
   const mk = getProvider('mangakatana');
-  assert.equal(typeof mk.search, 'function');
-  assert.equal(mk.search, mk.searchSeries);
+  // search() is the base.js interface name the Add tab / /api/search call. It
+  // returns the standard { id, title } shape (see mangakatana.test.js) so the
+  // Follow button's providerSeriesId is populated — unlike the raw searchSeries()
+  // crawl (which yields { url, title }). searchSeries() is kept too because
+  // download/fallback.js imports it directly.
+  assert.equal(typeof mk.search, 'function', 'search() must be wired up');
+  assert.equal(typeof mk.searchSeries, 'function', 'searchSeries() kept for the fallback path');
 });

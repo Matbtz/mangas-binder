@@ -5,11 +5,14 @@ import { solve as flareSolve, cookieHeader, isEnabled as flareEnabled } from '..
 import { logHistory } from '../core/db.js';
 
 /**
- * MangaKatana — a page-image *fallback* source for manga.
+ * MangaKatana — a manga source that serves two roles:
  *
- * It is NOT a primary provider: series are still followed via MangaDex (which
- * gives rich volume + MangaUpdates data). When a MangaDex page download fails,
- * the worker asks MangaKatana for the same chapter by (series title, number).
+ *   1. Primary provider (metadata + download): a series can be followed directly
+ *      from MangaKatana via the Add tab. Because the site has no numeric ids, the
+ *      series *URL* is used as the provider series id — search() returns it as
+ *      `id`, and getSeries()/listChapters() both accept it directly.
+ *   2. Page-image fallback for MangaDex: when a MangaDex page download fails, the
+ *      worker asks MangaKatana for the same chapter by (series title, number).
  *
  * MangaKatana has no public API and sits behind Cloudflare (a direct fetch
  * returns HTTP 403), so all page fetches go through FlareSolverr when configured.
@@ -190,6 +193,17 @@ export async function searchSeries(title, { signal } = {}) {
   return parseSearchResults(html);
 }
 
+/**
+ * Standard provider search for the Add tab. Same crawl as searchSeries() but
+ * mapped to the common `{ id, title }` shape every provider returns. The series
+ * URL *is* the id — getSeries()/listChapters() accept it directly — so a
+ * followed MangaKatana series stores its URL as provider_series_id.
+ */
+export async function search(title, { signal } = {}) {
+  const results = await searchSeries(title, { signal });
+  return results.map(r => ({ id: r.url, title: r.title }));
+}
+
 /** Get series details from a MangaKatana series URL. */
 export async function getSeries(idOrUrl) {
   const url = idOrUrl.startsWith('http') ? idOrUrl : `${SITE}${idOrUrl}`;
@@ -315,9 +329,10 @@ export const provider = {
   label: 'MangaKatana',
   mediaType: 'manga',
   capabilities: { download: true, metadata: true, archive: false, pageFallback: true },
-  // `search` is the base.js interface name the Add tab and /api/search call;
+  // `search` is the base.js interface name the Add tab / /api/search call; it
+  // returns { id, title } so the Follow button's providerSeriesId is populated.
   // `searchSeries` stays too since download/fallback.js imports it directly.
-  search: searchSeries,
+  search,
   searchSeries,
   getSeries,
   listChapters,
