@@ -43,15 +43,27 @@ const FILENAME_SHORT_VOL_RE = /\bv(\d{1,4}(?:\.\d+)?)\b/i;
 // Issue number for comics: "#10", "# 10", "#010"
 const FILENAME_ISSUE_RE = /#\s*0*(\d+(?:\.\d+)?)\b/;
 
+// A version tag is a small revision counter (v2, v3…), almost never above this.
+// A "v84" is a volume; scanlators don't put out an 84th revision of a chapter.
+const MAX_VERSION_TAG = 4;
+
 /**
  * Extract a volume number from a file/folder name, resolving the ambiguity of
- * the short "vNN" form. "Vol. 07"/"Tome 3" is always a volume. Bare "v85" is a
- * volume too — but scene releases also use vN as a *version* tag ("Series 985
- * (digital) (v2)" is chapter 985 revision 2, and "Series #10 v10" is issue 10),
- * so a short vNN sitting next to a *different* standalone number is treated as
- * a version tag and yields no volume. When the numbers agree ("ONE PIECE 85
- * v85.cbz") the file is a volume release that repeats its own number — it must
- * be matched by volume, never mistaken for the same-numbered chapter.
+ * the short "vNN" form.
+ *
+ * A `vNN` marker means *volume* by default — this is the whole point of the
+ * check, and real libraries lean on it heavily ("ONE PIECE 1 v84.cbz",
+ * "ONE PIECE 3 v87.cbz" are volumes 84 and 87; the leading number is a
+ * collection/reading-order index, NOT a chapter). Getting this wrong is what
+ * links chapter 3 to a file that is actually volume 87.
+ *
+ * The one competing meaning is the scanlation *version* tag: "One Piece 985
+ * v2.cbz" / "Bleach 001 (v2).cbz" is chapter 985/1 revision 2. That form is
+ * recognisable — the `vNN` is a small revision number (≤ MAX_VERSION_TAG) and
+ * sits next to a larger companion number that is the real chapter. Only then
+ * do we yield null so the caller matches by chapter instead. Long form
+ * ("Vol. 07"/"Tome 3") and the comic issue form ("#10 v10") are handled up
+ * front and are never ambiguous.
  */
 function volumeFromName(name) {
   const volMatch = name.match(FILENAME_VOL_RE);
@@ -60,12 +72,41 @@ function volumeFromName(name) {
   const short = name.match(FILENAME_SHORT_VOL_RE);
   if (!short) return null;
   const vNum = parseFloat(short[1]);
-  // Other standalone numbers in the name, ignoring the vNN token itself and
-  // parenthesised years, which are never chapter/volume numbers.
-  const rest = name.replace(FILENAME_SHORT_VOL_RE, ' ').replace(/\((?:19|20)\d{2}\)/g, ' ');
-  const others = [...rest.matchAll(/(?:^|[^\w.])0*(\d{1,4}(?:\.\d+)?)(?![\w.])/g)].map(m => parseFloat(m[1]));
-  if (others.some(n => n !== vNum)) return null;
+
+  // Only a *small* vNN can be a version tag; a large one is unambiguously a
+  // volume regardless of any other number present ("... 1 v84" → volume 84).
+  if (vNum <= MAX_VERSION_TAG && companionChapters(name, vNum).length) return null;
   return String(vNum);
+}
+
+/**
+ * Standalone numbers in a name that are larger than the vNN revision `vNum` —
+ * i.e. the real chapter numbers a version tag sits beside ("985 v2" → [985]).
+ * The vNN token itself and parenthesised years are excluded, since neither is
+ * a chapter/volume number.
+ */
+function companionChapters(name, vNum) {
+  const rest = name.replace(FILENAME_SHORT_VOL_RE, ' ').replace(/\((?:19|20)\d{2}\)/g, ' ');
+  return [...rest.matchAll(/(?:^|[^\w.])0*(\d{1,4}(?:\.\d+)?)(?![\w.])/g)]
+    .map(m => parseFloat(m[1]))
+    .filter(n => n > vNum);
+}
+
+/**
+ * For a name volumeFromName() rejected as a version-tagged chapter
+ * ("One Piece 985 v2.cbz" → chapter 985), return that chapter number, else
+ * null. Kept in lockstep with volumeFromName's version-tag rule so exactly one
+ * of the two ever claims a given name — a file is either a volume or a
+ * (version-tagged) chapter, never both.
+ */
+function versionTaggedChapter(name) {
+  if (FILENAME_VOL_RE.test(name) || FILENAME_ISSUE_RE.test(name)) return null;
+  const short = name.match(FILENAME_SHORT_VOL_RE);
+  if (!short) return null;
+  const vNum = parseFloat(short[1]);
+  if (vNum > MAX_VERSION_TAG) return null;
+  const chapters = companionChapters(name, vNum);
+  return chapters.length ? String(Math.max(...chapters)) : null;
 }
 const WEB_ID_RE = /mangadex\.org\/title\/([0-9a-f-]{36})/i;
 const COMICVINE_ID_RE = /comicvine\.gamespot\.com\/volume\/4050-(\d+)/i;
@@ -372,19 +413,35 @@ async function _scanLibrary({ seriesId } = {}) {
       }
     }
     // When matching was via directory fallback and no "Vol N" keyword appears in the
-    // filename, try reading a bare number from the filename as a volume indicator.
-    // e.g. "Dandadan/07.cbz" → volume 7, "Dandadan/Dandadan_07.cbz" → volume 7.
+    // filename, resolve the filename number.
     if (matchedCount === 0 && !info.volume && usedDirFallback) {
       const base = path.basename(file).replace(/\.(cbz|epub)$/i, '');
-      const bareVol = base.match(/(?:^|[-_\s])0*(\d{1,3}(?:\.\d+)?)(?:$|[-_\s])/);
-      if (bareVol) {
-        const vNum = String(parseFloat(bareVol[1]));
-        for (const row of index.values()) {
-          if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
-            setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
-            row.state = 'imported';
-            markedChapters++;
-            perSeries[match.title] = (perSeries[match.title] || 0) + 1;
+      // A version-tagged chapter ("One Piece 985 v2.cbz") is matched by its
+      // chapter number — never read the big number as a volume, and never let
+      // the small "v2" become a volume either.
+      const verCh = versionTaggedChapter(base);
+      if (verCh) {
+        const row = index.get(String(parseFloat(verCh)));
+        if (row && row.state !== 'imported') {
+          setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+          row.state = 'imported';
+          markedChapters++;
+          matchedCount++;
+          perSeries[match.title] = (perSeries[match.title] || 0) + 1;
+        }
+      } else {
+        // A bare number with no vNN token at all ("Dandadan/07.cbz",
+        // "Dandadan_07.cbz") is a volume indicator.
+        const bareVol = !FILENAME_SHORT_VOL_RE.test(base) && base.match(/(?:^|[-_\s])0*(\d{1,3}(?:\.\d+)?)(?:$|[-_\s])/);
+        if (bareVol) {
+          const vNum = String(parseFloat(bareVol[1]));
+          for (const row of index.values()) {
+            if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
+              setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+              row.state = 'imported';
+              markedChapters++;
+              perSeries[match.title] = (perSeries[match.title] || 0) + 1;
+            }
           }
         }
       }
