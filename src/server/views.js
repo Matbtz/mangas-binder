@@ -25,6 +25,7 @@ export function seriesView(row, { withCounts = true } = {}) {
     monitorFromVolume: row.monitor_from_volume ?? null,
     packagingMode: row.packaging_mode,
     totalVolumesHint: row.total_volumes_hint,
+    totalChaptersHint: row.total_chapters_hint,
     lastScanAt: row.last_scan_at,
     externalLinks: row.externalLinks || (row.external_links_json ? JSON.parse(row.external_links_json) : {}),
     counts: withCounts ? chapterStateCounts(row.id) : undefined,

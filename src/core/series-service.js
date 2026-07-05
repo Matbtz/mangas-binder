@@ -41,9 +41,12 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
   // freshly-followed series gets a trustworthy hint from the start rather
   // than whatever a single provider happens to report.
   let totalVolumesHint = null;
+  let totalChaptersHint = null;
   if (mediaType === 'manga') {
-    const { totalVolumes } = await consultVolumeProviders(details.title).catch(() => ({ totalVolumes: { value: null } }));
+    const { totalVolumes, totalChapters } = await consultVolumeProviders(details.title)
+      .catch(() => ({ totalVolumes: { value: null }, totalChapters: { value: null } }));
     totalVolumesHint = totalVolumes.value;
+    totalChaptersHint = totalChapters.value;
   }
 
   // Comics default to per-issue packaging (collected editions aren't deterministic).
@@ -69,6 +72,7 @@ export async function followSeries(providerName, providerSeriesId, opts = {}) {
     monitorFromVolume: opts.monitorFromVolume ?? null,
     packagingMode: opts.packagingMode || defaultPackaging,
     totalVolumesHint,
+    totalChaptersHint,
   });
 
   logHistory('series.followed', { seriesId: series.id, message: details.title });
@@ -120,12 +124,20 @@ export async function refreshSeries(seriesId) {
       // Cross-check every enabled total-volume/chapter provider instead of
       // trusting MangaUpdates alone (see volume-consensus.js: a real bug had
       // MangaUpdates' own latest_chapter badly stale for an older completed
-      // series while AniList/MangaBaka/Fandom all independently agreed on
-      // the real number). The resolved consensus both sets the volume hint
-      // and bounds how far chapters are gap-filled.
+      // series while MangaBaka/Fandom independently agreed on the real number,
+      // and another had two providers share a physically impossible "1 volume"
+      // count for a 55-chapter series). The resolved consensus both sets the
+      // volume/chapter hints and bounds how far chapters are gap-filled.
       const { totalVolumes, totalChapters, mangaUpdatesRef } = await consultVolumeProviders(series.title);
-      if (totalVolumes.value && series.total_volumes_hint !== totalVolumes.value) {
-        updateSeries(seriesId, { totalVolumesHint: totalVolumes.value });
+      const hintPatch = {};
+      if (totalVolumes.value && series.total_volumes_hint !== totalVolumes.value) hintPatch.totalVolumesHint = totalVolumes.value;
+      if (totalChapters.value && series.total_chapters_hint !== totalChapters.value) hintPatch.totalChaptersHint = totalChapters.value;
+      if (Object.keys(hintPatch).length) {
+        updateSeries(seriesId, hintPatch);
+        Object.assign(series, {
+          total_volumes_hint: hintPatch.totalVolumesHint ?? series.total_volumes_hint,
+          total_chapters_hint: hintPatch.totalChaptersHint ?? series.total_chapters_hint,
+        });
       }
       if (totalChapters.value && totalChapters.value > 0) {
         const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
@@ -275,8 +287,8 @@ export async function previewRefreshSeries(seriesId) {
   // Cross-check every enabled total-volume/chapter provider and resolve a
   // consensus instead of trusting MangaUpdates alone (see
   // core/volume-consensus.js: MangaUpdates' own latest_chapter has been
-  // observed badly stale for an older completed series while
-  // AniList/MangaBaka/Fandom all independently agreed on the real number).
+  // observed badly stale for an older completed series while MangaBaka/Fandom
+  // independently agreed on the real number).
   // `mangaUpdates` keeps its historical shape/name here since it also drives
   // the per-chapter volume-override mechanic, which stays MangaUpdates-only.
   let mangaUpdates = null;
@@ -375,7 +387,8 @@ export async function previewRefreshSeries(seriesId) {
   const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap);
   const stats = getVolumeStats(volumeMap);
   const totalVolumesHint = series.total_volumes_hint || mangaUpdates?.totalVolumesHint || null;
-  const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null);
+  const totalChaptersHint = mangaUpdates?.latestChapterHint || series.total_chapters_hint || null;
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null, totalChaptersHint);
 
   // Use the *sanitized* map here, not the raw one: extrapolateVolumes() already
   // re-sanitizes internally and reassigns noisy/outlier-volume chapters to a

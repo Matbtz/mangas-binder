@@ -228,7 +228,7 @@ series(
   cover_path, language,
   monitored BOOL, monitor_mode TEXT,        -- all | future | none
   packaging_mode TEXT,                       -- chapter | volume
-  total_volumes_hint INT, created_at, updated_at,
+  total_volumes_hint INT, total_chapters_hint INT, created_at, updated_at,
   UNIQUE(provider, provider_series_id))
 
 chapters(

@@ -180,11 +180,22 @@ export function getVolumeStats(rawVolumeMap) {
  *     one volume whenever known anchors were sparse (e.g. only volume 1 and
  *     volume 10 tagged by the provider, with 90 untagged chapters between).
  *  4. If there's no succeeding anchor (tail of the series), estimated volume
- *     = baseVol + ceil((chNum - anchorCh) / chsPerVol), open-ended.
+ *     = baseVol + ceil((chNum - anchorCh) / chsPerVol), then clamped to
+ *     totalVolumesHint (when known) so it never runs past the series' real
+ *     length.
  *
+ * Special case — *no* usable anchors but a known total volume count: the
+ * chapters are distributed across exactly that many volumes (by chapter number
+ * when totalChaptersHint is known, otherwise by rank), which is bounded,
+ * gapless and even. This is the common English-scanlation case where the
+ * source tags no volumes at all.
+ *
+ * @param {number|null} totalChaptersHint  the series' resolved total chapter
+ *   count (from the cross-provider consensus); anchors chapter→volume spacing
+ *   for the no-anchor case so it survives sparse/noisy chapter numbering.
  * Returns { calculated, overflow }
  */
-export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolumesHint = null, capAtHint = true, chsPerVolOverride = null) {
+export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolumesHint = null, capAtHint = true, chsPerVolOverride = null, totalChaptersHint = null) {
   // Reject anchor chapters that don't fit their volume's cluster or that overlap
   // a neighboring volume — a single mistagged chapter must not corrupt every
   // boundary derived from it. Rejected chapters rejoin the unassigned pool so
@@ -252,6 +263,47 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
   const calculated = {};
   const overflow = [];
 
+  // No usable volume anchors at all (e.g. an English scanlation source that
+  // tags nothing, like Pet on MangaKatana), but we DO know the series' real
+  // total volume count. Distribute the chapters across exactly that many
+  // volumes so the result is bounded, gapless and evenly sized — instead of
+  // the old `ceil(chapterNumber / 10)`, which invented unbounded phantom
+  // volumes from sparse or noisy chapter numbering (a finished 5-volume,
+  // 55-chapter series was landing chapters in volumes as high as 120).
+  if (anchors.length === 0 && totalVolumesHint && totalVolumesHint >= 1) {
+    const V = Math.floor(totalVolumesHint);
+    const integers = [];
+    for (const chStr of sortedUnassigned) {
+      const n = parseFloat(chStr);
+      if (Number.isNaN(n)) { overflow.push(chStr); continue; }
+      if (String(chStr).includes('.') || !Number.isInteger(n)) { (calculated['Specials'] ||= []).push(chStr); continue; }
+      integers.push({ raw: chStr, n });
+    }
+    // Prefer number-based spacing when we also know the real chapter total: it
+    // keeps every chapter at its true position and folds any stray
+    // out-of-range chapter into the final known volume rather than past it.
+    // Without a chapter total, fall back to rank-based distribution, which is
+    // immune to gaps/outliers in the numbering (a stray "chapter 1190" can't
+    // drag the split apart).
+    const perVol = (chsPerVolOverride && chsPerVolOverride > 0)
+      ? chsPerVolOverride
+      : (totalChaptersHint && totalChaptersHint > 0 ? Math.max(1, Math.ceil(totalChaptersHint / V)) : null);
+    if (perVol) {
+      for (const { raw, n } of integers) {
+        let estVol = Math.max(1, Math.ceil(n / perVol));
+        if (estVol > V) estVol = V;
+        (calculated[String(estVol)] ||= []).push(raw);
+      }
+    } else {
+      const N = integers.length;
+      integers.forEach(({ raw }, i) => {
+        const estVol = N ? Math.min(V, Math.floor((i * V) / N) + 1) : 1;
+        (calculated[String(estVol)] ||= []).push(raw);
+      });
+    }
+    return { calculated, overflow };
+  }
+
   for (const chStr of sortedUnassigned) {
     const chNum = parseFloat(chStr);
     if (Number.isNaN(chNum)) { overflow.push(chStr); continue; }
@@ -297,11 +349,14 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
       estVol = baseVol + Math.max(1, Math.ceil(diff / chsPerVol));
     }
 
-    if (capAtHint && totalVolumesHint && estVol > totalVolumesHint) {
-      overflow.push(chStr);
-    } else {
-      (calculated[String(estVol)] ||= []).push(chStr);
+    if (totalVolumesHint && estVol > totalVolumesHint) {
+      // Past the known total volume count. Either drop it (capAtHint) or clamp
+      // it into the final known volume — never mint a phantom volume beyond the
+      // series' real length.
+      if (capAtHint) { overflow.push(chStr); continue; }
+      estVol = Math.floor(totalVolumesHint);
     }
+    (calculated[String(estVol)] ||= []).push(chStr);
   }
 
   return { calculated, overflow };

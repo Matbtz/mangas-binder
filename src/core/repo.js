@@ -14,12 +14,12 @@ export function createSeries(s) {
       (provider, provider_series_id, media_type, download_provider, publisher,
        title, sort_title, authors_json, artists_json,
        description, genres_json, year, status, cover_path, folder_path, language,
-       monitored, monitor_mode, monitor_from_volume, packaging_mode, total_volumes_hint, external_links_json)
+       monitored, monitor_mode, monitor_from_volume, packaging_mode, total_volumes_hint, total_chapters_hint, external_links_json)
     VALUES
       (@provider, @provider_series_id, @media_type, @download_provider, @publisher,
        @title, @sort_title, @authors_json, @artists_json,
        @description, @genres_json, @year, @status, @cover_path, @folder_path, @language,
-       @monitored, @monitor_mode, @monitor_from_volume, @packaging_mode, @total_volumes_hint, @external_links_json)
+       @monitored, @monitor_mode, @monitor_from_volume, @packaging_mode, @total_volumes_hint, @total_chapters_hint, @external_links_json)
     ON CONFLICT(provider, provider_series_id) DO UPDATE SET
        title = excluded.title, updated_at = datetime('now')
   `).run({
@@ -44,6 +44,8 @@ export function createSeries(s) {
     monitor_from_volume: s.monitorFromVolume != null ? parseFloat(s.monitorFromVolume) : null,
     packaging_mode: s.packagingMode ?? 'volume',
     total_volumes_hint: s.totalVolumesHint ?? null,
+    total_chapters_hint: s.totalChaptersHint ?? null,
+    external_links_json: s.externalLinks != null ? JSON.stringify(s.externalLinks) : null,
   });
   return getSeriesByProvider(s.provider, s.providerSeriesId);
 }
@@ -79,6 +81,7 @@ const SERIES_PATCH_COLS = {
   packagingMode: v => v,
   language: v => v,
   totalVolumesHint: v => v,
+  totalChaptersHint: v => v,
   coverPath: v => v,
   folderPath: v => v,
   provider: v => v,
@@ -92,7 +95,8 @@ const SERIES_PATCH_COLS = {
 const SERIES_COL_NAMES = {
   monitored: 'monitored', monitorMode: 'monitor_mode', monitorFromVolume: 'monitor_from_volume',
   packagingMode: 'packaging_mode',
-  language: 'language', totalVolumesHint: 'total_volumes_hint', coverPath: 'cover_path', folderPath: 'folder_path',
+  language: 'language', totalVolumesHint: 'total_volumes_hint', totalChaptersHint: 'total_chapters_hint',
+  coverPath: 'cover_path', folderPath: 'folder_path',
   provider: 'provider', providerSeriesId: 'provider_series_id',
   downloadProvider: 'download_provider', mediaType: 'media_type', title: 'title',
   description: 'description',
@@ -117,6 +121,18 @@ export function touchSeriesScan(id) {
 
 export function deleteSeries(id) {
   getDb().prepare('DELETE FROM series WHERE id = ?').run(id);
+}
+
+/**
+ * Delete every chapter row of a series (leaving the series itself and any
+ * on-disk files intact). Used by the "reset series" action so a subsequent
+ * refresh rebuilds the chapter list from scratch — the way to clear stale or
+ * mis-estimated volume data accumulated by earlier scans. Returns the count
+ * of rows removed.
+ */
+export function deleteChaptersForSeries(id) {
+  const info = getDb().prepare('DELETE FROM chapters WHERE series_id = ?').run(id);
+  return Number(info.changes || 0);
 }
 
 // --- Chapters --------------------------------------------------------------
@@ -206,6 +222,29 @@ export function listChaptersForSeries(seriesId) {
   return getDb().prepare(
     'SELECT * FROM chapters WHERE series_id = ? ORDER BY CAST(number AS REAL)'
   ).all(seriesId);
+}
+
+/**
+ * Slim per-chapter fields the live "tick" on the series detail page needs to
+ * patch status cells, action buttons and volume badges — nothing else. The full
+ * `listChaptersForSeries` + `chapterView` payload (title, language, pages,
+ * quality, timestamps, …) was refetched and re-serialised for every chapter on
+ * every SSE progress event; on a 1000+ chapter series that is a lot of wasted
+ * DB read, JSON and client parse several times a second during downloads.
+ */
+export function listChapterProgress(seriesId) {
+  return getDb().prepare(
+    'SELECT id, number, state, volume, prog_done, prog_total, error, cbz_path FROM chapters WHERE series_id = ? ORDER BY CAST(number AS REAL)'
+  ).all(seriesId).map(r => ({
+    id: r.id,
+    number: r.number,
+    state: r.state,
+    volume: r.volume,
+    progDone: r.prog_done ?? null,
+    progTotal: r.prog_total ?? null,
+    error: r.error,
+    cbzPath: r.cbz_path,
+  }));
 }
 
 export function chaptersInState(state, limit = 100) {

@@ -11,7 +11,7 @@ process.env.OUTPUT_DIR = path.join(tmp, 'out');
 process.env.STAGING_DIR = path.join(tmp, 'staging');
 
 const { ensureSeeded } = await import('../src/core/settings.js');
-const { createSeries, upsertChapter, listChaptersForSeries, setChapterState } = await import('../src/core/repo.js');
+const { createSeries, upsertChapter, listChaptersForSeries, setChapterState, getSeries } = await import('../src/core/repo.js');
 const { resolveVolumes } = await import('../src/core/mapping.js');
 const { extrapolateVolumes, sanitizeVolumeMap, getVolumeStats } = await import('../src/core/extrapolate.js');
 const { closeDb } = await import('../src/core/db.js');
@@ -51,6 +51,41 @@ test('extrapolate: with no explicit chsPerVol, the total-volume hint reshapes th
   assert.equal(Math.max(...volNums), 20);
 });
 
+test('extrapolate: no anchors + volume & chapter hints spread chapters evenly across exactly that many volumes (the "Pet" case)', () => {
+  // Pet: a finished 5-volume / 55-chapter series whose scanlation source tags
+  // no volumes at all. The old code fell back to ceil(chapter/10) with no cap,
+  // inventing phantom volumes well past 5; it must now land exactly 5 even
+  // volumes of ~11 chapters each.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const { calculated, overflow } = extrapolateVolumes({}, range(1, 55), 5, false, null, 55);
+  assert.deepEqual(overflow, []);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number).sort((a, b) => a - b);
+  assert.deepEqual(volNums, [1, 2, 3, 4, 5]);
+  const counts = volNums.map(v => calculated[String(v)].length);
+  assert.ok(Math.max(...counts) - Math.min(...counts) <= 1, `expected even split, got ${counts}`);
+  assert.deepEqual(calculated['1'], range(1, 11));
+  assert.deepEqual(calculated['5'], range(45, 55));
+});
+
+test('extrapolate: no anchors + volume hint but no chapter total falls back to rank-based even split (immune to number gaps)', () => {
+  // Sparse/noisy chapter numbering (a stray "chapter 60") must not blow the
+  // split apart: distributing by rank keeps it even and bounded at the hint.
+  const { calculated, overflow } = extrapolateVolumes({}, ['1', '2', '5', '7', '60', '61', '62'], 3, false, null, null);
+  assert.deepEqual(overflow, []);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number).sort((a, b) => a - b);
+  assert.deepEqual(volNums, [1, 2, 3]); // exactly 3, gapless
+  const counts = volNums.map(v => calculated[String(v)].length);
+  assert.ok(Math.max(...counts) - Math.min(...counts) <= 1, `expected even split, got ${counts}`);
+});
+
+test('extrapolate: stray out-of-range chapters clamp into the final known volume instead of minting phantom volumes', () => {
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const { calculated } = extrapolateVolumes({}, [...range(1, 10), '1190'], 2, false, null, 10);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number);
+  assert.equal(Math.max(...volNums), 2); // never a volume 119
+  assert.ok(calculated['2'].includes('1190'));
+});
+
 test('resolveVolumes: assigns estimated volumes to untagged chapters, keeps real tags', () => {
   const s = createSeries({ provider: 'mangadex', providerSeriesId: 'map1', title: 'Map One', language: 'en', monitored: true, packagingMode: 'volume' });
   for (const n of ['1', '2', '3']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });
@@ -69,6 +104,25 @@ test('resolveVolumes: assigns estimated volumes to untagged chapters, keeps real
   assert.equal(vol('6').volume, '2');
   assert.equal(vol('7').volume, '3');
   assert.equal(vol('9').volume, '3');
+});
+
+test('resolveVolumes: an untagged, finished series is bounded by its persisted volume/chapter hints', () => {
+  // End-to-end version of the "Pet" fix: no chapter carries a real volume tag,
+  // but the series knows it is 5 volumes / 55 chapters. Estimation must fill
+  // exactly volumes 1-5, never a phantom high volume.
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: 'petmap', title: 'Pet Map', language: 'en',
+    monitored: true, packagingMode: 'volume', totalVolumesHint: 5, totalChaptersHint: 55,
+  });
+  const stored = getSeries(s.id);
+  assert.equal(stored.total_chapters_hint, 55); // column persisted
+  for (let i = 1; i <= 55; i++) upsertChapter(s.id, { provider: 'mangadex', number: String(i) }); // all untagged
+
+  resolveVolumes(s.id);
+  const chs = listChaptersForSeries(s.id);
+  const vols = [...new Set(chs.map(c => parseFloat(c.volume)))].filter(v => !Number.isNaN(v)).sort((a, b) => a - b);
+  assert.deepEqual(vols, [1, 2, 3, 4, 5]);
+  assert.ok(chs.every(c => c.calculated === 1));
 });
 
 test('sanitizeVolumeMap: rejects a mistagged outlier that would overlap the next volume', () => {

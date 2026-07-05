@@ -1,5 +1,14 @@
 import sharp from 'sharp';
 
+// Cap libvips' resource use for a self-hosted (often NAS-class) host. We process
+// pages strictly one at a time, so its operation cache — which retains decoded
+// rasters across calls — almost never hits yet inflates RSS; disable it. And its
+// per-operation thread pool defaults to the physical core count, which pins
+// every core during a bind; cap it so packaging can't starve the rest of the
+// app. Both are env-overridable for beefier machines.
+sharp.cache(false);
+sharp.concurrency(Math.max(1, Number(process.env.SHARP_CONCURRENCY) || 2));
+
 /**
  * KCC-style page treatment applied just before packaging. A "profile config"
  * groups independent treatment blocks, each with its own `enabled` flag and

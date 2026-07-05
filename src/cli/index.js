@@ -169,6 +169,7 @@ async function main() {
 
   // --- Pass 3: MangaUpdates for total volume count ---
   let totalVolumesHint = null;
+  let totalChaptersHint = null;
   const noneCount = (volumeMap['none'] || []).length;
   if (noneCount > 0 && opts.extrapolate !== false) {
     process.stdout.write('  Checking MangaUpdates for total volume count...');
@@ -176,6 +177,7 @@ async function main() {
       const mu = await getTotalVolumesForTitle(opts.manga);
       if (mu?.totalVolumes) {
         totalVolumesHint = mu.totalVolumes;
+        totalChaptersHint = mu.latestChapter ?? null;
         console.log(` ${totalVolumesHint} volumes total (${mu.seriesTitle})`);
       } else {
         console.log(' not found.');
@@ -231,7 +233,7 @@ async function main() {
   // --- Pass 4: Extrapolation ---
   let calculatedVolumes = {};
   if (unassigned.length > 0 && !opts.skipUnassigned && opts.extrapolate !== false) {
-    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false);
+    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null, totalChaptersHint);
     calculatedVolumes = calculated;
     const calcCount = Object.keys(calculatedVolumes).length;
     if (calcCount > 0) {

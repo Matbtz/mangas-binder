@@ -8,7 +8,7 @@ import { writeCbz, destPath } from './library.js';
 import { describeProfileForMedia } from './profiles.js';
 import { isNoop, describeConfig, probeSharp } from './image-preprocess.js';
 import { config } from './config.js';
-import { extractToStaging } from '../download/archive-downloader.js';
+import { extractToStaging, extractChaptersFromArchive } from '../download/archive-downloader.js';
 import { getSeries, getChapter, listChaptersForSeries, setChapterState } from './repo.js';
 import { getProvider } from '../providers/index.js';
 import { logHistory } from './db.js';
@@ -180,9 +180,17 @@ export async function bindVolume(series, volumeLabel, chapters, { calculated = f
   // chapters, whose pages only live inside an existing CBZ). Without this, a
   // volume that mixes freshly-`downloaded` and already-`imported` chapters would
   // crash the binder on the missing staging dir and never package.
+  // Chapters of one volume frequently share a single (already-imported) volume
+  // CBZ as their cbz_path. Restoring each chapter independently used to re-read
+  // AND re-parse that whole archive — often hundreds of MB on a NAS — once per
+  // chapter. Read it once (archiveCache) and, for a shared packaged volume,
+  // parse it once too (prewarmSharedArchives), extracting every needed chapter
+  // in a single pass before the per-chapter restore loop.
+  const archiveCache = new Map(); // cbz_path -> Promise<Buffer>
+  await prewarmSharedArchives(series, chapters, archiveCache);
   const usable = [];
   for (const c of chapters) {
-    if (await ensureChapterStaging(series, c)) usable.push(c);
+    if (await ensureChapterStaging(series, c, archiveCache)) usable.push(c);
   }
   const nums = usable.map(c => c.number);
   const localChapters = {};
@@ -205,15 +213,51 @@ export async function bindVolume(series, volumeLabel, chapters, { calculated = f
   }
 }
 
-/** Ensure chapter pages exist in staging, restoring from cbz_path if needed. */
-export async function ensureChapterStaging(series, chapter) {
-  const dir = chapterStagingDir(series.id, chapter.number);
+/** True when a chapter already has page images staged on disk. */
+async function hasStaging(seriesId, number) {
+  const dir = chapterStagingDir(seriesId, number);
   try {
     if (existsSync(dir)) {
       const files = await readdir(dir);
       if (files.some(f => /\.(jpg|jpeg|png|webp|gif|avif)$/i.test(f))) return true;
     }
   } catch {}
+  return false;
+}
+
+/**
+ * Before restoring chapters one-by-one, extract every chapter that shares a
+ * single packaged volume CBZ in ONE parse of that archive (see
+ * extractChaptersFromArchive) — so re-packaging a 15-chapter volume parses the
+ * archive once, not 15 times. Chapters already staged, or in a single-chapter /
+ * foreign archive, are skipped and handled by the normal per-chapter path.
+ */
+async function prewarmSharedArchives(series, chapters, archiveCache) {
+  const byArchive = new Map(); // cbz_path -> numbers[]
+  for (const c of chapters) {
+    const cbzPath = c.cbz_path || c.cbzPath;
+    if (!cbzPath || !/\.(cbz|zip)$/i.test(cbzPath) || !existsSync(cbzPath)) continue;
+    if (await hasStaging(series.id, c.number)) continue;
+    if (!byArchive.has(cbzPath)) byArchive.set(cbzPath, []);
+    byArchive.get(cbzPath).push(c.number);
+  }
+  for (const [cbzPath, numbers] of byArchive) {
+    if (numbers.length < 2) continue; // single chapter: per-chapter path is just as cheap
+    try {
+      if (!archiveCache.has(cbzPath)) archiveCache.set(cbzPath, readFile(cbzPath));
+      const buf = await archiveCache.get(cbzPath);
+      await extractChaptersFromArchive(buf, series.id, numbers);
+    } catch { /* fall back to per-chapter ensureChapterStaging */ }
+  }
+}
+
+/**
+ * Ensure chapter pages exist in staging, restoring from cbz_path if needed.
+ * `archiveCache` (optional) memoises the archive-read Promise per cbz_path so a
+ * volume CBZ shared by several chapters is read from disk/NAS only once per bind.
+ */
+export async function ensureChapterStaging(series, chapter, archiveCache = null) {
+  if (await hasStaging(series.id, chapter.number)) return true;
 
   const cbzPath = chapter.cbz_path || chapter.cbzPath;
   if (!cbzPath || !existsSync(cbzPath)) return false;
@@ -221,12 +265,19 @@ export async function ensureChapterStaging(series, chapter) {
   try {
     const st = statSync(cbzPath);
     if (st.isDirectory()) {
+      const dir = chapterStagingDir(series.id, chapter.number);
       await mkdir(dir, { recursive: true });
       await cp(cbzPath, dir, { recursive: true });
       return true;
     }
     if (/\.(cbz|zip)$/i.test(cbzPath)) {
-      const buf = await readFile(cbzPath);
+      let buf;
+      if (archiveCache) {
+        if (!archiveCache.has(cbzPath)) archiveCache.set(cbzPath, readFile(cbzPath));
+        buf = await archiveCache.get(cbzPath);
+      } else {
+        buf = await readFile(cbzPath);
+      }
       // Pull only this chapter's pages back out — cbz_path may be a multi-chapter
       // volume CBZ, in which case extracting the whole thing would duplicate pages.
       await extractToStaging(buf, series.id, chapter.number, { onlyChapter: chapter.number });

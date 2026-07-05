@@ -5,7 +5,6 @@ import { provider as getcomics } from './getcomics.js';
 import { provider as hardcover } from './hardcover.js';
 import { provider as mangakatana } from './mangakatana.js';
 import { provider as fandom } from './fandom.js';
-import { provider as anilist } from './anilist.js';
 import { provider as mangabaka } from './mangabaka.js';
 
 /**
@@ -32,7 +31,6 @@ const REGISTRY = new Map([
   [hardcover.name, hardcover],
   [mangakatana.name, mangakatana],
   [fandom.name, fandom],
-  [anilist.name, anilist],
   [mangabaka.name, mangabaka],
 ]);
 
