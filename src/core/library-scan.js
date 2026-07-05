@@ -39,9 +39,34 @@ const CBZ_PAGE_RE = /^ch(\d+(?:\.\d+)?)_p\d+/i;
 // Long form: "Vol. 07", "Volume 7", "Tome 3". Strips leading zeros.
 const FILENAME_VOL_RE = /\b(?:vol(?:ume)?|tome)\.?\s*0*(\d+(?:\.\d+)?)/i;
 // Short form: "v07", "v101" — common for downloaded manga/comics.
-const FILENAME_SHORT_VOL_RE = /\bv(\d{1,4}(?:\.\d+)?)\b/;
+const FILENAME_SHORT_VOL_RE = /\bv(\d{1,4}(?:\.\d+)?)\b/i;
 // Issue number for comics: "#10", "# 10", "#010"
 const FILENAME_ISSUE_RE = /#\s*0*(\d+(?:\.\d+)?)\b/;
+
+/**
+ * Extract a volume number from a file/folder name, resolving the ambiguity of
+ * the short "vNN" form. "Vol. 07"/"Tome 3" is always a volume. Bare "v85" is a
+ * volume too — but scene releases also use vN as a *version* tag ("Series 985
+ * (digital) (v2)" is chapter 985 revision 2, and "Series #10 v10" is issue 10),
+ * so a short vNN sitting next to a *different* standalone number is treated as
+ * a version tag and yields no volume. When the numbers agree ("ONE PIECE 85
+ * v85.cbz") the file is a volume release that repeats its own number — it must
+ * be matched by volume, never mistaken for the same-numbered chapter.
+ */
+function volumeFromName(name) {
+  const volMatch = name.match(FILENAME_VOL_RE);
+  if (volMatch) return String(parseFloat(volMatch[1]));
+  if (FILENAME_ISSUE_RE.test(name)) return null; // "#10 v10" — vN is a version tag
+  const short = name.match(FILENAME_SHORT_VOL_RE);
+  if (!short) return null;
+  const vNum = parseFloat(short[1]);
+  // Other standalone numbers in the name, ignoring the vNN token itself and
+  // parenthesised years, which are never chapter/volume numbers.
+  const rest = name.replace(FILENAME_SHORT_VOL_RE, ' ').replace(/\((?:19|20)\d{2}\)/g, ' ');
+  const others = [...rest.matchAll(/(?:^|[^\w.])0*(\d{1,4}(?:\.\d+)?)(?![\w.])/g)].map(m => parseFloat(m[1]));
+  if (others.some(n => n !== vNum)) return null;
+  return String(vNum);
+}
 const WEB_ID_RE = /mangadex\.org\/title\/([0-9a-f-]{36})/i;
 const COMICVINE_ID_RE = /comicvine\.gamespot\.com\/volume\/4050-(\d+)/i;
 
@@ -159,13 +184,9 @@ export async function readCbzInfo(filePath) {
   const base = path.basename(filePath);
   const issueMatch = base.match(FILENAME_ISSUE_RE);
   const issueNum = issueMatch ? String(parseFloat(issueMatch[1])) : null;
-  const volMatch = base.match(FILENAME_VOL_RE);
-  // Only fall back to "v07" short form when no issue number is present — in files like
-  // "Series #10 v10.cbz" the vN suffix is a version tag, not a volume number.
-  const shortVolMatch = !volMatch && !issueNum && base.match(FILENAME_SHORT_VOL_RE);
-  const volume = volMatch ? String(parseFloat(volMatch[1]))
-               : shortVolMatch ? String(parseFloat(shortVolMatch[1]))
-               : null;
+  // volumeFromName handles both the long "Vol. 07" form and the ambiguous
+  // short "v85" form (version tags like "Series 985 v2" yield no volume).
+  const volume = volumeFromName(base);
   const hasSeriesTag = !!series;
   if (!series) series = base.replace(/\.(cbz|epub)$/i, '');
   const info = { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, issueNum, chapters, isEpub, pageCount, error };
@@ -396,11 +417,28 @@ async function _scanLibrary({ seriesId } = {}) {
 
       for (const chEntry of readdirSync(seriesPath, { withFileTypes: true })) {
         if (!chEntry.isDirectory()) continue;
-        const chNum = chNumFromDir(chEntry.name);
-        if (!chNum) continue;
         const chPath = path.join(seriesPath, chEntry.name);
         if (!dirHasImages(chPath)) continue;
 
+        // A volume-named folder ("Vol. 12", "One Piece v85"): mark that
+        // volume's chapters owned instead of misreading its number as a
+        // chapter number.
+        const dirVol = volumeFromName(chEntry.name);
+        if (dirVol) {
+          for (const row of index.values()) {
+            if (row.state !== 'imported' && row.volume != null && row.volume !== '' && String(parseFloat(row.volume)) === dirVol) {
+              setChapterState(row.id, 'imported', { cbz_path: chPath, calculated: row.calculated || 0, language: match.language || 'en' });
+              row.state = 'imported';
+              markedChapters++;
+              matchedFiles++;
+              perSeries[match.title] = (perSeries[match.title] || 0) + 1;
+            }
+          }
+          continue;
+        }
+
+        const chNum = chNumFromDir(chEntry.name);
+        if (!chNum) continue;
         const row = index.get(String(parseFloat(chNum)));
         if (!row || row.state === 'imported') continue;
         setChapterState(row.id, 'imported', { cbz_path: chPath, calculated: 0, language: match.language || 'en' });
@@ -471,22 +509,16 @@ async function _scanLibrary({ seriesId } = {}) {
       }
       if (matchedCount === 0) {
         const base = path.basename(file, '.cbz');
-        const volM = base.match(/(?:^|\b)(?:vol(?:ume)?\.?\s*|tome\s*)0*(\d+(?:\.\d+)?)\b/i);
-        if (volM) {
-          const vNum = String(parseFloat(volM[1]));
-          for (const row of index.values()) {
-            if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
-              setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated });
-              row.state = 'imported';
-              markedChapters++;
-              matchedCount++;
-            }
-          }
-          if (matchedCount === 0) {
-            if (ensureCh(`Vol.${vNum}`, vNum, file)) matchedCount++;
-          }
-        }
-        if (matchedCount === 0) {
+        if (info.volume) {
+          // The filename names a volume and the by-volume row matching above
+          // found nothing (e.g. no chapters assigned to that volume yet).
+          // Record an owned-volume placeholder — and never fall through to
+          // chapter-number matching, which would link a volume file to the
+          // same-numbered chapter ("ONE PIECE 85 v85.cbz" marking chapter 85
+          // as owned instead of volume 85).
+          const vNum = String(parseFloat(info.volume));
+          if (ensureCh(`Vol.${vNum}`, vNum, file)) matchedCount++;
+        } else {
           const chNum = chNumFromDir(base);
           if (chNum) {
             if (ensureCh(chNum, null, file)) matchedCount++;
@@ -504,9 +536,12 @@ async function _scanLibrary({ seriesId } = {}) {
         if (!e.isDirectory()) continue;
         const sub = path.join(dir, e.name);
         if (dirHasImages(sub)) {
-          const volM = e.name.match(/(?:^|\b)(?:vol(?:ume)?\.?\s*|tome\s*)0*(\d+(?:\.\d+)?)\b/i);
-          if (volM) {
-            const vNum = String(parseFloat(volM[1]));
+          // Same volume-vs-chapter disambiguation as CBZ files: a folder named
+          // for a volume (long or short form) must never fall through to
+          // chapter-number matching.
+          const dirVol = volumeFromName(e.name);
+          if (dirVol) {
+            const vNum = String(parseFloat(dirVol));
             let vmatched = 0;
             for (const row of index.values()) {
               if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {

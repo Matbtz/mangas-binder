@@ -55,6 +55,8 @@ test('volume-definitions leaves already-imported/bindery chapters untouched', as
     payload: { volumes: [{ volume: '9', from: 1, to: 6 }] },
   });
   assert.equal(res.statusCode, 200);
+  // Skipped-because-packaged chapters are reported, not silently ignored.
+  assert.equal(res.json().skippedPackaged, 1);
 
   const after1 = listChaptersForSeries(s.id).find(c => c.number === '1');
   assert.equal(after1.volume, '1'); // untouched despite the range covering it
@@ -62,6 +64,34 @@ test('volume-definitions leaves already-imported/bindery chapters untouched', as
 
   const ch4 = listChaptersForSeries(s.id).find(c => c.number === '4');
   assert.equal(ch4.volume, '9'); // not-yet-packaged chapter follows the new definition
+});
+
+test('volume-definitions creates missing chapters in each range and reports counts', async () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'mm3', title: 'Manual Map Three', language: 'en', monitored: true, packagingMode: 'volume' });
+  for (const n of ['1', '2', '3']) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });
+
+  // Rows far past what the DB knows — like defining One Piece vols 106-115
+  // when the aggregator never listed those chapters.
+  const res = await app.inject({
+    method: 'POST',
+    url: `/api/series/${s.id}/volume-definitions`,
+    payload: { volumes: [
+      { volume: '1', from: 1, to: 3 },
+      { volume: '106', from: 1066, to: 1076 },
+      { volume: '107', from: 1077, to: 1088 },
+    ] },
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.created, 23); // 11 + 12 new placeholder chapters
+  assert.ok(body.changes >= 26, `all rows applied (changes=${body.changes})`);
+
+  const chs = listChaptersForSeries(s.id);
+  assert.equal(chs.find(c => c.number === '1066')?.volume, '106');
+  assert.equal(chs.find(c => c.number === '1088')?.volume, '107');
+  // A manually defined volume is authoritative (calculated=0) so a later
+  // provider refresh can't overwrite it.
+  assert.equal(chs.find(c => c.number === '1066')?.calculated, 0);
 });
 
 test('custom-volume leaves already-imported/bindery chapters untouched', async () => {

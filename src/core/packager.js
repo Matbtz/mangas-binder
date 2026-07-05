@@ -164,6 +164,10 @@ export async function createCbz(job, onProgress) {
     const archive = new ZipArchive({ zlib: { level: 0 } });
 
     output.on('close', resolve);
+    // The write stream fails independently of the archiver (disk full, NAS
+    // dropped, output dir removed mid-write); without this handler such an
+    // error is an uncaughtException that takes the whole server down.
+    output.on('error', reject);
     archive.on('error', reject);
     archive.pipe(output);
 

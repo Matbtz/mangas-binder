@@ -165,7 +165,15 @@ export async function refreshSeries(seriesId) {
           }
         } catch { /* non-fatal — proceed without MU volume data */ }
       }
-    } catch {}
+    } catch (err) {
+      // Non-fatal, but never silent: when the consensus lookup fails, the
+      // chapter list is NOT gap-filled up to the series' real latest chapter,
+      // which downstream looks exactly like "extrapolation is broken" (only
+      // the chapters the primary provider happens to host get volumes). Log
+      // it so the cause is visible in the server output/activity log.
+      console.error(`Volume/chapter consensus failed for series ${seriesId} (${series.title}):`, err?.message || err);
+      logHistory('series.consensus_failed', { seriesId, message: `total-volume/chapter lookup failed: ${err?.message || err}` });
+    }
   }
 
   let added = 0;
@@ -207,20 +215,34 @@ export async function refreshSeries(seriesId) {
   // are assigned (provider tags + MangaUpdates + extrapolation), promote any
   // skipped chapter whose volume now meets the threshold, so late-tagged chapters
   // aren't silently left undownloaded.
-  if (fromMode && fromVolume != null) {
-    const promote = [];
-    for (const c of listChaptersForSeries(seriesId)) {
-      if (c.state !== 'skipped') continue;
-      const v = (c.volume != null && c.volume !== '') ? parseFloat(c.volume) : null;
-      if (v != null && v >= fromVolume) promote.push(c.id);
-    }
-    if (promote.length) {
-      bulkSetChapterState(promote, 'wanted', { resetAttempts: true });
-      logHistory('series.threshold_promoted', { seriesId, message: `${promote.length} chapter(s) now ≥ vol ${fromVolume} queued` });
-    }
-  }
+  promoteThresholdChapters(seriesId);
 
   return { added, counts: chapterStateCounts(seriesId) };
+}
+
+/**
+ * monitor_mode='from': promote skipped chapters whose (newly assigned) volume
+ * now meets the from-volume threshold. Shared by refreshSeries() and the
+ * manual-mapping/extrapolation API routes, which change volume assignments
+ * without doing a full network refresh. No-op for other monitor modes.
+ * @returns {number} chapters promoted to `wanted`
+ */
+export function promoteThresholdChapters(seriesId) {
+  const series = getSeries(seriesId);
+  if (!series || series.monitor_mode !== 'from' || series.monitor_from_volume == null) return 0;
+  const fromVolume = parseFloat(series.monitor_from_volume);
+  if (Number.isNaN(fromVolume)) return 0;
+  const promote = [];
+  for (const c of listChaptersForSeries(seriesId)) {
+    if (c.state !== 'skipped') continue;
+    const v = (c.volume != null && c.volume !== '') ? parseFloat(c.volume) : null;
+    if (v != null && v >= fromVolume) promote.push(c.id);
+  }
+  if (promote.length) {
+    bulkSetChapterState(promote, 'wanted', { resetAttempts: true });
+    logHistory('series.threshold_promoted', { seriesId, message: `${promote.length} chapter(s) now ≥ vol ${fromVolume} queued` });
+  }
+  return promote.length;
 }
 
 /**

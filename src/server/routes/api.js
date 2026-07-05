@@ -15,7 +15,7 @@ import {
   getAllSettings, getSetting, setSetting, getProviderStates,
   setProviderEnabled, setProviderConfig, getProviderConfig, isProviderEnabled,
 } from '../../core/settings.js';
-import { followSeries, refreshSeries, previewRefreshSeries } from '../../core/series-service.js';
+import { followSeries, refreshSeries, previewRefreshSeries, promoteThresholdChapters } from '../../core/series-service.js';
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, DEFAULT_PROFILE_CONFIG } from '../../core/profiles.js';
 import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
 import { resolveVolumes } from '../../core/mapping.js';
@@ -32,8 +32,57 @@ import { normTitle, titlesMatch } from '../../core/library.js';
 
 const ACTIVE_STATES = ['wanted', 'queued', 'downloading', 'downloaded', 'failed'];
 
+// Hard safety cap for placeholder-chapter synthesis ("extrapolate up to
+// volume N"). Generous enough for the longest running series (One Piece is
+// ~1200 chapters) while bounding a bad maxVolume × chaptersPerVolume input.
+const MAX_SYNTH_CHAPTERS = 5000;
+
+/**
+ * Integer chapter numbers 1..targetMaxCh missing from `chapters`. Fills
+ * *interior* gaps too — a long licensed series' DB commonly holds only the
+ * head and tail of the run (e.g. chapters 1-305 and 1066-1177 of One Piece,
+ * because the aggregator delists the licensed middle), and the old
+ * "append past the current max" logic could never fill that hole (the max was
+ * already 1177), silently making "extrapolate up to volume 115" a no-op.
+ */
+function missingChapterNumbers(chapters, targetMaxCh) {
+  const existing = new Set();
+  for (const c of chapters) {
+    const n = parseFloat(c.number);
+    if (!Number.isNaN(n)) existing.add(String(n));
+  }
+  const missing = [];
+  const cap = Math.min(Math.floor(targetMaxCh), MAX_SYNTH_CHAPTERS);
+  for (let num = 1; num <= cap; num++) {
+    if (!existing.has(String(num))) missing.push(String(num));
+  }
+  return missing;
+}
+
+/**
+ * How far chapter synthesis should reach for "extrapolate up to volume
+ * `maxVolume`": the chsPerVol estimate, raised to any *real* anchor inside the
+ * requested range — if volume 115 is already known to end at chapter 1177,
+ * fill up to 1177 even when maxVolume × chsPerVol underestimates the series.
+ */
+function targetMaxChapter(volumeMap, maxVolume, chsPerVol) {
+  let target = Math.floor(maxVolume * chsPerVol);
+  for (const [vStr, chs] of Object.entries(volumeMap)) {
+    if (vStr === 'none') continue;
+    const vNum = parseFloat(vStr);
+    if (!Number.isFinite(vNum) || vNum > maxVolume) continue;
+    for (const c of chs) {
+      const n = parseFloat(c);
+      if (Number.isInteger(n) && n > target) target = n;
+    }
+  }
+  return target;
+}
+
 /** Fastify plugin: all /api routes. */
 export default async function apiRoutes(app) {
+  // Drain fire-and-forget packaging before the server finishes closing.
+  app.addHook('onClose', drainBackgroundJobs);
   // --- Health / status ---
   app.get('/api/health', async () => {
     const db = getDb();
@@ -1117,32 +1166,38 @@ bindery.push({
     const stats = getVolumeStats(volumeMap);
     const finalChsPerVol = chaptersPerVolume ? Number(chaptersPerVolume) : (stats.avgChsPerVol || 10);
 
+    let created = 0;
     if (maxVolume && Number(maxVolume) > 0 && Number(maxVolume) < 500) {
-      let maxExisting = 0;
-      for (const c of chapters) {
-        const n = parseFloat(c.number);
-        if (!isNaN(n)) maxExisting = Math.max(maxExisting, n);
-      }
-      const targetMaxCh = Number(maxVolume) * finalChsPerVol;
-      const start = Math.floor(maxExisting) + 1;
-      const end = Math.floor(targetMaxCh);
-      if (start <= end && (end - start) < 100) {
-        for (let num = start; num <= end; num++) {
-          const numStr = String(num);
-          const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
-          if (!exists) {
-            db.prepare(`
-              INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
-              VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
-            `).run(s.id, s.provider || 'mangadex', numStr, null, `Chapter ${numStr}`, s.language || 'en');
+      const targetMaxCh = targetMaxChapter(volumeMap, Number(maxVolume), finalChsPerVol);
+      const missing = missingChapterNumbers(chapters, targetMaxCh);
+      if (missing.length) {
+        // Placeholder chapters the aggregator doesn't (yet) list. Only queue
+        // them for download when the series monitors everything — for
+        // future/from/none modes they start skipped (promoteThresholdChapters
+        // below re-queues the ones a 'from' threshold covers).
+        const initialState = s.monitor_mode === 'all' ? 'wanted' : 'skipped';
+        const insertCh = db.prepare(`
+          INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+          VALUES (?, ?, ?, NULL, ?, ?, ?, 0)
+        `);
+        db.exec('BEGIN');
+        try {
+          for (const numStr of missing) {
+            insertCh.run(s.id, s.provider || 'mangadex', numStr, `Chapter ${numStr}`, s.language || 'en', initialState);
+            created++;
           }
+          db.exec('COMMIT');
+        } catch (e) {
+          db.exec('ROLLBACK');
+          throw e;
         }
       }
     }
 
     const res = resolveVolumes(s.id, { chaptersPerVolume: chaptersPerVolume ? Number(chaptersPerVolume) : null });
+    promoteThresholdChapters(s.id);
     await autoPackageCompleteVolumes(s.id);
-    return res;
+    return { ...res, created };
   });
   app.get('/api/series/:id/extrapolate-preview', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
@@ -1156,19 +1211,11 @@ bindery.push({
 
     const unassignedCopy = [...unassigned];
     if (maxVolume && maxVolume > 0 && maxVolume < 500) {
-      let maxExisting = 0;
-      for (const c of chapters) {
-        const n = parseFloat(c.number);
-        if (!isNaN(n)) maxExisting = Math.max(maxExisting, n);
-      }
-      const targetMaxCh = maxVolume * finalChsPerVol;
-      const start = Math.floor(maxExisting) + 1;
-      const end = Math.floor(targetMaxCh);
-      if (start <= end && (end - start) < 100) {
-        for (let num = start; num <= end; num++) {
-          unassignedCopy.push(String(num));
-        }
-      }
+      // Mirror the apply route: synthesize every missing integer chapter up to
+      // the target (interior gaps included), so the preview shows exactly what
+      // applying would produce.
+      const targetMaxCh = targetMaxChapter(volumeMap, maxVolume, finalChsPerVol);
+      unassignedCopy.push(...missingChapterNumbers(chapters, targetMaxCh));
     }
 
     const { calculated, overflow } = extrapolateVolumes(volumeMap, unassignedCopy, s.total_volumes_hint || null, false, finalChsPerVol);
@@ -1194,44 +1241,68 @@ bindery.push({
     if (!Array.isArray(volumes)) return reply.code(400).send({ error: 'volumes array required' });
     const db = getDb();
 
-    // Clear old volume assignments (excluding Specials) first. Chapters already
-    // packaged into a CBZ ('imported'/'bindery') are left untouched — the CBZ on
-    // disk was built with their current volume number, so silently reassigning
-    // it here would desync the DB from the file that already exists (mirrors the
-    // same protection resolveVolumes() applies in mapping.js).
-    db.prepare(`
-      UPDATE chapters
-      SET volume = NULL, calculated = 0, updated_at = datetime('now')
-      WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL) AND state NOT IN ('imported', 'bindery')
-    `).run(s.id);
-
+    const selectCh = db.prepare('SELECT 1 FROM chapters WHERE series_id = ? AND number = ?');
+    const insertCh = db.prepare(`
+      INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+    `);
     const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state NOT IN ('imported', 'bindery')");
-    let totalChanges = 0;
-    for (const { volume, from, to } of volumes) {
-      if (!volume || from == null || to == null) continue;
+    const countPackaged = db.prepare("SELECT COUNT(*) n FROM chapters WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state IN ('imported', 'bindery')");
+    // Auto-created placeholders only queue for download in monitor-all mode;
+    // promoteThresholdChapters() below re-queues the ones a 'from' threshold covers.
+    const initialState = s.monitor_mode === 'all' ? 'wanted' : 'skipped';
 
-      // Auto-create missing integer chapters in the range [from, to]
-      const start = Math.floor(Number(from));
-      const end = Math.floor(Number(to));
-      if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 50) {
-        for (let num = start; num <= end; num++) {
-          const numStr = String(num);
-          const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
-          if (!exists) {
-            db.prepare(`
-              INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
-              VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
-            `).run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en');
+    let totalChanges = 0, created = 0, skippedPackaged = 0;
+    db.exec('BEGIN');
+    try {
+      // Clear old volume assignments (excluding Specials) first. Chapters already
+      // packaged into a CBZ ('imported'/'bindery') are left untouched — the CBZ on
+      // disk was built with their current volume number, so silently reassigning
+      // it here would desync the DB from the file that already exists (mirrors the
+      // same protection resolveVolumes() applies in mapping.js).
+      db.prepare(`
+        UPDATE chapters
+        SET volume = NULL, calculated = 0, updated_at = datetime('now')
+        WHERE series_id = ? AND (volume != 'Specials' OR volume IS NULL) AND state NOT IN ('imported', 'bindery')
+      `).run(s.id);
+
+      for (const { volume, from, to } of volumes) {
+        if (!volume || from == null || to == null) continue;
+
+        // Auto-create missing integer chapters in the range [from, to]
+        const start = Math.floor(Number(from));
+        const end = Math.floor(Number(to));
+        if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 200) {
+          for (let num = start; num <= end; num++) {
+            const numStr = String(num);
+            if (!selectCh.get(s.id, numStr)) {
+              insertCh.run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en', initialState);
+              created++;
+            }
           }
         }
-      }
 
-      const res = upd.run(String(volume), s.id, Number(from), Number(to));
-      totalChanges += res.changes;
+        const res = upd.run(String(volume), s.id, Number(from), Number(to));
+        totalChanges += res.changes;
+        skippedPackaged += countPackaged.get(s.id, Number(from), Number(to)).n;
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
     }
-    await refreshSeries(s.id);
-    await autoPackageCompleteVolumes(s.id);
-    return { ok: true, changes: totalChanges };
+
+    // Re-estimate leftover chapters against the new manual anchors and promote
+    // monitor-from chapters — both DB-only and fast. The previous full
+    // refreshSeries() here fetched the whole chapter list from the source plus
+    // every consensus provider *synchronously*, which could keep this request
+    // pending for minutes on a long series; the scheduler's next cycle covers
+    // that refresh anyway. Repackaging (CBZ re-binds) runs in the background
+    // for the same reason — autoPackageCompleteVolumes never rejects.
+    resolveVolumes(s.id);
+    promoteThresholdChapters(s.id);
+    autoPackageCompleteVolumes(s.id);
+    return { ok: true, changes: totalChanges, created, skippedPackaged };
   });
   app.post('/api/series/:id/custom-volume', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
@@ -1243,15 +1314,19 @@ bindery.push({
     // Auto-create missing integer chapters in the range [from, to]
     const start = Math.floor(Number(from));
     const end = Math.floor(Number(to));
-    if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 50) {
+    const initialState = s.monitor_mode === 'all' ? 'wanted' : 'skipped';
+    let created = 0;
+    if (!Number.isNaN(start) && !Number.isNaN(end) && start > 0 && end >= start && (end - start) < 200) {
+      const selectCh = db.prepare('SELECT 1 FROM chapters WHERE series_id = ? AND number = ?');
+      const insertCh = db.prepare(`
+        INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+      `);
       for (let num = start; num <= end; num++) {
         const numStr = String(num);
-        const exists = db.prepare("SELECT 1 FROM chapters WHERE series_id = ? AND number = ?").get(s.id, numStr);
-        if (!exists) {
-          db.prepare(`
-            INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
-            VALUES (?, ?, ?, ?, ?, ?, 'wanted', 0)
-          `).run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en');
+        if (!selectCh.get(s.id, numStr)) {
+          insertCh.run(s.id, s.provider || 'mangadex', numStr, String(volume), `Chapter ${numStr}`, s.language || 'en', initialState);
+          created++;
         }
       }
     }
@@ -1261,9 +1336,13 @@ bindery.push({
     // the DB from the file already on disk.
     const upd = db.prepare("UPDATE chapters SET volume = ?, calculated = 0, updated_at = datetime('now') WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state NOT IN ('imported', 'bindery')");
     const res = upd.run(String(volume), s.id, Number(from), Number(to));
-    await refreshSeries(s.id);
-    await autoPackageCompleteVolumes(s.id);
-    return { ok: true, changes: res.changes };
+    const skippedPackaged = db.prepare("SELECT COUNT(*) n FROM chapters WHERE series_id = ? AND CAST(number AS REAL) >= ? AND CAST(number AS REAL) <= ? AND state IN ('imported', 'bindery')").get(s.id, Number(from), Number(to)).n;
+    // Same rationale as /volume-definitions: DB-only re-estimation + promotion,
+    // packaging in the background — never a synchronous network refresh.
+    resolveVolumes(s.id);
+    promoteThresholdChapters(s.id);
+    autoPackageCompleteVolumes(s.id);
+    return { ok: true, changes: res.changes, created, skippedPackaged };
   });
   app.get('/api/series/:id/audit-volumes', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
@@ -1616,13 +1695,27 @@ bindery.push({
   });
 }
 
+// Manual-mapping routes fire autoPackageCompleteVolumes without awaiting it
+// (repackaging reads/writes whole CBZs and must not hold the HTTP response
+// open). Track those jobs so server shutdown can drain them instead of
+// tearing the DB/output dir out from under a half-finished re-bind.
+const backgroundJobs = new Set();
+export async function drainBackgroundJobs() {
+  await Promise.allSettled([...backgroundJobs]);
+}
+
 // Package every complete, closed volume after a manual edit. Delegates to the
 // single shared implementation in the worker (force mode re-packages fully-owned
 // volumes so new chapter→volume boundaries are applied).
 async function autoPackageCompleteVolumes(seriesId) {
-  try {
-    await packageCompleteVolumes(seriesId, { force: true });
-  } catch (err) {
-    console.error(`Failed to auto-package volumes for series ${seriesId}:`, err);
-  }
+  const job = (async () => {
+    try {
+      await packageCompleteVolumes(seriesId, { force: true });
+    } catch (err) {
+      console.error(`Failed to auto-package volumes for series ${seriesId}:`, err);
+    }
+  })();
+  backgroundJobs.add(job);
+  job.finally(() => backgroundJobs.delete(job));
+  return job;
 }

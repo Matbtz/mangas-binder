@@ -1481,8 +1481,8 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
       const maxVolVal = Number(maxVolInput.value);
       if (maxVolVal && maxVolVal > 0) reqBody.maxVolume = maxVolVal;
 
-      await api(`/series/${seriesId}/extrapolate-volumes`, { method: 'POST', body: reqBody });
-      toast('Distributed chapters into volumes!');
+      const res = await api(`/series/${seriesId}/extrapolate-volumes`, { method: 'POST', body: reqBody });
+      toast(`Distributed ${res.assigned ?? 0} chapter${res.assigned !== 1 ? 's' : ''} into volumes${res.created ? ` (${res.created} placeholder chapter${res.created !== 1 ? 's' : ''} created)` : ''}`);
       close();
       if (onApplied) onApplied();
     } catch (e) {
@@ -1919,7 +1919,10 @@ function openVolumeDefinitionsModal({ seriesId, seriesTitle, chapters, onApplied
     saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
     try {
       const res = await api(`/series/${seriesId}/volume-definitions`, { method: 'POST', body: { volumes } });
-      toast(`✓ Saved ${res.changes || 0} chapter assignment${res.changes !== 1 ? 's' : ''}`);
+      const parts = [`✓ Saved ${res.changes || 0} chapter assignment${res.changes !== 1 ? 's' : ''}`];
+      if (res.created) parts.push(`${res.created} chapter${res.created !== 1 ? 's' : ''} created`);
+      if (res.skippedPackaged) parts.push(`${res.skippedPackaged} already-packaged left unchanged`);
+      toast(parts.join(' · '));
       close();
       if (onApplied) onApplied();
     } catch (e) {
