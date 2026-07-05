@@ -20,8 +20,12 @@
  *
  * Returns { cleanVolumeMap, noisy } where `noisy` is the flat list of
  * chapter numbers (strings) that were pulled out of their volume.
+ *
+ * When `totalVolumesHint` is supplied (the cross-provider consensus count), any
+ * volume tag numbered *beyond* that total is treated as impossible for THIS
+ * series and demoted to `noisy` up front — see Pass 0 below.
  */
-export function sanitizeVolumeMap(volumeMap) {
+export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null } = {}) {
   const noisy = [];
   const cleanVolumeMap = {};
   if (volumeMap.none) cleanVolumeMap.none = [...volumeMap.none];
@@ -33,11 +37,28 @@ export function sanitizeVolumeMap(volumeMap) {
     if (k !== 'none' && Number.isNaN(parseFloat(k))) cleanVolumeMap[k] = [...chs];
   }
 
-  const knownVols = Object.entries(volumeMap)
+  const allNumericVols = Object.entries(volumeMap)
     .filter(([k]) => k !== 'none')
     .map(([vStr, chs]) => [vStr, parseFloat(vStr), chs])
     .filter(([, vNum]) => !Number.isNaN(vNum))
     .sort((a, b) => a[1] - b[1]);
+
+  // Pass 0: reject volume tags numbered beyond the series' known total. A tag
+  // like "Volume 89" on a finished 5-volume series (real case: "Pet", whose DB
+  // was polluted by a since-fixed cross-series MangaUpdates release override and
+  // by legacy unbounded extrapolation) is physically impossible for THIS title.
+  // Each such tag is individually small and monotonically ordered, so passes 1–3
+  // below never see a per-chapter or overlap anomaly to reject it — it would
+  // survive as a poison anchor and drag the whole breakdown out to volume 89.
+  // Demote them to `noisy` here, before they can seed anchors, so
+  // extrapolateVolumes re-estimates their chapters back inside [1..hint].
+  const volCap = totalVolumesHint > 0 ? Math.floor(totalVolumesHint) : null;
+  const knownVols = [];
+  for (const entry of allNumericVols) {
+    const [, vNum, chs] = entry;
+    if (volCap != null && vNum > volCap) { noisy.push(...chs); continue; }
+    knownVols.push(entry);
+  }
 
   // Pass 1: per-volume median/MAD outlier trim (skip fractional "Specials"-like chapters).
   const perVolume = knownVols.map(([vStr, vNum, chs]) => {
@@ -136,9 +157,15 @@ export function buildVolumeMapFromChapters(chapters) {
 /**
  * Returns stats about the volume map useful for detecting outliers.
  * { lastConsecutive, avgChsPerVol, consecutiveVolSet }
+ *
+ * When the tagged sample is too small or too sparse to trust (e.g. the primary
+ * provider tagged only a couple of volumes, or none), `avgChsPerVol` falls back
+ * to the cross-provider consensus ratio `round(totalChapters / totalVolumes)`
+ * rather than a misleading 1-or-2 average — a real case ("Fool Night", 3 tagged
+ * chapters against a 12-volume/109-chapter consensus) reported chsPerVol=1.
  */
-export function getVolumeStats(rawVolumeMap) {
-  const { cleanVolumeMap: volumeMap } = sanitizeVolumeMap(rawVolumeMap);
+export function getVolumeStats(rawVolumeMap, { totalVolumesHint = null, totalChaptersHint = null } = {}) {
+  const { cleanVolumeMap: volumeMap } = sanitizeVolumeMap(rawVolumeMap, { totalVolumesHint });
   const knownVols = Object.entries(volumeMap)
     .filter(([k]) => k !== 'none')
     .sort(([a], [b]) => parseFloat(a) - parseFloat(b));
@@ -156,11 +183,23 @@ export function getVolumeStats(rawVolumeMap) {
   // and inflate every subsequently-estimated volume, compounding the bad tag's
   // damage instead of containing it.
   const counts = consecutiveVols.map(([, chs]) => chs.length).sort((a, b) => a - b);
-  const avgChsPerVol = counts.length > 0
+  const sampledAvg = counts.length > 0
     ? (counts.length % 2 === 1
         ? counts[(counts.length - 1) / 2]
         : Math.round((counts[counts.length / 2 - 1] + counts[counts.length / 2]) / 2))
-    : 10;
+    : null;
+
+  // The tagged sample only reflects whatever early volumes the primary provider
+  // happened to tag. When that sample is thin (fewer than three consecutive
+  // tagged volumes) or degenerate (≈1 chapter each), it's a worse predictor of
+  // real volume size than the consensus totals — prefer round(chapters/volumes)
+  // when both are known.
+  const consensusRatio = (totalChaptersHint > 0 && totalVolumesHint > 0)
+    ? Math.max(1, Math.round(totalChaptersHint / totalVolumesHint))
+    : null;
+  let avgChsPerVol = sampledAvg ?? consensusRatio ?? 10;
+  if (consensusRatio && (counts.length < 3 || avgChsPerVol < 3)) avgChsPerVol = consensusRatio;
+
   const consecutiveVolSet = new Set(consecutiveVols.map(([k]) => String(parseFloat(k))));
 
   return { lastConsecutive, avgChsPerVol, consecutiveVolSet };
@@ -200,7 +239,7 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
   // a neighboring volume — a single mistagged chapter must not corrupt every
   // boundary derived from it. Rejected chapters rejoin the unassigned pool so
   // they get a fresh, consistent estimate instead of keeping a bad tag.
-  const { cleanVolumeMap: volumeMap, noisy } = sanitizeVolumeMap(rawVolumeMap);
+  const { cleanVolumeMap: volumeMap, noisy } = sanitizeVolumeMap(rawVolumeMap, { totalVolumesHint });
   const effectiveUnassigned = noisy.length ? [...unassignedChapters, ...noisy] : unassignedChapters;
   if (!effectiveUnassigned.length) return { calculated: {}, overflow: [] };
 
@@ -231,7 +270,7 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
       if (maxCh > -Infinity) anchors.push({ volNum: vNum, minCh, maxCh });
     }
     if (!chsPerVolOverride) {
-      const stats = getVolumeStats(volumeMap);
+      const stats = getVolumeStats(volumeMap, { totalVolumesHint, totalChaptersHint });
       chsPerVol = stats.avgChsPerVol || 10;
       if (chsPerVol < 3) chsPerVol = 10; // safety clamp to prevent sparse/erroneous metadata from causing 1-chapter volumes
 
