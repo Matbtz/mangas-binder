@@ -584,6 +584,7 @@ async function showDetail(id) {
     { label: 'Manage volumes', icon: '📚', onClick: () => openManageVolumesModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
     { label: 'Edit metadata', icon: '✍', onClick: () => openEditMetadataModal({ seriesId: id, title: s.title, description: s.description, coverPath: s.coverPath, onApplied: () => showDetail(id) }) },
     { label: 'External links', icon: '🔗', onClick: () => openExternalLinksModal({ seriesId: id, seriesTitle: s.title, mediaType: s.mediaType, externalLinks: s.externalLinks || {}, onApplied: () => showDetail(id) }) },
+    { label: 'Reset series (wipe chapters)', icon: '♻', danger: true, onClick: () => openResetSeriesModal({ seriesId: id, seriesTitle: s.title, onReset: () => showDetail(id) }) },
     { label: 'Delete all files', icon: '🗑', danger: true, onClick: () => openDeleteFilesModal({ seriesId: id, seriesTitle: s.title, scope: 'all', onDeleted: () => showDetail(id) }) },
   ], 'btn sm');
   hero.querySelector('#hd-more-slot').replaceWith(moreMenu);
@@ -1562,7 +1563,14 @@ async function openRefreshPreviewModal({ seriesId, seriesTitle, andScan = false,
     applyBtn.textContent = 'Applying…';
     try {
       await api(`/series/${seriesId}/refresh`, { method: 'POST' });
-      if (andScan) await api(`/series/${seriesId}/scan-library`, { method: 'POST' });
+      if (andScan) {
+        await api(`/series/${seriesId}/scan-library`, { method: 'POST' });
+        // Snap on-disk volume files onto the freshly-proposed volume structure
+        // (same matching as Manage Files → Auto-match), so existing files are
+        // recognised as owned without a manual pass.
+        const rec = await api(`/series/${seriesId}/reconcile-files`, { method: 'POST' });
+        if (rec?.applied > 0) toast(`Auto-matched ${rec.applied} chapter(s) to on-disk volumes`);
+      }
       toast('Refresh applied');
       close();
       if (onApplied) onApplied();
@@ -2008,6 +2016,64 @@ function openExternalLinksModal({ seriesId, seriesTitle, mediaType, externalLink
   };
 
   document.body.appendChild(modal);
+}
+
+// --- Reset series (wipe chapters) confirmation modal ---
+function openResetSeriesModal({ seriesId, seriesTitle, onReset }) {
+  const existing = document.getElementById('reset-series-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="reset-series-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="background:var(--panel);border:1px solid #a33;border-radius:16px;width:100%;max-width:560px;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.9)">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--line)">
+        <h3 style="margin:0;color:#f88;font-size:16px">♻ Reset series — ${esc(seriesTitle)}</h3>
+      </div>
+      <div style="padding:16px 22px">
+        <div style="background:#3a1111;border:1px solid #a33;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+          <strong style="color:#f88">⚠ This clears the chapter list from the database</strong>
+          <p style="margin:8px 0 0;font-size:13px;color:#ccc">Use this to wipe stale or mis-estimated volume data and rebuild from scratch. This will:</p>
+          <ul style="margin:8px 0 0;padding-left:18px;font-size:13px;color:#ccc;line-height:1.6">
+            <li>Delete <strong>all chapter records</strong> for this series</li>
+            <li>Clear the cached total volume/chapter hints (re-resolved on next refresh)</li>
+          </ul>
+          <p style="margin:10px 0 0;font-size:13px;color:#9c9">Files already on disk are <strong>not</strong> deleted — the next <em>Refresh &amp; Scan</em> re-matches them to the freshly-proposed volumes.</p>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#ccc;cursor:pointer">
+          <input type="checkbox" id="rs-then-refresh" checked> Run Refresh &amp; Scan immediately after reset
+        </label>
+      </div>
+      <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn sm" id="rs-cancel">Cancel</button>
+        <button class="btn sm danger" id="rs-confirm">♻ Reset series</button>
+      </div>
+    </div>
+  </div>`);
+
+  const close = () => modal.remove();
+  modal.querySelector('#rs-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+  document.body.appendChild(modal);
+
+  const confirmBtn = modal.querySelector('#rs-confirm');
+  confirmBtn.onclick = async () => {
+    const thenRefresh = modal.querySelector('#rs-then-refresh').checked;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Resetting…';
+    try {
+      const res = await api(`/series/${seriesId}/reset`, { method: 'POST' });
+      toast(`Reset series — cleared ${res.removedChapters || 0} chapter(s)`);
+      close();
+      if (thenRefresh) {
+        openRefreshPreviewModal({ seriesId, seriesTitle, andScan: true, onApplied: onReset });
+      } else if (onReset) {
+        onReset();
+      }
+    } catch (e) {
+      toast(e.message);
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '♻ Reset series';
+    }
+  };
 }
 
 // --- Delete Files confirmation modal ---

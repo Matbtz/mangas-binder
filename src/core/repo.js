@@ -123,6 +123,18 @@ export function deleteSeries(id) {
   getDb().prepare('DELETE FROM series WHERE id = ?').run(id);
 }
 
+/**
+ * Delete every chapter row of a series (leaving the series itself and any
+ * on-disk files intact). Used by the "reset series" action so a subsequent
+ * refresh rebuilds the chapter list from scratch — the way to clear stale or
+ * mis-estimated volume data accumulated by earlier scans. Returns the count
+ * of rows removed.
+ */
+export function deleteChaptersForSeries(id) {
+  const info = getDb().prepare('DELETE FROM chapters WHERE series_id = ?').run(id);
+  return Number(info.changes || 0);
+}
+
 // --- Chapters --------------------------------------------------------------
 
 /**

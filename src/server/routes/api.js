@@ -6,7 +6,7 @@ import { searchManga } from '../../providers/mangadex.js';
 import { searchVolumes } from '../../providers/comicvine.js';
 import { provider as hardcover } from '../../providers/hardcover.js';
 import {
-  listSeries, getSeries, updateSeries, deleteSeries,
+  listSeries, getSeries, updateSeries, deleteSeries, deleteChaptersForSeries,
   listChaptersForSeries, getChapter, setChapterState, bulkSetChapterState,
   listChaptersInStates, recentHistory, listChapterFilesForSeries, resetStaleDownloads,
 } from '../../core/repo.js';
@@ -18,6 +18,7 @@ import {
 import { followSeries, refreshSeries, previewRefreshSeries, promoteThresholdChapters } from '../../core/series-service.js';
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, DEFAULT_PROFILE_CONFIG } from '../../core/profiles.js';
 import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
+import { autoMapSuggestions, autoMatchSeriesFromDisk } from '../../core/auto-map.js';
 import { resolveVolumes } from '../../core/mapping.js';
 import { getVolumeStats, extrapolateVolumes, buildVolumeMapFromChapters, sanitizeVolumeMap } from '../../core/extrapolate.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
@@ -1583,84 +1584,33 @@ bindery.push({
     const dir = String(req.query.dir || '').trim();
     if (!dir || !existsSync(dir)) return reply.code(400).send({ error: 'dir not found' });
 
-    const chapters = listChaptersForSeries(s.id);
-    const byNumber = new Map(chapters.map(c => [String(parseFloat(c.number)), c]));
-    const byVolume = new Map();
-    for (const c of chapters) {
-      if (c.volume != null && c.volume !== '') {
-        const vk = String(parseFloat(c.volume));
-        if (!byVolume.has(vk)) byVolume.set(vk, []);
-        byVolume.get(vk).push(c);
-      }
-    }
+    const { suggestions, totalFiles, matchedFiles } = await autoMapSuggestions(s, dir);
+    return { seriesId: s.id, suggestions, totalFiles, matchedFiles };
+  });
 
-    const suggestions = []; // { chapterId, chapterNumber, chapterTitle, filePath, matchReason }
-    const usedFiles = new Set();
-    const usedChapters = new Set();
+  // Auto-match the series' on-disk files to its (provider-proposed) volume
+  // structure and mark the matched chapters owned — the automatic counterpart
+  // to the manual "Auto-match" button, run as part of Refresh & Scan.
+  app.post('/api/series/:id/reconcile-files', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const res = await autoMatchSeriesFromDisk(s.id);
+    if (res.applied > 0) logHistory('series.reconciled', { seriesId: s.id, message: `auto-matched ${res.applied} chapter(s) to on-disk volumes` });
+    return { ok: true, ...res };
+  });
 
-    const files = [];
-    try {
-      for (const e of readdirSync(dir, { withFileTypes: true })) {
-        if (e.name.startsWith('.')) continue;
-        const ext = e.name.toLowerCase();
-        if (e.isFile() && (ext.endsWith('.cbz') || ext.endsWith('.epub')))
-          files.push(path.join(dir, e.name));
-      }
-    } catch { return reply.code(400).send({ error: 'Cannot read directory' }); }
-    files.sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true }));
-
-    for (const filePath of files) {
-      const info = await readCbzInfo(filePath);
-
-      // 1. Try issue number matching (comics: "#10 v10.cbz" → chapter 10)
-      if (info.issueNum && byNumber.has(info.issueNum) && !usedChapters.has(info.issueNum)) {
-        const ch = byNumber.get(info.issueNum);
-        suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `issue #${info.issueNum}` });
-        usedFiles.add(filePath); usedChapters.add(info.issueNum);
-        continue;
-      }
-
-      // 2. Try volume matching → mark all chapters in that volume
-      if (info.volume) {
-        const volChaps = byVolume.get(String(parseFloat(info.volume)));
-        if (volChaps && volChaps.length > 0) {
-          for (const ch of volChaps) {
-            if (!usedChapters.has(ch.number)) {
-              suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `vol ${info.volume}` });
-              usedChapters.add(ch.number);
-            }
-          }
-          usedFiles.add(filePath);
-          continue;
-        }
-      }
-
-      // 3. Bare-number fallback: extract last number from filename as volume
-      const base = path.basename(filePath).replace(/\.(cbz|epub)$/i, '');
-      const bareM = base.match(/(?:^|[-_\s])0*(\d{1,4}(?:\.\d+)?)(?:$|[-_\s\.])/);
-      if (bareM) {
-        const vNum = String(parseFloat(bareM[1]));
-        const volChaps = byVolume.get(vNum);
-        if (volChaps && volChaps.length > 0) {
-          for (const ch of volChaps) {
-            if (!usedChapters.has(ch.number)) {
-              suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `bare #${vNum}` });
-              usedChapters.add(ch.number);
-            }
-          }
-          usedFiles.add(filePath);
-          continue;
-        }
-        // Try as chapter number
-        if (byNumber.has(vNum) && !usedChapters.has(vNum)) {
-          const ch = byNumber.get(vNum);
-          suggestions.push({ chapterId: ch.id, chapterNumber: ch.number, chapterTitle: ch.title, filePath, matchReason: `bare ch ${vNum}` });
-          usedFiles.add(filePath); usedChapters.add(vNum);
-        }
-      }
-    }
-
-    return { seriesId: s.id, suggestions, totalFiles: files.length, matchedFiles: usedFiles.size };
+  // Wipe a series clean: delete every chapter row and clear the cached
+  // volume/chapter hints so the next Refresh & Scan rebuilds the chapter list
+  // and re-resolves volumes from scratch. On-disk files are left untouched (a
+  // following scan re-matches them), which is what makes this the way to clear
+  // stale or mis-estimated volume data from earlier scans.
+  app.post('/api/series/:id/reset', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const removed = deleteChaptersForSeries(s.id);
+    updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null });
+    logHistory('series.reset', { seriesId: s.id, message: `reset series — cleared ${removed} chapter(s)` });
+    return { ok: true, removedChapters: removed };
   });
 
   // Apply bulk file→chapter mappings (mark chapters as imported with the given path).
