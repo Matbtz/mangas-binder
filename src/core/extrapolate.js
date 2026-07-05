@@ -236,7 +236,16 @@ export function getVolumeStats(rawVolumeMap, { totalVolumesHint = null, totalCha
   // spanning way more chapters than the rest) would otherwise drag the average up
   // and inflate every subsequently-estimated volume, compounding the bad tag's
   // damage instead of containing it.
-  const counts = consecutiveVols.map(([, chs]) => chs.length).sort((a, b) => a - b);
+  //
+  // Count only whole-number chapters: a volume whose *only* tags are fractional
+  // omakes (".5" bonus chapters — a real case in Centuria, where MangaDex tagged
+  // vols 6-9 with just a single "49.5"/"58.5"/… each) is not a real 1-chapter
+  // volume, and letting those size-1 entries into the median dragged the reported
+  // chapters-per-volume down to 5 for a series that actually runs ~10/vol.
+  const counts = consecutiveVols
+    .map(([, chs]) => chs.filter(c => !String(c).includes('.') && Number.isInteger(parseFloat(c))).length)
+    .filter(n => n > 0)
+    .sort((a, b) => a - b);
   const sampledAvg = counts.length > 0
     ? (counts.length % 2 === 1
         ? counts[(counts.length - 1) / 2]
@@ -385,13 +394,19 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
     // consensus dumping chapters 56–64 all into volume 5).
     const maxIntCh = integers.length ? integers[integers.length - 1].n : 0;
     const withinTotal = totalChaptersHint && totalChaptersHint > 0 && maxIntCh <= totalChaptersHint * 1.1;
-    const perVol = (chsPerVolOverride && chsPerVolOverride > 0)
-      ? chsPerVolOverride
-      : (withinTotal ? Math.max(1, Math.ceil(totalChaptersHint / V)) : null);
-    if (perVol) {
+    if (chsPerVolOverride && chsPerVolOverride > 0) {
+      // Explicit rate requested (manual "extrapolate to volume N"): honour it.
       for (const { raw, n } of integers) {
-        let estVol = Math.max(1, Math.ceil(n / perVol));
-        if (estVol > V) estVol = V;
+        const estVol = Math.min(V, Math.max(1, Math.ceil(n / chsPerVolOverride)));
+        (calculated[String(estVol)] ||= []).push(raw);
+      }
+    } else if (withinTotal && maxIntCh > 0) {
+      // Place each chapter by its fractional position in the run so all V volumes
+      // are used and each is evenly sized — `ceil(n / ceil(total/V))` used to leave
+      // the final volume empty and overload the penultimate one whenever the total
+      // didn't divide evenly (109 chapters / 12 volumes landed everything in 1-11).
+      for (const { raw, n } of integers) {
+        const estVol = Math.min(V, Math.max(1, Math.floor(((n - 1) * V) / maxIntCh) + 1));
         (calculated[String(estVol)] ||= []).push(raw);
       }
     } else {
