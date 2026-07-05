@@ -412,7 +412,7 @@ export async function previewRefreshSeries(seriesId) {
   // refresh will persist: over-cap poison anchors are demoted (Pass 0) and the
   // reported chapters-per-volume falls back to the consensus ratio when the
   // tagged sample is too thin to trust.
-  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint });
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint, totalChaptersHint });
   const stats = getVolumeStats(volumeMap, { totalVolumesHint, totalChaptersHint });
   const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null, totalChaptersHint);
 

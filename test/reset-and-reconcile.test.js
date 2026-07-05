@@ -15,7 +15,7 @@ process.env.OUTPUT_DIR = path.join(tmp, 'out');
 process.env.STAGING_DIR = path.join(tmp, 'staging');
 
 const { ensureSeeded } = await import('../src/core/settings.js');
-const { createSeries, upsertChapter, listChaptersForSeries, getSeries, deleteChaptersForSeries } = await import('../src/core/repo.js');
+const { createSeries, upsertChapter, listChaptersForSeries, getSeries, deleteChaptersForSeries, updateSeries, touchSeriesScan } = await import('../src/core/repo.js');
 const { autoMapSuggestions, autoMatchSeriesFromDisk, resolveSeriesDirs } = await import('../src/core/auto-map.js');
 const { closeDb } = await import('../src/core/db.js');
 
@@ -53,6 +53,21 @@ test('deleteChaptersForSeries wipes every chapter row and reports the count', ()
   assert.equal(listChaptersForSeries(s.id).length, 0);
   // The series row itself survives a wipe.
   assert.ok(getSeries(s.id));
+});
+
+test('a complete wipe clears the cached hints and the last-scan timestamp (true from-scratch)', () => {
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'reset-scan', title: 'Scan Reset', language: 'en', monitored: true, packagingMode: 'volume', totalVolumesHint: 5, totalChaptersHint: 55 });
+  touchSeriesScan(s.id);
+  assert.ok(getSeries(s.id).last_scan_at, 'precondition: series has been scanned');
+
+  // Mirror the /reset route's wipe.
+  deleteChaptersForSeries(s.id);
+  updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null, lastScanAt: null });
+
+  const after = getSeries(s.id);
+  assert.equal(after.total_volumes_hint, null);
+  assert.equal(after.total_chapters_hint, null);
+  assert.equal(after.last_scan_at, null, 'next Refresh & Scan is treated as a first scan');
 });
 
 test('autoMapSuggestions matches volume-named files to every chapter of that volume', async () => {

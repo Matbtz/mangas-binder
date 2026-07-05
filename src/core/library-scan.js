@@ -26,9 +26,17 @@ import { getSetting } from './settings.js';
 /**
  * Reconcile the on-disk Tome library with the database: find CBZs that already
  * exist, figure out which series/volume/chapters they represent, and mark those
- * chapters as `imported` so we never re-download or re-package them. The volume
- * read from the existing file becomes authoritative, so our volume boundaries
- * snap to whatever is already in your library.
+ * chapters as `imported` so we never re-download or re-package them.
+ *
+ * The *provider/consensus* volume is authoritative — a CBZ's own volume label is
+ * only adopted for a chapter that has no volume yet. This is deliberate: a CBZ
+ * built from an earlier, mis-estimated volume structure must not re-stamp its
+ * stale boundaries back onto a series that a wipe + refresh just re-resolved
+ * correctly (the real "Pet" bug — a v03/v05 file re-poisoning chapters 62/63
+ * every scan). Files are still matched by chapter membership so nothing is
+ * re-downloaded; only the volume *number* now flows provider→file, not file→DB.
+ * (The physical CBZs can then be re-grouped to the corrected volumes via a force
+ * repackage — packageCompleteVolumes rebuilds them from the same on-disk pages.)
  *
  * Works precisely on CBZs mangas-binder produced (chapter membership is encoded
  * in the page names, e.g. `ch0012_p003.jpg`). Foreign CBZs are matched at the
@@ -343,6 +351,12 @@ async function _scanLibrary({ seriesId } = {}) {
   const chaptersBySeries = new Map(); // seriesId -> Map(number -> row)
   let matchedFiles = 0, markedChapters = 0;
   const perSeries = {};
+  // Series whose on-disk CBZ groups a chapter under a different volume than the
+  // (now-authoritative) provider volume — the file is physically stale and can be
+  // re-grouped to the corrected volumes by a force repackage. Reported so the
+  // caller can trigger that rematch (packageCompleteVolumes rebuilds each volume
+  // from the very same on-disk pages).
+  const driftedSeries = new Set();
 
   let scanned = 0;
   for (const file of files) {
@@ -373,13 +387,19 @@ async function _scanLibrary({ seriesId } = {}) {
     for (const num of info.chapters) {
       const row = index.get(String(parseFloat(num)));
       if (!row || row.state === 'imported') continue;
-      setChapterState(row.id, 'imported', {
-        cbz_path: file,
-        calculated: 0,
-        language: match.language || 'en',
-        ...(info.volume ? { volume: info.volume } : {}),
-      });
+      // Adopt the file's volume label ONLY when the chapter has no volume of its
+      // own — the provider/consensus volume is authoritative (see module header),
+      // so a stale CBZ can't overwrite a freshly-resolved boundary. A chapter that
+      // already carries a volume keeps it (and its calculated/estimate flag).
+      const hasVolume = row.volume != null && row.volume !== '';
+      const extra = { cbz_path: file, language: match.language || 'en' };
+      if (!hasVolume && info.volume) { extra.volume = info.volume; extra.calculated = 0; }
+      else if (hasVolume && info.volume && String(parseFloat(info.volume)) !== String(parseFloat(row.volume))) {
+        driftedSeries.add(match.id); // file groups this chapter under a stale volume
+      }
+      setChapterState(row.id, 'imported', extra);
       row.state = 'imported';
+      if (!hasVolume && info.volume) row.volume = info.volume;
       markedChapters++;
       matchedCount++;
       perSeries[match.title] = (perSeries[match.title] || 0) + 1;
@@ -777,5 +797,5 @@ async function _scanLibrary({ seriesId } = {}) {
     import('./notify.js').then(m => m.notifyScan(msgParts.join(' ')));
   }
 
-  return { files: files.length, matchedFiles, markedChapters, perSeries, untracked };
+  return { files: files.length, matchedFiles, markedChapters, perSeries, untracked, driftedSeries: [...driftedSeries] };
 }

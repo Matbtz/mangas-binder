@@ -61,6 +61,45 @@ test('scanLibrary marks chapters owned by an existing CBZ as imported', async ()
   assert.equal((await scanLibrary({ seriesId: s.id })).markedChapters, 0);
 });
 
+test('scanLibrary keeps the freshly-resolved provider volume and does NOT re-stamp a stale CBZ label (the wipe+refresh "Pet" bug)', async () => {
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: '44444444-4444-4444-4444-444444444444',
+    title: 'Rematch Series', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume',
+  });
+  // Build a CBZ physically labelled "Vol. 03" containing chapters 60-62 (an old
+  // packaging from a since-fixed mis-estimation).
+  for (const n of ['60', '61', '62']) {
+    upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '3' });
+    const d = chapterStagingDir(s.id, n); mkdirSync(d, { recursive: true });
+    writeFileSync(path.join(d, '001.png'), PNG);
+    const row = listChaptersForSeries(s.id).find(c => c.number === n);
+    setChapterState(row.id, 'downloaded', { staging_path: d, pages: 1 });
+  }
+  const res = await bindVolume(s, '3', listChaptersForSeries(s.id), {});
+  const info = await readCbzInfo(res.path);
+  assert.equal(info.volume, '3');
+  assert.deepEqual(info.chapters.sort(), ['60', '61', '62']);
+
+  // Simulate the post-wipe refresh: the providers now place these chapters in
+  // volumes 5/5/6 (the correct, freshly-resolved structure).
+  getDb().exec("UPDATE chapters SET state='wanted', cbz_path=NULL, calculated=0, volume=CASE number WHEN '62' THEN '6' ELSE '5' END WHERE series_id=" + s.id);
+
+  const out = await scanLibrary({ seriesId: s.id });
+  // The stale grouping is reported so the caller can rebuild the CBZs onto the
+  // corrected volumes (the "rematch existing CBZ" step).
+  assert.ok(out.driftedSeries.includes(s.id), 'series flagged for a volume-rematch repackage');
+
+  const chs = Object.fromEntries(listChaptersForSeries(s.id).map(c => [c.number, c]));
+  for (const n of ['60', '61', '62']) {
+    assert.equal(chs[n].state, 'imported', `ch ${n} owned`);
+    assert.ok(chs[n].cbz_path?.endsWith('Rematch Series Vol. 03.cbz'), `ch ${n} linked to the on-disk file`);
+  }
+  // The provider volume wins — the stale "3" label must NOT come back.
+  assert.equal(chs['60'].volume, '5', 'provider volume kept, not re-stamped to file vol 3');
+  assert.equal(chs['61'].volume, '5');
+  assert.equal(chs['62'].volume, '6');
+});
+
 test('scanLibrary matches foreign CBZ via parent directory name when Series tag is absent', async () => {
   const libDir = process.env.OUTPUT_DIR;
   // Series "Foreign Series" in the DB
