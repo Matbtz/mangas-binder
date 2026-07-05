@@ -174,11 +174,36 @@ export function parisTime(date = new Date()) {
   }
 }
 
+// The history/audit log is append-only and was never trimmed, so on a
+// long-running server it grew without bound — bloating the DB file, the WAL and
+// the page cache (RAM), and every write is a synchronous SQLite call on the
+// event loop (badly amplified when debugLogs is on, which logs several rows per
+// downloaded page). Keep only the newest HISTORY_KEEP rows, trimmed amortised
+// every HISTORY_PRUNE_EVERY inserts so the common path stays a single INSERT.
+const HISTORY_KEEP = Number(process.env.HISTORY_KEEP) > 0 ? Number(process.env.HISTORY_KEEP) : 5000;
+const HISTORY_PRUNE_EVERY = 500;
+let _historyWrites = 0;
+
 /** Append an audit/history row. Best-effort; never throws into the caller. */
 export function logHistory(event, { seriesId = null, chapterId = null, message = '' } = {}) {
   try {
-    getDb()
-      .prepare('INSERT INTO history (ts, series_id, chapter_id, event, message) VALUES (?, ?, ?, ?, ?)')
+    const db = getDb();
+    db.prepare('INSERT INTO history (ts, series_id, chapter_id, event, message) VALUES (?, ?, ?, ?, ?)')
       .run(parisTime(), seriesId, chapterId, event, message);
+    // Amortised retention: trim back to the newest HISTORY_KEEP rows. The
+    // subquery yields NULL (a no-op delete) until the table exceeds the cap, and
+    // the id <= comparison uses the primary-key index, so this stays cheap.
+    if ((++_historyWrites % HISTORY_PRUNE_EVERY) === 0) {
+      db.prepare('DELETE FROM history WHERE id <= (SELECT id FROM history ORDER BY id DESC LIMIT 1 OFFSET ?)')
+        .run(HISTORY_KEEP);
+    }
   } catch { /* ignore logging failures */ }
+}
+
+/** Trim the history log to the newest `keep` rows. Returns rows deleted. */
+export function pruneHistory(keep = HISTORY_KEEP) {
+  const info = getDb()
+    .prepare('DELETE FROM history WHERE id <= (SELECT id FROM history ORDER BY id DESC LIMIT 1 OFFSET ?)')
+    .run(keep);
+  return Number(info.changes || 0);
 }
