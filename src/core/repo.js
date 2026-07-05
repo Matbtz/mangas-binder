@@ -135,6 +135,32 @@ export function deleteChaptersForSeries(id) {
   return Number(info.changes || 0);
 }
 
+/**
+ * Prune stale gap-fill placeholder chapters whose number is beyond the series'
+ * current known latest chapter. Gap-fill synthesises chapters `1..latestChapter`
+ * (marked with a `synth-` provider_chapter_id) on every refresh, but a run where
+ * the consensus latest-chapter was once too high leaves orphans behind that no
+ * later run ever removes — a finished 55-chapter series ("Pet") was observed
+ * holding 135 chapters, inflating every estimated volume's size. Only rows that
+ * are (a) still purely synthetic (never seen from a real provider — a real
+ * provider id overwrites the `synth-` one via COALESCE on upsert), (b) never
+ * downloaded or attempted, and (c) numbered past `maxChapterNumber` are removed,
+ * so nothing real or in-progress is ever touched. In-range placeholders are left
+ * alone (the next gap-fill recreates them anyway). Returns rows removed.
+ */
+export function pruneSyntheticChaptersBeyond(seriesId, maxChapterNumber) {
+  if (!(maxChapterNumber > 0)) return 0;
+  const info = getDb().prepare(
+    `DELETE FROM chapters
+       WHERE series_id = ?
+         AND provider_chapter_id LIKE 'synth-%'
+         AND state IN ('wanted', 'skipped')
+         AND attempts = 0
+         AND CAST(number AS REAL) > ?`
+  ).run(seriesId, maxChapterNumber);
+  return Number(info.changes || 0);
+}
+
 // --- Chapters --------------------------------------------------------------
 
 /**

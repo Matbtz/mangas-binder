@@ -125,6 +125,70 @@ test('resolveVolumes: an untagged, finished series is bounded by its persisted v
   assert.ok(chs.every(c => c.calculated === 1));
 });
 
+test('sanitizeVolumeMap: demotes poison volume tags numbered past the total-volume hint (the "Pet" case)', () => {
+  // The reported "Pet" breakdown: a finished 5-volume series whose DB was
+  // polluted with scattered single-chapter tags at volumes 7, 8, ... 89 (a
+  // since-fixed cross-series MangaUpdates override). Each is individually small
+  // and in order, so passes 1-3 never reject them — only the total-volume cap
+  // does. Without a hint they must stay untouched (backwards compatible).
+  const volumeMap = {
+    '1': ['1', '2', '3', '4', '5'],
+    '7': ['46', '47'], '8': ['48'], '10': ['49', '50'], '89': ['55'],
+  };
+  const noHint = sanitizeVolumeMap(volumeMap);
+  assert.ok('89' in noHint.cleanVolumeMap, 'without a hint, over-cap tags are left alone');
+
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint: 5 });
+  for (const v of ['7', '8', '10', '89']) {
+    assert.equal(v in cleanVolumeMap, false, `poison volume ${v} should be demoted`);
+  }
+  assert.deepEqual(cleanVolumeMap['1'], ['1', '2', '3', '4', '5'], 'in-bound volume 1 survives');
+  assert.deepEqual(noisy.sort((a, b) => Number(a) - Number(b)), ['46', '47', '48', '49', '50', '55']);
+});
+
+test('extrapolateVolumes: poison anchors past the hint are re-estimated back inside [1..hint]', () => {
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  // Chapters 1-44 untagged; 45-55 carry garbage volume tags well past the real
+  // 5-volume total. Every chapter must land in volumes 1-5, none beyond.
+  const volumeMap = { '7': ['45', '46'], '9': ['47'], '20': ['48', '49'], '61': range(50, 53), '89': ['54', '55'] };
+  const { calculated, overflow } = extrapolateVolumes(volumeMap, range(1, 44), 5, false, null, 55);
+  assert.deepEqual(overflow, []);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number).sort((a, b) => a - b);
+  assert.equal(Math.max(...volNums), 5, `no volume beyond the 5-volume hint, got ${volNums}`);
+  assert.equal(Object.values(calculated).reduce((a, chs) => a + chs.length, 0), 55, 'every chapter placed');
+});
+
+test('getVolumeStats: a too-thin tagged sample falls back to the consensus chapters/volume ratio (the "Fool Night" case)', () => {
+  // Fool Night: the primary provider tagged only volumes 0, 1, 2 with a single
+  // chapter each — a sampled average of 1. Against a 12-volume / 109-chapter
+  // consensus the honest estimate is ~9 chapters/volume, not 1.
+  const volumeMap = { '0': ['0'], '1': ['1'], '2': ['2'] };
+  const bare = getVolumeStats(volumeMap);
+  assert.ok(bare.avgChsPerVol <= 3, 'with no consensus the thin sample is all we have');
+  const stats = getVolumeStats(volumeMap, { totalVolumesHint: 12, totalChaptersHint: 109 });
+  assert.equal(stats.avgChsPerVol, 9, `expected round(109/12)=9, got ${stats.avgChsPerVol}`);
+});
+
+test('resolveVolumes: a fully-tagged but poison-polluted series self-heals to within its volume hint', () => {
+  // End-to-end "Pet": every chapter already carries a volume tag (so nothing is
+  // "unassigned"), but many are impossible garbage (volumes 7-89 on a 5-volume
+  // series). The refresh path must still detect and correct them.
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: 'poison', title: 'Poison Series', language: 'en',
+    monitored: true, packagingMode: 'volume', totalVolumesHint: 5, totalChaptersHint: 55,
+  });
+  for (let i = 1; i <= 44; i++) upsertChapter(s.id, { provider: 'mangadex', number: String(i), volume: '1' });
+  const poison = { 45: '7', 46: '8', 47: '9', 48: '20', 49: '61', 50: '61', 51: '61', 52: '63', 53: '63', 54: '89', 55: '89' };
+  for (const [n, v] of Object.entries(poison)) upsertChapter(s.id, { provider: 'mangadex', number: n, volume: v });
+
+  const { assigned } = resolveVolumes(s.id);
+  assert.ok(assigned > 0, 'poison tags trigger a re-estimation even with nothing unassigned');
+
+  const chs = listChaptersForSeries(s.id);
+  const vols = chs.map(c => parseFloat(c.volume)).filter(v => !Number.isNaN(v));
+  assert.equal(Math.max(...vols), 5, `no chapter should keep a volume past the 5-volume hint, got ${Math.max(...vols)}`);
+});
+
 test('sanitizeVolumeMap: rejects a mistagged outlier that would overlap the next volume', () => {
   // Mirrors a real MangaDex bug report: volume mins step cleanly by ~9, but one
   // rogue chapter per volume balloons the max far past the next volume's start.

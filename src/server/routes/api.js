@@ -807,7 +807,7 @@ bindery.push({
 
   app.get('/api/audit-all', async (req, reply) => {
     const db = getDb();
-    const series = db.prepare('SELECT id, title FROM series').all();
+    const series = db.prepare('SELECT id, title, total_volumes_hint FROM series').all();
     const results = [];
 
     for (const s of series) {
@@ -823,7 +823,7 @@ bindery.push({
       // (extrapolate.js), so this audit can never disagree with what the actual
       // assignment logic considers an anomaly — a chapter flagged here is exactly
       // one that resolveVolumes would demote and re-estimate on the next refresh.
-      const { noisy } = sanitizeVolumeMap(volMap);
+      const { noisy } = sanitizeVolumeMap(volMap, { totalVolumesHint: s.total_volumes_hint || null });
       const anomalies = noisy.length
         ? [`${noisy.length} chapter(s) look statistically inconsistent with their assigned volume's neighbors and would be re-estimated on the next refresh: chapter(s) ${[...noisy].sort((a, b) => parseFloat(a) - parseFloat(b)).join(', ')}.`]
         : [];
@@ -1174,7 +1174,7 @@ bindery.push({
     const db = getDb();
     const chapters = listChaptersForSeries(s.id);
     const { volumeMap } = buildVolumeMapFromChapters(chapters);
-    const stats = getVolumeStats(volumeMap);
+    const stats = getVolumeStats(volumeMap, { totalVolumesHint: s.total_volumes_hint || null, totalChaptersHint: s.total_chapters_hint || null });
     const finalChsPerVol = chaptersPerVolume ? Number(chaptersPerVolume) : (stats.avgChsPerVol || 10);
 
     let created = 0;
@@ -1217,7 +1217,7 @@ bindery.push({
     const maxVolume = req.query.maxVolume ? Number(req.query.maxVolume) : null;
     const chapters = listChaptersForSeries(s.id);
     const { volumeMap, unassigned } = buildVolumeMapFromChapters(chapters);
-    const stats = getVolumeStats(volumeMap);
+    const stats = getVolumeStats(volumeMap, { totalVolumesHint: s.total_volumes_hint || null, totalChaptersHint: s.total_chapters_hint || null });
     const finalChsPerVol = chsPerVolOverride || stats.avgChsPerVol || 10;
 
     const unassignedCopy = [...unassigned];

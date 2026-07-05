@@ -4,6 +4,7 @@ import { consultVolumeProviders } from './volume-consensus.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
   upsertChapter, chapterStateCounts, listChaptersForSeries, bulkSetChapterState,
+  pruneSyntheticChaptersBeyond,
 } from './repo.js';
 import { isProviderEnabled, getSetting } from './settings.js';
 import { scanLibrary } from './library-scan.js';
@@ -119,6 +120,7 @@ export async function refreshSeries(seriesId) {
 
   const chapters = await provider.listChapters(series.provider_series_id, { lang: series.language });
 
+  let consensusLatestChapter = null;
   if (series.media_type === 'manga') {
     try {
       // Cross-check every enabled total-volume/chapter provider instead of
@@ -140,6 +142,7 @@ export async function refreshSeries(seriesId) {
         });
       }
       if (totalChapters.value && totalChapters.value > 0) {
+        consensusLatestChapter = totalChapters.value;
         const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
         for (let i = 1; i <= totalChapters.value; i++) {
           if (!knownNums.has(String(i))) {
@@ -212,6 +215,16 @@ export async function refreshSeries(seriesId) {
       pages: ch.pages,
     }, initialState);
     if (inserted && initialState === 'wanted') added++;
+  }
+
+  // Clean up stale gap-fill placeholders left behind by an earlier run whose
+  // consensus latest-chapter was too high (see pruneSyntheticChaptersBeyond): a
+  // finished 55-chapter series was observed holding 135 phantom chapters, which
+  // inflated every estimated volume's size. Only ever removes never-downloaded,
+  // still-synthetic rows numbered past the current consensus.
+  if (consensusLatestChapter) {
+    const pruned = pruneSyntheticChaptersBeyond(seriesId, consensusLatestChapter);
+    if (pruned > 0) logHistory('series.pruned_phantoms', { seriesId, message: `${pruned} stale placeholder chapter(s) past ch ${consensusLatestChapter} removed` });
   }
 
   touchSeriesScan(seriesId);
@@ -372,7 +385,16 @@ export async function previewRefreshSeries(seriesId) {
   }
 
   // --- Simulate resolveVolumes()'s extrapolation over the merged pool ---
-  const mergedByNumber = new Map(existing.map(c => [c.number, { ...c }]));
+  // Mirror the refresh's phantom-prune (pruneSyntheticChaptersBeyond) so the
+  // previewed breakdown reflects what a real refresh will actually persist, not
+  // the pre-cleanup state: drop never-downloaded synthetic placeholders numbered
+  // past the consensus latest chapter before simulating.
+  const previewLatest = mangaUpdates?.latestChapterHint || null;
+  const isPrunablePhantom = c =>
+    previewLatest && String(c.provider_chapter_id || '').startsWith('synth-') &&
+    (c.state === 'wanted' || c.state === 'skipped') && !(c.attempts > 0) &&
+    parseFloat(c.number) > previewLatest;
+  const mergedByNumber = new Map(existing.filter(c => !isPrunablePhantom(c)).map(c => [c.number, { ...c }]));
   for (const ch of chapters) {
     const key = String(ch.number);
     const cur = mergedByNumber.get(key);
@@ -384,10 +406,14 @@ export async function previewRefreshSeries(seriesId) {
   }
   const mergedChapters = [...mergedByNumber.values()];
   const { volumeMap, unassigned } = buildVolumeMapFromChapters(mergedChapters);
-  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap);
-  const stats = getVolumeStats(volumeMap);
   const totalVolumesHint = series.total_volumes_hint || mangaUpdates?.totalVolumesHint || null;
   const totalChaptersHint = mangaUpdates?.latestChapterHint || series.total_chapters_hint || null;
+  // Pass the consensus totals so the previewed breakdown matches what a real
+  // refresh will persist: over-cap poison anchors are demoted (Pass 0) and the
+  // reported chapters-per-volume falls back to the consensus ratio when the
+  // tagged sample is too thin to trust.
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint });
+  const stats = getVolumeStats(volumeMap, { totalVolumesHint, totalChaptersHint });
   const { calculated, overflow } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, null, totalChaptersHint);
 
   // Use the *sanitized* map here, not the raw one: extrapolateVolumes() already
@@ -425,6 +451,7 @@ export async function previewRefreshSeries(seriesId) {
       newChapterCount: newChapters.length,
       volumeChangeCount: volumeChanges.length,
       protectedSkippedCount: protectedSkipped.length,
+      stalePlaceholdersPruned: existing.filter(isPrunablePhantom).length,
       chsPerVolUsed: stats.avgChsPerVol,
       estimatedVolumeCount: Object.keys(calculated).filter(v => v !== 'Specials').length,
       noisyTagsRejected: noisy.length,
