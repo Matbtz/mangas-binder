@@ -273,6 +273,43 @@ test('resolveVolumes: end-to-end, cruft anchors inconsistent with the consensus 
   assert.ok(Math.max(...counts) <= 14, `no volume should hold the whole pile, got ${JSON.stringify(byVol)}`);
 });
 
+test('extrapolateVolumes: no-anchor even split uses ALL volumes when the total does not divide evenly (Fool Night 109/12)', () => {
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const { calculated } = extrapolateVolumes({}, range(1, 109), 12, false, null, 109);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number).sort((a, b) => a - b);
+  assert.deepEqual(volNums, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 'every one of the 12 volumes is used (not just 11)');
+  const counts = volNums.map(v => calculated[String(v)].length);
+  assert.ok(Math.max(...counts) - Math.min(...counts) <= 1, `evenly sized, got ${counts}`);
+});
+
+test('extrapolateVolumes: sparse single-chapter anchors (Fool Night) collapse to a clean 12-volume split, no phantom vol 0 or ballooned tail', () => {
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  // MangaDex tagged only ch2→v1 and ch93/94→v11 (plus a stray ch0→v0); everything
+  // else is gap-filled. Interpolating these incomplete anchors used to yield
+  // {0:1, 1:1, 2-10:10, 11:2, 12:15}; they should now be re-split evenly.
+  const volumeMap = { '0': ['0'], '1': ['2'], '11': ['93', '94'] };
+  const tagged = new Set(['0', '2', '93', '94']);
+  const unassigned = range(1, 109).filter(n => !tagged.has(n));
+  const { calculated } = extrapolateVolumes(volumeMap, unassigned, 12, false, null, 109);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number).sort((a, b) => a - b);
+  assert.equal(Math.min(...volNums), 1, 'no phantom volume 0');
+  assert.equal(Math.max(...volNums), 12, 'uses all 12 volumes');
+  const counts = volNums.map(v => calculated[String(v)].length);
+  assert.ok(Math.max(...counts) <= 11, `no ballooned tail volume, got ${JSON.stringify(counts)}`);
+});
+
+test('getVolumeStats: a volume tagged only with a fractional omake does not drag the reported chapters/volume down (Centuria)', () => {
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  // Vols 1-5 densely tagged (~9 chapters each), vols 6-9 tagged with a single
+  // ".5" bonus chapter apiece — those must not count as real 1-chapter volumes.
+  const volumeMap = {
+    '1': range(1, 9), '2': range(10, 18), '3': range(19, 27), '4': range(28, 36), '5': range(37, 45),
+    '6': ['49.5'], '7': ['58.5'], '8': ['67.5'], '9': ['76.5'],
+  };
+  const stats = getVolumeStats(volumeMap, { totalVolumesHint: 9, totalChaptersHint: 96 });
+  assert.equal(stats.avgChsPerVol, 9, `median of the integer-tagged volumes, not 1, got ${stats.avgChsPerVol}`);
+});
+
 test('sanitizeVolumeMap: rejects a mistagged outlier that would overlap the next volume', () => {
   // Mirrors a real MangaDex bug report: volume mins step cleanly by ~9, but one
   // rogue chapter per volume balloons the max far past the next volume's start.
