@@ -1218,7 +1218,7 @@ bindery.push({
       unassignedCopy.push(...missingChapterNumbers(chapters, targetMaxCh));
     }
 
-    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassignedCopy, s.total_volumes_hint || null, false, finalChsPerVol);
+    const { calculated, overflow } = extrapolateVolumes(volumeMap, unassignedCopy, s.total_volumes_hint || null, false, finalChsPerVol, s.total_chapters_hint || null);
     const volumes = Object.entries(calculated)
       .filter(([k]) => k !== 'Specials')
       .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))

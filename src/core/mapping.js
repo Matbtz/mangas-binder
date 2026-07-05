@@ -43,7 +43,7 @@ export function resolveVolumes(seriesId, { chaptersPerVolume = null } = {}) {
   const { noisy } = sanitizeVolumeMap(volumeMap);
   if (!unassigned.length && !noisy.length) return { assigned: 0 };
 
-  const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null, false, chaptersPerVolume);
+  const { calculated } = extrapolateVolumes(volumeMap, unassigned, series.total_volumes_hint || null, false, chaptersPerVolume, series.total_chapters_hint || null);
 
   const upd = getDb().prepare(
     "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ? AND (state NOT IN ('imported', 'bindery') OR volume IS NULL OR volume = '')"

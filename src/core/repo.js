@@ -14,12 +14,12 @@ export function createSeries(s) {
       (provider, provider_series_id, media_type, download_provider, publisher,
        title, sort_title, authors_json, artists_json,
        description, genres_json, year, status, cover_path, folder_path, language,
-       monitored, monitor_mode, monitor_from_volume, packaging_mode, total_volumes_hint, external_links_json)
+       monitored, monitor_mode, monitor_from_volume, packaging_mode, total_volumes_hint, total_chapters_hint, external_links_json)
     VALUES
       (@provider, @provider_series_id, @media_type, @download_provider, @publisher,
        @title, @sort_title, @authors_json, @artists_json,
        @description, @genres_json, @year, @status, @cover_path, @folder_path, @language,
-       @monitored, @monitor_mode, @monitor_from_volume, @packaging_mode, @total_volumes_hint, @external_links_json)
+       @monitored, @monitor_mode, @monitor_from_volume, @packaging_mode, @total_volumes_hint, @total_chapters_hint, @external_links_json)
     ON CONFLICT(provider, provider_series_id) DO UPDATE SET
        title = excluded.title, updated_at = datetime('now')
   `).run({
@@ -44,6 +44,8 @@ export function createSeries(s) {
     monitor_from_volume: s.monitorFromVolume != null ? parseFloat(s.monitorFromVolume) : null,
     packaging_mode: s.packagingMode ?? 'volume',
     total_volumes_hint: s.totalVolumesHint ?? null,
+    total_chapters_hint: s.totalChaptersHint ?? null,
+    external_links_json: s.externalLinks != null ? JSON.stringify(s.externalLinks) : null,
   });
   return getSeriesByProvider(s.provider, s.providerSeriesId);
 }
@@ -79,6 +81,7 @@ const SERIES_PATCH_COLS = {
   packagingMode: v => v,
   language: v => v,
   totalVolumesHint: v => v,
+  totalChaptersHint: v => v,
   coverPath: v => v,
   folderPath: v => v,
   provider: v => v,
@@ -92,7 +95,8 @@ const SERIES_PATCH_COLS = {
 const SERIES_COL_NAMES = {
   monitored: 'monitored', monitorMode: 'monitor_mode', monitorFromVolume: 'monitor_from_volume',
   packagingMode: 'packaging_mode',
-  language: 'language', totalVolumesHint: 'total_volumes_hint', coverPath: 'cover_path', folderPath: 'folder_path',
+  language: 'language', totalVolumesHint: 'total_volumes_hint', totalChaptersHint: 'total_chapters_hint',
+  coverPath: 'cover_path', folderPath: 'folder_path',
   provider: 'provider', providerSeriesId: 'provider_series_id',
   downloadProvider: 'download_provider', mediaType: 'media_type', title: 'title',
   description: 'description',

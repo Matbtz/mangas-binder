@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS series (
   external_links_json TEXT,                           -- lowest volume to download (monitor_mode='from')
   packaging_mode     TEXT NOT NULL DEFAULT 'volume',  -- volume | chapter (per-issue for comics)
   total_volumes_hint INTEGER,
+  total_chapters_hint INTEGER,
   last_scan_at       TEXT,
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
@@ -124,6 +125,7 @@ function migrate(database) {
   add('folder_path', 'folder_path TEXT');
   add('monitor_from_volume', 'monitor_from_volume REAL');
   add('external_links_json', 'external_links_json TEXT');
+  add('total_chapters_hint', 'total_chapters_hint INTEGER');
   const chCols = database.prepare('PRAGMA table_info(chapters)').all().map(c => c.name);
   const addCh = (name, ddl) => { if (!chCols.includes(name)) database.exec(`ALTER TABLE chapters ADD COLUMN ${ddl}`); };
   addCh('download_url', 'download_url TEXT');

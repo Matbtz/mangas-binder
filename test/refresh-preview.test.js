@@ -46,15 +46,9 @@ function mockProvidersFor(chapterVolumes, { totalVolumes = 10, latestChapter = n
       const results = [...muReleases.entries()].map(([ch, vol]) => ({ record: { chapter: ch, volume: vol } }));
       return { ok: true, status: 200, json: async () => ({ results }) };
     }
-    // AniList/MangaBaka cross-checks, only wired up when a test explicitly
-    // provides one via `crossChecks` — otherwise they fall through to the
-    // catch-all below, matching current real-world behavior when a provider
-    // has no verified match.
-    if (u.includes('graphql.anilist.co')) {
-      const c = crossChecks.anilist;
-      const media = c ? { title: { romaji: c.title, english: null }, volumes: c.volumes ?? null, chapters: c.chapters ?? null, status: c.status || 'FINISHED' } : null;
-      return { ok: true, status: 200, json: async () => ({ data: { Media: media } }) };
-    }
+    // MangaBaka cross-check, only wired up when a test explicitly provides one
+    // via `crossChecks` — otherwise it falls through to the catch-all below,
+    // matching real-world behavior when a provider has no verified match.
     if (u.includes('api.mangabaka.dev') && u.includes('/series/search')) {
       const c = crossChecks.mangabaka;
       return { ok: true, status: 200, json: async () => ({ data: c ? [{ id: 1, title: c.title }] : [] }) };
@@ -132,17 +126,17 @@ test('previewRefreshSeries: volumeBreakdown does not double-count a demoted nois
   assert.equal(totalChapters, 11); // 10 clean + 1 re-estimated chapter 500, not 12
 });
 
-test('previewRefreshSeries: when MangaUpdates disagrees with the other providers, the majority consensus is used for gap-filling', async () => {
-  // Reproduces the real "20th Century Boys" bug: MangaUpdates' own
-  // latest_chapter was stale (13) for a finished series that AniList and
-  // MangaBaka both correctly reported as 249 chapters / 22 volumes. The
-  // resolved consensus — not MangaUpdates alone — must drive gap-filling.
+test('previewRefreshSeries: MangaUpdates\' self-contradictory stale numbers are rejected and MangaBaka\'s consistent totals drive gap-filling', async () => {
+  // Reproduces the real "20th Century Boys" bug: MangaUpdates reported 13
+  // volumes AND a stale latest_chapter of 13 — a self-contradictory 1
+  // chapter/volume pairing — while MangaBaka correctly reported 249 chapters /
+  // 22 volumes. MangaUpdates' internally-inconsistent pair must be rejected so
+  // the consistent source drives gap-filling, not outvote-by-count.
   const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pv5', title: 'Preview Series', language: 'en', monitored: true, packagingMode: 'volume' });
   mockProvidersFor({ '1': '1' }, {
     totalVolumes: 13, // MangaUpdates' status field also lowballs it here
     latestChapter: 13,
     crossChecks: {
-      anilist: { title: 'Preview Series', volumes: 22, chapters: 249, status: 'FINISHED' },
       mangabaka: { title: 'Preview Series', volumes: 22, chapters: 249, status: 'completed' },
     },
   });
@@ -151,11 +145,39 @@ test('previewRefreshSeries: when MangaUpdates disagrees with the other providers
 
   assert.equal(report.mangaUpdates.latestChapterHint, 249);
   assert.equal(report.mangaUpdates.totalVolumesHint, 22);
-  assert.deepEqual(report.mangaUpdates.latestChapterDissenting, ['mangaupdates']);
   assert.equal(report.summary.incomingChapterCount, 249); // gap-filled to the consensus value, not MU's stale 13
-  assert.ok(report.providersConsulted.some(p => p.name === 'AniList' && p.totalChapters === 249));
+  const muReport = report.providersConsulted.find(p => p.name === 'MangaUpdates');
+  assert.equal(muReport.rejectedAsInconsistent, true);
+  assert.equal(muReport.chaptersAgreesWithConsensus, false);
   assert.ok(report.providersConsulted.some(p => p.name === 'MangaBaka' && p.totalChapters === 249));
   assert.ok(report.providersConsulted.some(p => p.name === 'Consensus' && p.latestChapterHint === 249));
+});
+
+test('previewRefreshSeries: an impossible volume count backed by two providers loses to a lone consistent source (the "Pet" bug)', async () => {
+  // The exact production failure: "Pet" is a finished 5-volume / 55-chapter
+  // series, but MangaUpdates reported 1 volume (and no chapter total). Only
+  // MangaBaka had the correct 5 volumes / 55 chapters. "1 volume for 55
+  // chapters" is physically impossible, so it must be rejected rather than
+  // trusted just because a majority once shared it — otherwise extrapolation
+  // spreads 55 chapters into far too many phantom volumes.
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pvpet', title: 'Pet', language: 'en', monitored: true, packagingMode: 'volume' });
+  mockProvidersFor({}, {
+    totalVolumes: 1, // MangaUpdates' bad "1 Volume" status
+    latestChapter: null,
+    crossChecks: {
+      mangabaka: { title: 'Pet', volumes: 5, chapters: 55, status: 'completed' },
+    },
+  });
+
+  const report = await previewRefreshSeries(s.id);
+
+  assert.equal(report.mangaUpdates.totalVolumesHint, 5); // MangaBaka wins, not the impossible 1
+  assert.equal(report.mangaUpdates.latestChapterHint, 55);
+  const muReport = report.providersConsulted.find(p => p.name === 'MangaUpdates');
+  assert.equal(muReport.rejectedVolumeAsImplausible, true);
+  // Every estimated volume lands within the real 5, never a phantom high volume.
+  const estVols = Object.keys(report.volumeBreakdown).filter(v => v !== 'Specials' && v !== 'none').map(Number);
+  assert.ok(Math.max(...estVols) <= 5, `expected volumes capped at 5, got ${Math.max(...estVols)}`);
 });
 
 test('previewRefreshSeries: with only MangaUpdates answering, its lone opinion is still used (no other providers to outvote it)', async () => {
@@ -180,8 +202,11 @@ test('previewRefreshSeries: a transient MangaUpdates failure is reported as "loo
     if (u.includes('mangadex.org') && u.includes('/aggregate')) return { ok: true, status: 200, json: async () => ({ volumes: {} }) };
     if (u.includes('mangadex.org') && u.includes('/feed')) return { ok: true, status: 200, json: async () => ({ total: 0, data: [] }) };
     if (u.includes('mangaupdates.com')) throw new Error('ETIMEDOUT'); // keeps failing through every retry
-    if (u.includes('graphql.anilist.co')) {
-      return { ok: true, status: 200, json: async () => ({ data: { Media: { title: { romaji: 'Preview Series', english: null }, volumes: 24, chapters: 239, status: 'RELEASING' } } }) };
+    if (u.includes('api.mangabaka.dev') && u.includes('/series/search')) {
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: 1, title: 'Preview Series' }] }) };
+    }
+    if (u.includes('api.mangabaka.dev') && u.includes('/series/1')) {
+      return { ok: true, status: 200, json: async () => ({ data: { id: 1, title: 'Preview Series', status: 'releasing', final_volume: '24', total_chapters: 239 } }) };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   };

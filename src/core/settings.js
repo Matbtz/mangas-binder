@@ -48,11 +48,13 @@ export function ensureSeeded() {
 
   // Most providers default to enabled; only a ToS-sensitive scraper used
   // solely as a download fallback (MangaKatana) defaults to disabled so it's
-  // opt-in. Fandom, AniList and MangaBaka are all free/no-auth total-volume
-  // cross-checks that feed core/volume-consensus.js's majority vote alongside
-  // MangaUpdates — a single one of them being wrong is outvoted by the
-  // others rather than trusted blindly, so there's no reason to make them
-  // opt-in the way an unverified sole source would need to be.
+  // opt-in. Fandom and MangaBaka are free/no-auth total-volume cross-checks
+  // that feed core/volume-consensus.js's majority vote alongside MangaUpdates —
+  // a single one of them being wrong is outvoted (or rejected as internally
+  // inconsistent) rather than trusted blindly, so there's no reason to make
+  // them opt-in the way an unverified sole source would need to be. (AniList
+  // was removed: as an anime-first DB it only reports volume/chapter totals for
+  // finished works and lowballed several ongoing manga.)
   const DISABLED_BY_DEFAULT = new Set(['mangakatana']);
   const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, ?)');
   for (const p of allProviders()) ins.run(p.name, DISABLED_BY_DEFAULT.has(p.name) ? 0 : 1);
