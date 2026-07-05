@@ -48,6 +48,61 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
 }
 
 /**
+ * Restore several chapters out of ONE packaged (multi-chapter) volume CBZ in a
+ * single parse of the archive, writing each chapter's pages to its own staging
+ * dir. This replaces calling extractToStaging({ onlyChapter }) once per chapter,
+ * which re-parsed the whole archive N times when re-packaging a volume.
+ *
+ * Only works for our own packaged archives (pages named `ch{NNNN}_p{NNN}`); for
+ * a foreign archive with no such naming it returns an empty set so the caller
+ * can fall back to the per-chapter path.
+ *
+ * @returns {Promise<Set<string>>} the chapter numbers (normalised) it extracted
+ */
+export async function extractChaptersFromArchive(zipBuffer, seriesId, chapterNumbers) {
+  let zip;
+  try {
+    zip = new AdmZip(zipBuffer);
+  } catch {
+    throw new Error('Downloaded file is not a readable zip/CBZ archive');
+  }
+  const images = zip.getEntries()
+    .filter(e => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase()));
+  const isPackaged = images.some(e => CBZ_PAGE_RE.test(path.basename(e.entryName)));
+  if (!isPackaged) return new Set(); // caller falls back to per-chapter extraction
+
+  // Bucket every page by the chapter number encoded in its name.
+  const wanted = new Set([...chapterNumbers].map(n => String(parseFloat(n))));
+  const byChapter = new Map(); // normalised number -> entries[]
+  for (const e of images) {
+    const m = path.basename(e.entryName).match(CBZ_PAGE_RE);
+    if (!m) continue;
+    const key = String(parseFloat(m[1]));
+    if (!wanted.has(key)) continue;
+    if (!byChapter.has(key)) byChapter.set(key, []);
+    byChapter.get(key).push(e);
+  }
+
+  const extracted = new Set();
+  for (const [key, entries] of byChapter) {
+    entries.sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+    const dir = chapterStagingDir(seriesId, key);
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dir, { recursive: true });
+    let i = 0;
+    for (const entry of entries) {
+      const ext = path.extname(entry.entryName).toLowerCase();
+      const dest = path.join(dir, `${pad(++i)}${ext}`);
+      const tmp = `${dest}.part`;
+      await writeFile(tmp, entry.getData());
+      await rename(tmp, dest);
+    }
+    if (i > 0) extracted.add(key);
+  }
+  return extracted;
+}
+
+/**
  * Extract image entries from an in-memory zip buffer into the chapter staging
  * dir, renumbered in archive order. Exposed for offline testing.
  * @returns {Promise<{ dir, pageCount }>}

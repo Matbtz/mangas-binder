@@ -763,7 +763,9 @@ async function showDetail(id) {
   };
   const liveTick = async () => {
     let fresh;
-    try { fresh = await api(`/series/${id}`); } catch { return; }
+    // Slim progress feed (states/progress only) rather than the full series
+    // payload — cheap enough to poll several times a second during downloads.
+    try { fresh = await api(`/series/${id}/progress`); } catch { return; }
     for (const c of fresh.chapters) {
       const tr = v.querySelector(`tr[data-ch="${c.id}"]`);
       if (!tr) continue;

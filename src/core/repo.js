@@ -224,6 +224,29 @@ export function listChaptersForSeries(seriesId) {
   ).all(seriesId);
 }
 
+/**
+ * Slim per-chapter fields the live "tick" on the series detail page needs to
+ * patch status cells, action buttons and volume badges — nothing else. The full
+ * `listChaptersForSeries` + `chapterView` payload (title, language, pages,
+ * quality, timestamps, …) was refetched and re-serialised for every chapter on
+ * every SSE progress event; on a 1000+ chapter series that is a lot of wasted
+ * DB read, JSON and client parse several times a second during downloads.
+ */
+export function listChapterProgress(seriesId) {
+  return getDb().prepare(
+    'SELECT id, number, state, volume, prog_done, prog_total, error, cbz_path FROM chapters WHERE series_id = ? ORDER BY CAST(number AS REAL)'
+  ).all(seriesId).map(r => ({
+    id: r.id,
+    number: r.number,
+    state: r.state,
+    volume: r.volume,
+    progDone: r.prog_done ?? null,
+    progTotal: r.prog_total ?? null,
+    error: r.error,
+    cbzPath: r.cbz_path,
+  }));
+}
+
 export function chaptersInState(state, limit = 100) {
   return getDb().prepare(
     `SELECT c.* FROM chapters c

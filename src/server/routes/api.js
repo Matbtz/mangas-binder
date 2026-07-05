@@ -7,7 +7,7 @@ import { searchVolumes } from '../../providers/comicvine.js';
 import { provider as hardcover } from '../../providers/hardcover.js';
 import {
   listSeries, getSeries, updateSeries, deleteSeries, deleteChaptersForSeries,
-  listChaptersForSeries, getChapter, setChapterState, bulkSetChapterState,
+  listChaptersForSeries, listChapterProgress, chapterStateCounts, getChapter, setChapterState, bulkSetChapterState,
   listChaptersInStates, recentHistory, listChapterFilesForSeries, resetStaleDownloads,
 } from '../../core/repo.js';
 import { getDb, logHistory } from '../../core/db.js';
@@ -149,6 +149,16 @@ export default async function apiRoutes(app) {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     return { ...seriesView(s), chapters: listChaptersForSeries(s.id).map(chapterView) };
+  });
+
+  // Lightweight live-progress feed for the detail page's polling tick: only the
+  // fields needed to patch status cells, action buttons and volume badges, so an
+  // active-download refresh several times a second doesn't refetch the whole
+  // series (all chapters, full metadata) each time. See web/app.js liveTick().
+  app.get('/api/series/:id/progress', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    return { counts: chapterStateCounts(s.id), chapters: listChapterProgress(s.id) };
   });
 
   app.get('/api/series/:id/cover', async (req, reply) => {
