@@ -333,7 +333,8 @@ export default async function apiRoutes(app) {
     });
 
     await refreshSeries(s.id);
-    await scanLibrary({ seriesId: s.id });
+    const scan = await scanLibrary({ seriesId: s.id });
+    if (scan.driftedSeries?.includes(s.id)) autoPackageCompleteVolumes(s.id);
     runOnce().catch(() => {});
 
     const updated = getSeries(s.id);
@@ -807,7 +808,7 @@ bindery.push({
 
   app.get('/api/audit-all', async (req, reply) => {
     const db = getDb();
-    const series = db.prepare('SELECT id, title, total_volumes_hint FROM series').all();
+    const series = db.prepare('SELECT id, title, total_volumes_hint, total_chapters_hint FROM series').all();
     const results = [];
 
     for (const s of series) {
@@ -823,7 +824,7 @@ bindery.push({
       // (extrapolate.js), so this audit can never disagree with what the actual
       // assignment logic considers an anomaly — a chapter flagged here is exactly
       // one that resolveVolumes would demote and re-estimate on the next refresh.
-      const { noisy } = sanitizeVolumeMap(volMap, { totalVolumesHint: s.total_volumes_hint || null });
+      const { noisy } = sanitizeVolumeMap(volMap, { totalVolumesHint: s.total_volumes_hint || null, totalChaptersHint: s.total_chapters_hint || null });
       const anomalies = noisy.length
         ? [`${noisy.length} chapter(s) look statistically inconsistent with their assigned volume's neighbors and would be re-estimated on the next refresh: chapter(s) ${[...noisy].sort((a, b) => parseFloat(a) - parseFloat(b)).join(', ')}.`]
         : [];
@@ -1165,7 +1166,16 @@ bindery.push({
   app.post('/api/series/:id/scan-library', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
-    return scanLibrary({ seriesId: s.id });
+    const out = await scanLibrary({ seriesId: s.id });
+    // If an on-disk CBZ turned out to be grouped under a stale volume (its file
+    // label disagreed with the now-authoritative provider volume), rebuild that
+    // series' volumes from the same on-disk pages so the physical CBZs snap onto
+    // the corrected structure — the "rematch existing CBZ" step of a wipe+refresh.
+    if (out.driftedSeries?.includes(s.id)) {
+      autoPackageCompleteVolumes(s.id);
+      logHistory('series.rematch_files', { seriesId: s.id, message: 'repackaging on-disk volumes onto corrected provider volumes' });
+    }
+    return out;
   });
   app.post('/api/series/:id/extrapolate-volumes', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
@@ -1610,15 +1620,18 @@ bindery.push({
   });
 
   // Wipe a series clean: delete every chapter row and clear the cached
-  // volume/chapter hints so the next Refresh & Scan rebuilds the chapter list
-  // and re-resolves volumes from scratch. On-disk files are left untouched (a
-  // following scan re-matches them), which is what makes this the way to clear
-  // stale or mis-estimated volume data from earlier scans.
+  // volume/chapter hints AND the last-scan timestamp, so the next Refresh & Scan
+  // is a genuine from-scratch run that rebuilds the chapter list and re-resolves
+  // volumes from the providers. On-disk files under /books are left untouched —
+  // a following scan re-matches them by chapter membership and (now) snaps them
+  // onto the freshly-resolved provider volumes rather than the reverse, so the
+  // stale volume structure a previous packaging baked into those CBZs can no
+  // longer survive the wipe (see library-scan.js reconcile).
   app.post('/api/series/:id/reset', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const removed = deleteChaptersForSeries(s.id);
-    updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null });
+    updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null, lastScanAt: null });
     logHistory('series.reset', { seriesId: s.id, message: `reset series — cleared ${removed} chapter(s)` });
     return { ok: true, removedChapters: removed };
   });

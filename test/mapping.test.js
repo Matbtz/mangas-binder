@@ -189,6 +189,90 @@ test('resolveVolumes: a fully-tagged but poison-polluted series self-heals to wi
   assert.equal(Math.max(...vols), 5, `no chapter should keep a volume past the 5-volume hint, got ${Math.max(...vols)}`);
 });
 
+test('sanitizeVolumeMap: discards a sparse anchor set whose density contradicts the consensus (the "Pet vol-2 pile-up")', () => {
+  // Refreshed "Pet": the primary provider tagged no volumes, but the DB held
+  // cruft anchors from a since-fixed cross-series override — a lone "vol 3" and
+  // "vol 5" sitting at chapters 62-63 of a 5-volume/55-chapter series. Each tag
+  // is individually plausible and within the volume cap, but the density between
+  // them (½ chapter/volume) is impossible. Left standing they pin ~50 chapters
+  // into the single slot between vol 1 and vol 3. With a confident consensus and
+  // a sparse anchor set, the whole set is dropped so extrapolation re-splits evenly.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = { '1': range(1, 11), '3': ['62'], '5': ['63'] };
+
+  // Without the chapter total we can't judge density → anchors are left alone.
+  const volOnly = sanitizeVolumeMap(volumeMap, { totalVolumesHint: 5 });
+  assert.ok('3' in volOnly.cleanVolumeMap, 'volumes-only hint cannot judge density');
+
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint: 5, totalChaptersHint: 55 });
+  for (const v of ['1', '3', '5']) assert.equal(v in cleanVolumeMap, false, `cruft anchor ${v} should be discarded`);
+  assert.equal(noisy.length, 13, 'all 13 tagged chapters go back to the pool');
+});
+
+test('sanitizeVolumeMap: keeps a sparse BUT consensus-consistent anchor set (vol 1 + vol 10)', () => {
+  // The distinguishing case: two far-apart anchors whose implied density (~11
+  // ch/vol) matches the consensus. These are good sparse anchors and must NOT be
+  // discarded — extrapolation should spread the gap across them.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = { '1': range(1, 7), '10': ['100', '101', '102'] };
+  const { cleanVolumeMap } = sanitizeVolumeMap(volumeMap, { totalVolumesHint: 10, totalChaptersHint: 102 });
+  assert.ok('1' in cleanVolumeMap && '10' in cleanVolumeMap, 'consistent sparse anchors survive');
+});
+
+test('sanitizeVolumeMap: never discards a fully-tagged (dense) series even with an odd volume', () => {
+  // Berserk-like: every volume tagged, ~10 chapters each. The sparse gate must
+  // keep the whole set — Pass 4 only ever fires on a small anchor set.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = {}; let ch = 1;
+  for (let v = 1; v <= 43; v++) { volumeMap[String(v)] = range(ch, ch + 9); ch += 10; }
+  const { cleanVolumeMap, noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint: 43, totalChaptersHint: 430 });
+  assert.equal(Object.keys(cleanVolumeMap).length, 43, 'all volumes kept');
+  assert.equal(noisy.length, 0);
+});
+
+test('extrapolateVolumes: cruft anchors 1/3/5 yield an even 5-volume split, not a 50-chapter volume 2', () => {
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const volumeMap = { '1': range(1, 11), '3': ['62'], '5': ['63'] };
+  const untagged = [...range(12, 61), '64'];
+  const { calculated } = extrapolateVolumes(volumeMap, untagged, 5, false, null, 55);
+  const volNums = Object.keys(calculated).filter(v => v !== 'Specials').map(Number).sort((a, b) => a - b);
+  assert.deepEqual(volNums, [1, 2, 3, 4, 5]);
+  const counts = volNums.map(v => calculated[String(v)].length);
+  assert.ok(Math.max(...counts) - Math.min(...counts) <= 1, `expected an even split, got ${counts}`);
+});
+
+test('extrapolateVolumes: no-anchor split stays even when the run runs past the consensus chapter total', () => {
+  // 64 real chapters against a 55-chapter consensus. Number-based spacing would
+  // clamp chapters 56-64 all into volume 5 (ballooning it to ~20); rank-based
+  // distribution keeps every volume ~even.
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+  const { calculated } = extrapolateVolumes({}, range(1, 64), 5, false, null, 55);
+  const counts = Object.keys(calculated).filter(v => v !== 'Specials').map(v => calculated[v].length);
+  assert.equal(counts.reduce((a, b) => a + b, 0), 64);
+  assert.ok(Math.max(...counts) <= 14, `no volume should balloon, got ${Math.max(...counts)}`);
+});
+
+test('resolveVolumes: end-to-end, cruft anchors inconsistent with the consensus collapse to an even split', () => {
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: 'cruft', title: 'Cruft Series', language: 'en',
+    monitored: true, packagingMode: 'volume', totalVolumesHint: 5, totalChaptersHint: 55,
+  });
+  // Real anchors 1-11 tagged vol 1; two stray cruft tags at chapters 62/63.
+  for (let i = 1; i <= 11; i++) upsertChapter(s.id, { provider: 'mangadex', number: String(i), volume: '1' });
+  upsertChapter(s.id, { provider: 'mangadex', number: '62', volume: '3' });
+  upsertChapter(s.id, { provider: 'mangadex', number: '63', volume: '5' });
+  for (let i = 12; i <= 61; i++) upsertChapter(s.id, { provider: 'mangadex', number: String(i) }); // untagged
+  upsertChapter(s.id, { provider: 'mangadex', number: '64' });
+
+  resolveVolumes(s.id);
+  const chs = listChaptersForSeries(s.id);
+  const byVol = {};
+  for (const c of chs) { const v = parseFloat(c.volume); if (!Number.isNaN(v)) byVol[v] = (byVol[v] || 0) + 1; }
+  const counts = Object.values(byVol);
+  assert.deepEqual(Object.keys(byVol).map(Number).sort((a, b) => a - b), [1, 2, 3, 4, 5]);
+  assert.ok(Math.max(...counts) <= 14, `no volume should hold the whole pile, got ${JSON.stringify(byVol)}`);
+});
+
 test('sanitizeVolumeMap: rejects a mistagged outlier that would overlap the next volume', () => {
   // Mirrors a real MangaDex bug report: volume mins step cleanly by ~9, but one
   // rogue chapter per volume balloons the max far past the next volume's start.

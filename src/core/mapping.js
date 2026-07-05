@@ -44,10 +44,11 @@ export function resolveVolumes(seriesId, { chaptersPerVolume = null } = {}) {
   // fully-tagged-but-polluted series (nothing "unassigned") would early-return
   // and never self-heal on refresh.
   const totalVolumesHint = series.total_volumes_hint || null;
-  const { noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint });
+  const totalChaptersHint = series.total_chapters_hint || null;
+  const { noisy } = sanitizeVolumeMap(volumeMap, { totalVolumesHint, totalChaptersHint });
   if (!unassigned.length && !noisy.length) return { assigned: 0 };
 
-  const { calculated } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, chaptersPerVolume, series.total_chapters_hint || null);
+  const { calculated } = extrapolateVolumes(volumeMap, unassigned, totalVolumesHint, false, chaptersPerVolume, totalChaptersHint);
 
   const upd = getDb().prepare(
     "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ? AND (state NOT IN ('imported', 'bindery') OR volume IS NULL OR volume = '')"

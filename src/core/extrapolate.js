@@ -23,9 +23,17 @@
  *
  * When `totalVolumesHint` is supplied (the cross-provider consensus count), any
  * volume tag numbered *beyond* that total is treated as impossible for THIS
- * series and demoted to `noisy` up front — see Pass 0 below.
+ * series and demoted to `noisy` up front — see Pass 0 below. When
+ * `totalChaptersHint` is also supplied, Pass 4 additionally discards a *sparse*
+ * anchor set whose implied per-volume density contradicts the consensus.
  */
-export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null } = {}) {
+// A realistic tankōbon collects a handful to a few dozen chapters; a density
+// outside this band between two tagged volumes is physically impossible (mirrors
+// volume-consensus.js, kept local to avoid importing the settings chain).
+const MIN_CHS_PER_VOL = 2;
+const MAX_CHS_PER_VOL = 40;
+
+export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null, totalChaptersHint = null } = {}) {
   const noisy = [];
   const cleanVolumeMap = {};
   if (volumeMap.none) cleanVolumeMap.none = [...volumeMap.none];
@@ -123,6 +131,52 @@ export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null } = {}) {
     }
   }
 
+  // Pass 4: sparse-anchor consensus consistency. Passes 1–3 vet each tag against
+  // its *neighbors*, but a handful of stale, mutually-consistent-looking tags can
+  // still contradict the series' real shape. Real case ("Pet", refreshed): the
+  // primary provider tagged zero volumes, yet the DB held cruft anchors from a
+  // since-fixed cross-series override — a lone "vol 3" and "vol 5" sitting at
+  // chapters 62–63 of a 5-volume/55-chapter series. Each is individually plausible,
+  // but the *density between* them (½ a chapter per volume) is impossible, and it
+  // pins ~50 untagged chapters into the single slot between vol 1 and vol 3.
+  // When we have a confident consensus (both totals) and the anchor set is sparse
+  // (few tagged volumes relative to the total), discard the whole set the moment
+  // any consecutive pair's implied chapters-per-volume is impossible or wildly off
+  // the consensus, so extrapolateVolumes falls back to a clean even split. Only
+  // fires when sparse, so a fully-tagged series (Berserk) is never disturbed.
+  if (totalVolumesHint > 0 && totalChaptersHint > 0) {
+    const anchors = [];
+    for (const [vStr, chs] of Object.entries(cleanVolumeMap)) {
+      if (vStr === 'none') continue;
+      const vNum = parseFloat(vStr);
+      if (Number.isNaN(vNum)) continue;
+      let maxCh = -Infinity;
+      for (const c of chs) {
+        if (String(c).includes('.')) continue;
+        const n = parseFloat(c);
+        if (Number.isInteger(n) && n > maxCh) maxCh = n;
+      }
+      if (maxCh > -Infinity) anchors.push({ vNum, maxCh });
+    }
+    anchors.sort((a, b) => a.vNum - b.vNum);
+
+    const consensusCPV = totalChaptersHint / totalVolumesHint;
+    const sparse = anchors.length <= Math.max(3, Math.ceil(totalVolumesHint * 0.4));
+    let inconsistent = false;
+    for (let i = 1; i < anchors.length; i++) {
+      const volSpan = anchors[i].vNum - anchors[i - 1].vNum;
+      if (volSpan <= 0) continue;
+      const density = (anchors[i].maxCh - anchors[i - 1].maxCh) / volSpan;
+      if (density < MIN_CHS_PER_VOL || density > MAX_CHS_PER_VOL ||
+          density < consensusCPV / 2 || density > consensusCPV * 2) { inconsistent = true; break; }
+    }
+    if (sparse && inconsistent) {
+      for (const [vStr, chs] of Object.entries(cleanVolumeMap)) {
+        if (vStr !== 'none' && !Number.isNaN(parseFloat(vStr))) { noisy.push(...chs); delete cleanVolumeMap[vStr]; }
+      }
+    }
+  }
+
   return { cleanVolumeMap, noisy };
 }
 
@@ -165,7 +219,7 @@ export function buildVolumeMapFromChapters(chapters) {
  * chapters against a 12-volume/109-chapter consensus) reported chsPerVol=1.
  */
 export function getVolumeStats(rawVolumeMap, { totalVolumesHint = null, totalChaptersHint = null } = {}) {
-  const { cleanVolumeMap: volumeMap } = sanitizeVolumeMap(rawVolumeMap, { totalVolumesHint });
+  const { cleanVolumeMap: volumeMap } = sanitizeVolumeMap(rawVolumeMap, { totalVolumesHint, totalChaptersHint });
   const knownVols = Object.entries(volumeMap)
     .filter(([k]) => k !== 'none')
     .sort(([a], [b]) => parseFloat(a) - parseFloat(b));
@@ -239,7 +293,7 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
   // a neighboring volume — a single mistagged chapter must not corrupt every
   // boundary derived from it. Rejected chapters rejoin the unassigned pool so
   // they get a fresh, consistent estimate instead of keeping a bad tag.
-  const { cleanVolumeMap: volumeMap, noisy } = sanitizeVolumeMap(rawVolumeMap, { totalVolumesHint });
+  const { cleanVolumeMap: volumeMap, noisy } = sanitizeVolumeMap(rawVolumeMap, { totalVolumesHint, totalChaptersHint });
   const effectiveUnassigned = noisy.length ? [...unassignedChapters, ...noisy] : unassignedChapters;
   if (!effectiveUnassigned.length) return { calculated: {}, overflow: [] };
 
@@ -321,12 +375,19 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
     // Prefer number-based spacing when we also know the real chapter total: it
     // keeps every chapter at its true position and folds any stray
     // out-of-range chapter into the final known volume rather than past it.
-    // Without a chapter total, fall back to rank-based distribution, which is
-    // immune to gaps/outliers in the numbering (a stray "chapter 1190" can't
-    // drag the split apart).
+    // Without a chapter total — or when the actual run has grown meaningfully
+    // past that total (a slightly-stale consensus for an ongoing series, or a
+    // finished series the primary provider lists a few chapters beyond) — fall
+    // back to rank-based distribution, which is immune to gaps/outliers in the
+    // numbering (a stray "chapter 1190" can't drag the split apart) and, crucially,
+    // does not clamp every trailing chapter past the total into the final volume
+    // (which would balloon it — e.g. 64 real chapters against a 55-chapter
+    // consensus dumping chapters 56–64 all into volume 5).
+    const maxIntCh = integers.length ? integers[integers.length - 1].n : 0;
+    const withinTotal = totalChaptersHint && totalChaptersHint > 0 && maxIntCh <= totalChaptersHint * 1.1;
     const perVol = (chsPerVolOverride && chsPerVolOverride > 0)
       ? chsPerVolOverride
-      : (totalChaptersHint && totalChaptersHint > 0 ? Math.max(1, Math.ceil(totalChaptersHint / V)) : null);
+      : (withinTotal ? Math.max(1, Math.ceil(totalChaptersHint / V)) : null);
     if (perVol) {
       for (const { raw, n } of integers) {
         let estVol = Math.max(1, Math.ceil(n / perVol));
