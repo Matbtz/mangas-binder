@@ -81,6 +81,6 @@ test('audit reconciles newly distributed chapters against the library before fla
   assert.equal(series, undefined, 'no issues once the library scan reconciles chapter 2 to the existing file');
 
   const ch2 = listChaptersForSeries(s.id).find(c => c.number === '2');
-  assert.equal(ch2.state, 'imported', 'chapter 2 reconciled to the on-disk CBZ');
+  assert.equal(ch2.state, 'bindery', 'chapter 2 reconciled to the on-disk CBZ');
   assert.ok(ch2.cbz_path?.endsWith('Redistributed Series Vol. 01.cbz'));
 });

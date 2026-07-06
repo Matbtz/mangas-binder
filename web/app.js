@@ -956,7 +956,12 @@ async function showDetail(id) {
       };
       actsContainer.append(autoExtBtn, custVolBtn);
     } else if (isComplete) {
-      actsContainer.append(h('<span class="status-badge imported" style="padding:5px 10px">✓ Available</span>'));
+      const inBindery = chaps.some(c => c.state === 'bindery');
+      if (inBindery) {
+        actsContainer.append(h('<span class="status-badge queued" style="padding:5px 10px;color:#cbb0f7;background:rgba(160,107,240,0.15);border-color:rgba(160,107,240,0.3)">⏳ In Bindery</span>'));
+      } else {
+        actsContainer.append(h('<span class="status-badge imported" style="padding:5px 10px">✓ Available</span>'));
+      }
     } else {
       const missing = chaps.filter(c => !['imported', 'bindery', 'downloaded'].includes(c.state));
       const isMonitored = missing.length > 0 && missing.every(c => ['wanted', 'queued', 'downloading'].includes(c.state));
@@ -1174,6 +1179,7 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
     pendingRow.clear();
     for (const c of chapters) {
       const statusHtml = c.state === 'imported' ? `<span class="status-badge imported" style="font-size:10px">✓ Available</span>`
+        : c.state === 'bindery' ? `<span class="status-badge queued" style="font-size:10px;color:#cbb0f7;background:rgba(160,107,240,0.15);border-color:rgba(160,107,240,0.3)">⏳ Bindery</span>`
         : c.state === 'wanted' ? `<span class="status-badge wanted" style="font-size:10px">● Wanted</span>`
         : c.state === 'skipped' ? `<span class="status-badge skipped" style="font-size:10px">⏸ Skipped</span>`
         : c.state === 'not_found' ? `<span class="status-badge skipped" style="font-size:10px;color:#a0a0a0" title="${esc(c.error||'')}">∅ Not Found</span>`

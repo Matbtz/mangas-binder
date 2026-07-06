@@ -116,10 +116,16 @@ test('upsertChapter language prioritization and upgrade resets', async () => {
 
 test('staging & bindery lifecycle: packaging moves to bindery, scan imports and prunes staging', async () => {
   const { scanLibrary } = await import('../src/core/library-scan.js');
+  const { setSetting } = await import('../src/core/settings.js');
+  const { renameSync } = await import('fs');
   const s = createSeries({
     provider: 'mangadex', providerSeriesId: 'bindery-lifecycle',
     title: 'Lifecycle Series', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume', status: 'completed'
   });
+
+  const booksDir = path.join(tmp, 'books');
+  mkdirSync(booksDir, { recursive: true });
+  setSetting('libraryScanDirs', `${process.env.OUTPUT_DIR},${booksDir}`);
 
   // Seed chapter 1 as downloaded
   seedDownloaded(s.id, '1', '1');
@@ -135,7 +141,15 @@ test('staging & bindery lifecycle: packaging moves to bindery, scan imports and 
   assert.equal(ch.state, 'bindery', 'chapter should be in bindery state after packaging');
   assert.ok(existsSync(sDir), 'staging folder should still exist while in bindery state');
 
-  // Run library scan (it scans outputDir where the CBZ was created)
+  // Move the packaged CBZ from bindery/output folder to the books folder (simulating Tome import)
+  const binderyCbzPath = ch.cbz_path;
+  const filename = path.basename(binderyCbzPath);
+  const booksSeriesDir = path.join(booksDir, 'Lifecycle Series');
+  mkdirSync(booksSeriesDir, { recursive: true });
+  const booksCbzPath = path.join(booksSeriesDir, filename);
+  renameSync(binderyCbzPath, booksCbzPath);
+
+  // Run library scan (it scans outputDir + booksDir)
   const scanResult = await scanLibrary({ seriesId: s.id });
   assert.equal(scanResult.markedChapters, 1, 'scanner should detect and mark 1 chapter as imported');
 

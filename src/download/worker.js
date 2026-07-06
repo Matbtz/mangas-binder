@@ -217,16 +217,16 @@ export async function cancelChapter(id) {
   if (controller) {
     controller.abort();
   }
-  if (['wanted', 'queued', 'downloading', 'downloaded', 'bindery', 'failed'].includes(ch.state)) {
+  if (['wanted', 'queued', 'downloading', 'downloaded', 'failed'].includes(ch.state)) {
     setChapterState(id, 'skipped', { error: null, prog_done: null, prog_total: null });
     await cleanupStaging(ch.series_id, ch.number);
   }
   return { ok: true, aborted: !!controller };
 }
 
-/** Cancel every active (queued/in-flight/downloaded) chapter for a series. */
+/** Cancel every active (queued/in-flight) chapter for a series. */
 export async function cancelSeries(seriesId) {
-  const active = listChaptersInStates(['wanted', 'queued', 'downloading', 'downloaded', 'bindery', 'failed'], { seriesId, limit: 100000 });
+  const active = listChaptersInStates(['wanted', 'queued', 'downloading', 'failed'], { seriesId, limit: 100000 });
   for (const ch of active) await cancelChapter(ch.id);
   return { ok: true, cancelled: active.length };
 }
