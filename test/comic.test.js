@@ -47,10 +47,24 @@ test('ComicInfo comic mode: Publisher set, no Manga/B&W flags, ComicVine Web', (
   assert.doesNotMatch(xml, /<BlackAndWhite>/);
 });
 
-test('manga mode still emits Manga + B&W flags', () => {
+test('manga mode still emits Manga + B&W flags (right-to-left pagination)', () => {
   const xml = buildComicInfoXml({ series: 'X', number: '1', mediaType: 'manga' });
-  assert.match(xml, /<Manga>Yes<\/Manga>/);
+  assert.match(xml, /<Manga>YesAndRightToLeft<\/Manga>/);
   assert.match(xml, /<BlackAndWhite>Yes<\/BlackAndWhite>/);
+});
+
+test('ComicInfo enrichment: Count from total volumes, SeriesSort drops leading article, localized volume title', () => {
+  const xml = buildComicInfoXml({
+    series: 'The Promised Neverland', volumeNum: '3', mediaType: 'manga',
+    totalVolumes: 20, volumeTitle: 'Destroy',
+  });
+  assert.match(xml, /<Count>20<\/Count>/);
+  assert.match(xml, /<SeriesSort>Promised Neverland<\/SeriesSort>/);
+  assert.match(xml, /<Title>Destroy<\/Title>/); // localized volume title beats "…, Vol. 3"
+  // A series without a leading article emits no SeriesSort (nothing to reorder).
+  assert.doesNotMatch(buildComicInfoXml({ series: 'Berserk', volumeNum: '1' }), /<SeriesSort>/);
+  // No Count when the total is unknown.
+  assert.doesNotMatch(buildComicInfoXml({ series: 'Berserk', volumeNum: '1' }), /<Count>/);
 });
 
 test('issue/volume CBZ filenames', () => {

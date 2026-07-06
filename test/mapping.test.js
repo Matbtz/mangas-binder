@@ -209,14 +209,21 @@ test('sanitizeVolumeMap: discards a sparse anchor set whose density contradicts 
   assert.equal(noisy.length, 13, 'all 13 tagged chapters go back to the pool');
 });
 
-test('sanitizeVolumeMap: keeps a sparse BUT consensus-consistent anchor set (vol 1 + vol 10)', () => {
-  // The distinguishing case: two far-apart anchors whose implied density (~11
-  // ch/vol) matches the consensus. These are good sparse anchors and must NOT be
-  // discarded — extrapolation should spread the gap across them.
+test('sanitizeVolumeMap: keeps a sparse but FULLY-tagged anchor set (two complete volumes tagged far apart)', () => {
+  // The distinguishing case from the under-populated stubs: two far-apart but
+  // *complete* volumes (10 chapters each) whose implied density matches the
+  // consensus. These are trustworthy sparse anchors and must NOT be discarded —
+  // extrapolation should spread the gap across them.
   const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
-  const volumeMap = { '1': range(1, 7), '10': ['100', '101', '102'] };
-  const { cleanVolumeMap } = sanitizeVolumeMap(volumeMap, { totalVolumesHint: 10, totalChaptersHint: 102 });
-  assert.ok('1' in cleanVolumeMap && '10' in cleanVolumeMap, 'consistent sparse anchors survive');
+  const volumeMap = { '1': range(1, 10), '10': range(91, 100) };
+  const { cleanVolumeMap } = sanitizeVolumeMap(volumeMap, { totalVolumesHint: 10, totalChaptersHint: 100 });
+  assert.ok('1' in cleanVolumeMap && '10' in cleanVolumeMap, 'full sparse anchors survive');
+});
+
+test('sanitizeVolumeMap: routes an out-of-sequence "Volume 0" tag to Specials, not a phantom integer anchor', () => {
+  const { cleanVolumeMap } = sanitizeVolumeMap({ '0': ['0'], '1': ['1', '2', '3'] }, { totalVolumesHint: 5, totalChaptersHint: 50 });
+  assert.equal('0' in cleanVolumeMap, false, 'no volume 0 in the integer sequence');
+  assert.ok(cleanVolumeMap['Specials']?.includes('0'), 'the vol-0 chapter is bucketed as a Special');
 });
 
 test('sanitizeVolumeMap: never discards a fully-tagged (dense) series even with an odd volume', () => {

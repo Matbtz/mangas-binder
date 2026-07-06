@@ -41,13 +41,14 @@ function parseSeries(series) {
   };
 }
 
-function comicInfoFor(series, { volumeNum = '', chapterNum = null, title = '', calculated = false } = {}) {
+function comicInfoFor(series, { volumeNum = '', chapterNum = null, title = '', volumeTitle = '', calculated = false } = {}) {
   const s = parseSeries(series);
   return buildComicInfoXml({
     series: s.title,
     volumeNum,
     number: chapterNum,
     title,
+    volumeTitle,
     authors: s.authors,
     artists: s.artists,
     description: s.description,
@@ -58,6 +59,8 @@ function comicInfoFor(series, { volumeNum = '', chapterNum = null, title = '', c
     mediaType: s.mediaType,
     isCalculated: calculated,
     language: series.language || 'en',
+    // Total-volume consensus (when known) → <Count> for reader progress badges.
+    totalVolumes: series.total_volumes_hint ?? null,
   });
 }
 

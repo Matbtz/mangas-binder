@@ -51,6 +51,20 @@ export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null, totalCha
     .filter(([, vNum]) => !Number.isNaN(vNum))
     .sort((a, b) => a[1] - b[1]);
 
+  // A "Volume 0" (or negative) tag is out of the main 1..N tankōbon sequence —
+  // a prologue/promo bucket, not real volume 0 of the run (a real case: Fool
+  // Night surfaced a lone "vol 0" chapter). Route it to Specials instead of
+  // seeding a phantom integer anchor, per the report's out-of-sequence guidance.
+  const specialsFromZero = [];
+  const inSequenceVols = [];
+  for (const entry of allNumericVols) {
+    if (entry[1] <= 0) specialsFromZero.push(...entry[2]);
+    else inSequenceVols.push(entry);
+  }
+  if (specialsFromZero.length) {
+    cleanVolumeMap['Specials'] = [...(cleanVolumeMap['Specials'] || []), ...specialsFromZero];
+  }
+
   // Pass 0: reject volume tags numbered beyond the series' known total. A tag
   // like "Volume 89" on a finished 5-volume series (real case: "Pet", whose DB
   // was polluted by a since-fixed cross-series MangaUpdates release override and
@@ -62,7 +76,7 @@ export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null, totalCha
   // extrapolateVolumes re-estimates their chapters back inside [1..hint].
   const volCap = totalVolumesHint > 0 ? Math.floor(totalVolumesHint) : null;
   const knownVols = [];
-  for (const entry of allNumericVols) {
+  for (const entry of inSequenceVols) {
     const [, vNum, chs] = entry;
     if (volCap != null && vNum > volCap) { noisy.push(...chs); continue; }
     knownVols.push(entry);
@@ -146,17 +160,18 @@ export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null, totalCha
   // fires when sparse, so a fully-tagged series (Berserk) is never disturbed.
   if (totalVolumesHint > 0 && totalChaptersHint > 0) {
     const anchors = [];
+    let intAnchorChapters = 0;
     for (const [vStr, chs] of Object.entries(cleanVolumeMap)) {
       if (vStr === 'none') continue;
       const vNum = parseFloat(vStr);
       if (Number.isNaN(vNum)) continue;
-      let maxCh = -Infinity;
+      let maxCh = -Infinity, intCount = 0;
       for (const c of chs) {
         if (String(c).includes('.')) continue;
         const n = parseFloat(c);
-        if (Number.isInteger(n) && n > maxCh) maxCh = n;
+        if (Number.isInteger(n)) { intCount++; if (n > maxCh) maxCh = n; }
       }
-      if (maxCh > -Infinity) anchors.push({ vNum, maxCh });
+      if (maxCh > -Infinity) { anchors.push({ vNum, maxCh }); intAnchorChapters += intCount; }
     }
     anchors.sort((a, b) => a.vNum - b.vNum);
 
@@ -170,7 +185,14 @@ export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null, totalCha
       if (density < MIN_CHS_PER_VOL || density > MAX_CHS_PER_VOL ||
           density < consensusCPV / 2 || density > consensusCPV * 2) { inconsistent = true; break; }
     }
-    if (sparse && inconsistent) {
+    // Under-populated: the tagged volumes hold far fewer chapters than the
+    // consensus says a volume should — i.e. they're *incomplete* tags (Fool
+    // Night: a lone "vol 1"=ch2 and "vol 11"=ch93/94, ~1.5 ch/volume against a
+    // ~9 consensus). Interpolating between such stubs yields tiny end volumes and
+    // a ballooned tail; a consensus even split is strictly better. Full-but-sparse
+    // anchors (two genuinely complete volumes tagged far apart) survive.
+    const underPopulated = anchors.length > 0 && (intAnchorChapters / anchors.length) < consensusCPV * 0.6;
+    if (sparse && (inconsistent || underPopulated)) {
       for (const [vStr, chs] of Object.entries(cleanVolumeMap)) {
         if (vStr !== 'none' && !Number.isNaN(parseFloat(vStr))) { noisy.push(...chs); delete cleanVolumeMap[vStr]; }
       }
@@ -471,6 +493,9 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
       if (capAtHint) { overflow.push(chStr); continue; }
       estVol = Math.floor(totalVolumesHint);
     }
+    // Chapters that precede the first anchor have baseVol 0 and get clamped to
+    // boundedNextVol-1, which can be 0 — never mint a "volume 0"; floor at 1.
+    estVol = Math.max(1, estVol);
     (calculated[String(estVol)] ||= []).push(chStr);
   }
 
