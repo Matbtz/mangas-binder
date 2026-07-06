@@ -1,6 +1,6 @@
 import { getProvider, defaultDownloadProvider } from '../providers/index.js';
-import { fetchChapterVolumeMap } from '../providers/mangaupdates.js';
 import { consultVolumeProviders } from './volume-consensus.js';
+import { resolveChapterVolumeMap, readCachedExternal, serializeExternalCache } from './chapter-map-consensus.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
   upsertChapter, chapterStateCounts, listChaptersForSeries, bulkSetChapterState,
@@ -157,29 +157,32 @@ export async function refreshSeries(seriesId) {
         }
       }
 
-      // Cross-check MangaDex's volume tags against MangaUpdates' release records.
-      // Each MU release record carries the chapter number AND the volume it
-      // belongs to, giving authoritative boundaries for series where the MangaDex
-      // aggregate is sparse or its scanlation-group tags are inconsistent (e.g.
-      // Dandadan, One Piece English simulpubs). We always fill chapters MangaDex
-      // left null, and — since MU volumes reflect official releases rather than
-      // per-group tagging — we also prefer MU's value when it *disagrees* with
-      // MangaDex for a chapter, rather than only ever filling gaps. (extrapolate.js
-      // still sanitizes the result, so this is a second, independent vote, not a
-      // blind override.) This per-chapter mapping stays MangaUpdates-exclusive —
-      // the other cross-checks only supply total counts, not a chapter-by-chapter
-      // breakdown.
-      if (mangaUpdatesRef?.seriesId) {
-        try {
-          const { map: muVolMap } = await fetchChapterVolumeMap(mangaUpdatesRef.seriesId, mangaUpdatesRef.seriesTitle || series.title);
-          if (muVolMap.size > 0) {
-            for (const ch of chapters) {
-              const v = muVolMap.get(String(parseFloat(ch.number)));
-              if (v && v !== ch.volume) ch.volume = v;
-            }
-          }
-        } catch { /* non-fatal — proceed without MU volume data */ }
-      }
+      // Resolve a per-chapter volume map across all enabled sources and prefer
+      // it over MangaDex's crowd-sourced tags. Priority (see
+      // chapter-map-consensus.js) puts the physical-edition chapter lists on top:
+      //   mangadex tags < mangaupdates releases < fandom < wikipedia
+      // Each source's map is plausibility-guarded, and extrapolate.js still
+      // sanitizes the result, so a wiki table is an authoritative anchor set, not
+      // a blind override. With Wikipedia/Fandom disabled this is exactly the old
+      // MangaDex→MangaUpdates behaviour.
+      //
+      // The external (non-MangaDex) sources are the slow/rate-limited part, so
+      // their result is cached on the series row (chapter_map_cache_json) and
+      // reused for chapterMapCacheHours before re-fetching — only refreshSeries
+      // ever writes this cache (previewRefreshSeries only reads it: see its own
+      // "never persisted" contract below).
+      try {
+        const ttlMs = Number(getSetting('chapterMapCacheHours', 24)) * 3600000;
+        const cachedExternal = readCachedExternal(series, ttlMs);
+        const { map: chMap, external, externalFromCache } = await resolveChapterVolumeMap(
+          series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, cachedExternal }
+        );
+        if (!externalFromCache) updateSeries(seriesId, { chapterMapCache: serializeExternalCache(external) });
+        for (const ch of chapters) {
+          const hit = chMap.get(String(parseFloat(ch.number)));
+          if (hit && hit.volume && hit.volume !== ch.volume) ch.volume = hit.volume;
+        }
+      } catch { /* non-fatal — proceed without cross-source volume data */ }
     } catch (err) {
       // Non-fatal, but never silent: when the consensus lookup fails, the
       // chapter list is NOT gap-filled up to the series' real latest chapter,
@@ -335,18 +338,34 @@ export async function previewRefreshSeries(seriesId) {
       }
     }
 
-    if (mangaUpdatesRef?.seriesId) {
-      try {
-        const { map: muVolMap, checked, verified, rejected } = await fetchChapterVolumeMap(mangaUpdatesRef.seriesId, mangaUpdatesRef.seriesTitle || series.title);
-        mangaUpdates.releasesChecked = checked;
-        mangaUpdates.releasesVerified = verified;
-        mangaUpdates.releasesRejectedMismatch = rejected;
-        for (const ch of chapters) {
-          const v = muVolMap.get(String(parseFloat(ch.number)));
-          if (v && v !== ch.volume) { ch.volume = v; ch.volumeSource = 'mangaupdates'; mangaUpdates.volumeOverrides++; }
+    try {
+      // Read-only cache reuse: a fresh cache skips the slow external lookups so
+      // the preview stays snappy, but — per this function's "never persisted"
+      // contract — a cache MISS here is never written back; only refreshSeries
+      // (which actually commits the refresh) is allowed to populate the cache.
+      const ttlMs = Number(getSetting('chapterMapCacheHours', 24)) * 3600000;
+      const cachedExternal = readCachedExternal(series, ttlMs);
+      const { map: chMap, counts, reports } = await resolveChapterVolumeMap(series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, cachedExternal });
+      // Apply the merged map; a chapter whose winning source isn't MangaDex is an
+      // override of (or a fill beyond) MangaDex's own tag.
+      for (const ch of chapters) {
+        const hit = chMap.get(String(parseFloat(ch.number)));
+        if (hit && hit.volume) {
+          if (hit.volume !== ch.volume) { ch.volume = hit.volume; mangaUpdates.volumeOverrides++; }
+          if (hit.source !== 'mangadex') ch.volumeSource = hit.source;
         }
-      } catch { mangaUpdates.volumeMapError = true; }
-    }
+      }
+      const muReport = reports.find(r => r.name === 'MangaUpdates');
+      if (muReport) {
+        mangaUpdates.releasesChecked = muReport.releasesChecked || 0;
+        mangaUpdates.releasesVerified = muReport.releasesVerified || 0;
+        mangaUpdates.releasesRejectedMismatch = muReport.releasesRejectedMismatch || 0;
+      }
+      mangaUpdates.chapterMapSources = counts; // per-source anchor counts
+      // Surface each per-chapter source (Wikipedia/Fandom/MangaUpdates) in the
+      // preview so the report shows where the volume boundaries came from.
+      for (const r of reports) if (r.name !== 'MangaDex') providersConsulted.push(r);
+    } catch { mangaUpdates.volumeMapError = true; }
 
     providersConsulted.push({
       name: 'Consensus',

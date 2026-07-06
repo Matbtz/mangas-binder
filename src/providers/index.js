@@ -6,6 +6,7 @@ import { provider as hardcover } from './hardcover.js';
 import { provider as mangakatana } from './mangakatana.js';
 import { provider as fandom } from './fandom.js';
 import { provider as mangabaka } from './mangabaka.js';
+import { provider as wikipedia } from './wikipedia.js';
 
 /**
  * Provider registry. Every source registers here; the rest of the app only
@@ -32,6 +33,7 @@ const REGISTRY = new Map([
   [mangakatana.name, mangakatana],
   [fandom.name, fandom],
   [mangabaka.name, mangabaka],
+  [wikipedia.name, wikipedia],
 ]);
 
 /** All registered providers (regardless of enabled state). */

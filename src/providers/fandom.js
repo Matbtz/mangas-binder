@@ -1,4 +1,5 @@
 import { titlesMatch } from '../core/text-match.js';
+import { parseChapterVolumeMap } from './wiki-client.js';
 
 /**
  * Best-effort cross-check of a series' total volume/chapter counts against its
@@ -222,6 +223,39 @@ export async function fetchVolumeInfo(title) {
   return toResult(wiki.domain, pageTitle, counts);
 }
 
+/**
+ * Per-chapter volume map from a franchise's Fandom wiki — the "deep granularity"
+ * layer the report highlights for fast-moving titles where Wikipedia's list lags
+ * (e.g. Dandadan, whose Fandom wiki tracks every volume long before Wikipedia).
+ * Reuses the same wiki discovery as the total-count cross-check, then tries the
+ * page titles that typically hold a chapter/volume table and parses it via the
+ * shared wiki-client parser. Fails closed (returns null) on anything it can't
+ * verify against the series title or parse into a non-empty map.
+ *
+ * @returns {Promise<{ map: Map<string,string>, volumeTitles: Map<string,string>,
+ *   matchedTitle: string, sourceUrl: string } | null>}
+ */
+export async function fetchChapterVolumeMap(title) {
+  const wiki = await findWiki(title);
+  if (!wiki) return null;
+  const candidates = [
+    `List of ${title} chapters`, 'List of Chapters', 'Chapters',
+    `${title} (Manga)`, title, 'Volumes',
+  ];
+  for (const pageTitle of candidates) {
+    const wikitext = await fetchPageWikitext(wiki.domain, pageTitle);
+    if (!wikitext) continue;
+    const { map, volumeTitles } = parseChapterVolumeMap(wikitext, 'en');
+    if (map.size > 0) {
+      return {
+        map, volumeTitles, matchedTitle: pageTitle,
+        sourceUrl: `https://${wiki.domain}/wiki/${encodeURIComponent(pageTitle.replace(/ /g, '_'))}`,
+      };
+    }
+  }
+  return null;
+}
+
 /** Lightweight reachability check for the Settings "Test connection" button. */
 export async function testConnection() {
   const res = await fetchVolumeInfo('One Piece');
@@ -239,5 +273,6 @@ export const provider = {
   label: 'Fandom Wiki',
   capabilities: { download: false, metadata: false },
   fetchVolumeInfo,
+  fetchChapterVolumeMap,
   testConnection,
 };

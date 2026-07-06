@@ -11,6 +11,7 @@ import { config } from './config.js';
 import { extractToStaging, extractChaptersFromArchive } from '../download/archive-downloader.js';
 import { getSeries, getChapter, listChaptersForSeries, setChapterState } from './repo.js';
 import { getProvider } from '../providers/index.js';
+import { getVolumeTitle } from './chapter-map-consensus.js';
 import { logHistory } from './db.js';
 
 /**
@@ -41,13 +42,14 @@ function parseSeries(series) {
   };
 }
 
-function comicInfoFor(series, { volumeNum = '', chapterNum = null, title = '', calculated = false } = {}) {
+function comicInfoFor(series, { volumeNum = '', chapterNum = null, title = '', volumeTitle = '', calculated = false } = {}) {
   const s = parseSeries(series);
   return buildComicInfoXml({
     series: s.title,
     volumeNum,
     number: chapterNum,
     title,
+    volumeTitle,
     authors: s.authors,
     artists: s.artists,
     description: s.description,
@@ -58,6 +60,8 @@ function comicInfoFor(series, { volumeNum = '', chapterNum = null, title = '', c
     mediaType: s.mediaType,
     isCalculated: calculated,
     language: series.language || 'en',
+    // Total-volume consensus (when known) → <Count> for reader progress badges.
+    totalVolumes: series.total_volumes_hint ?? null,
   });
 }
 
@@ -196,7 +200,11 @@ export async function bindVolume(series, volumeLabel, chapters, { calculated = f
   const localChapters = {};
   for (const n of nums) localChapters[n] = chapterStagingDir(series.id, n);
 
-  const comicInfoXml = comicInfoFor(series, { volumeNum: volumeLabel === 'none' ? '' : volumeLabel, calculated });
+  // Best-effort localized tome title (e.g. "Romance Dawn" for One Piece vol 1)
+  // from the cached cross-source chapter map, if one was resolved for this
+  // series — falls back to the generic "<Series>, Vol. N" auto-title otherwise.
+  const volumeTitle = volumeLabel !== 'none' ? getVolumeTitle(series, volumeLabel) : '';
+  const comicInfoXml = comicInfoFor(series, { volumeNum: volumeLabel === 'none' ? '' : volumeLabel, volumeTitle, calculated });
   const coverBuffer = await maybeCover(coverUrl);
   const label = `${series.title} Vol. ${volumeLabel}`;
   const resolved = await resolvePreprocess('volume.postprocess', label, series);

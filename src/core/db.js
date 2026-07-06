@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS series (
   total_volumes_hint INTEGER,
   total_chapters_hint INTEGER,
   last_scan_at       TEXT,
+  chapter_map_cache_json TEXT,                        -- cached external (non-MangaDex) per-chapter volume map
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(provider, provider_series_id)
@@ -126,6 +127,7 @@ function migrate(database) {
   add('monitor_from_volume', 'monitor_from_volume REAL');
   add('external_links_json', 'external_links_json TEXT');
   add('total_chapters_hint', 'total_chapters_hint INTEGER');
+  add('chapter_map_cache_json', 'chapter_map_cache_json TEXT');
   const chCols = database.prepare('PRAGMA table_info(chapters)').all().map(c => c.name);
   const addCh = (name, ddl) => { if (!chCols.includes(name)) database.exec(`ALTER TABLE chapters ADD COLUMN ${ddl}`); };
   addCh('download_url', 'download_url TEXT');

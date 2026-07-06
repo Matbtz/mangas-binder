@@ -1631,7 +1631,10 @@ bindery.push({
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const removed = deleteChaptersForSeries(s.id);
-    updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null, lastScanAt: null });
+    // Also drop the cached external (Wikipedia/Fandom/MangaUpdates) chapter map
+    // (core/chapter-map-consensus.js) so a wipe forces a genuinely fresh
+    // cross-source lookup on the next refresh, not a stale cached one.
+    updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null, lastScanAt: null, chapterMapCache: null });
     logHistory('series.reset', { seriesId: s.id, message: `reset series — cleared ${removed} chapter(s)` });
     return { ok: true, removedChapters: removed };
   });

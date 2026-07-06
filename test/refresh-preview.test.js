@@ -16,9 +16,10 @@ process.env.STAGING_DIR = path.join(tmp, 'staging');
 process.env.LOG_LEVEL = 'silent';
 
 const { buildApp } = await import('../src/server/app.js');
-const { setSetting } = await import('../src/core/settings.js');
+const { setSetting, setProviderEnabled } = await import('../src/core/settings.js');
 const { createSeries, upsertChapter, listChaptersForSeries, setChapterState } = await import('../src/core/repo.js');
 const { previewRefreshSeries } = await import('../src/core/series-service.js');
+const { provider: wikipedia } = await import('../src/providers/wikipedia.js');
 const { closeDb } = await import('../src/core/db.js');
 
 const app = await buildApp();
@@ -221,6 +222,37 @@ test('previewRefreshSeries: a transient MangaUpdates failure is reported as "loo
   // providers that did answer.
   assert.equal(report.mangaUpdates.totalVolumesHint, 24);
   assert.equal(report.mangaUpdates.latestChapterHint, 239);
+});
+
+test('previewRefreshSeries: an enabled Wikipedia chapter-map anchors the volumes directly instead of extrapolating (the "Fool Night" fix)', async () => {
+  // Fool Night: MangaDex hosts almost nothing (3 tagged chapters), but the
+  // (French) Wikipedia chapter list maps the whole run. With Wikipedia enabled,
+  // the breakdown must follow the wiki's exact 12-volume mapping, not a lumpy
+  // extrapolation, and cite Wikipedia as the per-chapter source.
+  const s = createSeries({ provider: 'mangadex', providerSeriesId: 'pvfn', title: 'Fool Night', language: 'en', monitored: true, packagingMode: 'volume' });
+  mockProvidersFor({ '2': '1', '93': '11', '94': '11' }, {
+    totalVolumes: 12, latestChapter: 109,
+    crossChecks: { mangabaka: { title: 'Fool Night', volumes: 12, chapters: 109, status: 'completed' } },
+  });
+  // Stub the Wikipedia provider with a complete, even ch→vol map (9/vol).
+  const wikiMap = new Map();
+  for (let ch = 1; ch <= 108; ch++) wikiMap.set(String(ch), String(Math.ceil(ch / 9)));
+  setProviderEnabled('wikipedia', true);
+  const realWiki = wikipedia.fetchChapterVolumeMap;
+  wikipedia.fetchChapterVolumeMap = async () => ({ map: wikiMap, volumeTitles: new Map(), matchedTitle: 'Liste des chapitres de Fool Night', sourceUrl: 'https://fr.wikipedia.org/wiki/x', lang: 'fr' });
+  try {
+    const report = await previewRefreshSeries(s.id);
+    const vols = Object.keys(report.volumeBreakdown).filter(v => v !== 'Specials' && v !== 'none').map(Number).sort((a, b) => a - b);
+    assert.equal(Math.min(...vols), 1, 'no phantom vol 0');
+    assert.equal(Math.max(...vols), 12, 'wiki maps exactly 12 volumes');
+    // Each wiki-anchored volume holds ~9 chapters (even), not a ballooned tail.
+    const counts = vols.map(v => report.volumeBreakdown[String(v)]);
+    assert.ok(Math.max(...counts) - Math.min(...counts) <= 2, `even wiki-sourced split, got ${JSON.stringify(report.volumeBreakdown)}`);
+    assert.ok(report.providersConsulted.some(p => p.name === 'Wikipedia' && p.mapped > 0), 'Wikipedia cited as a per-chapter source');
+  } finally {
+    wikipedia.fetchChapterVolumeMap = realWiki;
+    setProviderEnabled('wikipedia', false);
+  }
 });
 
 test('GET /api/series/:id/refresh-preview returns the same report shape over HTTP', async () => {

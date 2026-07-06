@@ -150,6 +150,34 @@ To enable:
 > `parseChapterImages`) and is the only place to fix. Downloaded pages are validated by
 > magic bytes, so a Cloudflare challenge page served as an "image" is rejected and retried.
 
+### Wikipedia chapter-map cross-check (opt-in, needs validation before use)
+
+Wikipedia's "List of `<X>` chapters" tables mirror the physical tankōbon volume
+boundaries, so where one exists it's a better source of chapter→volume anchors than
+crowd-sourced MangaDex tags or MangaUpdates' release feed. When enabled,
+`src/providers/wikipedia.js` resolves it (cascading English → French, since some
+seinen titles only have a complete French chapter list) and merges it into the
+per-chapter volume consensus (`src/core/chapter-map-consensus.js`) at the top
+priority: `mangadex tags < mangaupdates releases < fandom < wikipedia`. Fandom's
+per-volume category pages (`src/providers/fandom.js`) feed the same consensus for
+titles whose Wikipedia list lags behind current releases.
+
+**Wikipedia is disabled by default** (unlike Fandom/MangaBaka's total-count
+cross-checks). Its chapter-list parser (`src/providers/wiki-client.js`) was written
+and unit-tested against representative wikitext fixtures without live access to
+wikipedia.org (some deployment/CI environments block it by network policy) — so
+before flipping it on in **Settings → Sources**, run:
+
+```
+node scripts/smoke-wiki-parsers.mjs
+```
+
+with real network access, and eyeball the printed chapter→volume mappings against
+the actual chapter lists for a couple of series you follow. Every step fails closed
+(an unrecognised page/table structure yields no map, never a guess), so worst case
+it contributes nothing — but it's worth confirming it parses real markup correctly
+before it starts anchoring your library's volume boundaries.
+
 ### Library reconciliation (already-owned detection)
 
 mangas-binder scans your CBZ library to avoid re-fetching what you already have:
