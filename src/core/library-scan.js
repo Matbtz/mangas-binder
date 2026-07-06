@@ -392,8 +392,7 @@ async function _scanLibrary({ seriesId } = {}) {
     let matchedCount = 0;
     for (const num of info.chapters) {
       const row = index.get(String(parseFloat(num)));
-<<<<<<< HEAD
-      if (!row || row.state === 'imported') continue;
+      if (!row || row.state === 'imported' || row.state === targetState) continue;
       // Adopt the file's volume label ONLY when the chapter has no volume of its
       // own — the provider/consensus volume is authoritative (see module header),
       // so a stale CBZ can't overwrite a freshly-resolved boundary. A chapter that
@@ -404,19 +403,9 @@ async function _scanLibrary({ seriesId } = {}) {
       else if (hasVolume && info.volume && String(parseFloat(info.volume)) !== String(parseFloat(row.volume))) {
         driftedSeries.add(match.id); // file groups this chapter under a stale volume
       }
-      setChapterState(row.id, 'imported', extra);
-      row.state = 'imported';
-      if (!hasVolume && info.volume) row.volume = info.volume;
-=======
-      if (!row || row.state === 'imported' || row.state === targetState) continue;
-      setChapterState(row.id, targetState, {
-        cbz_path: file,
-        calculated: 0,
-        language: match.language || 'en',
-        ...(info.volume ? { volume: info.volume } : {}),
-      });
+      setChapterState(row.id, targetState, extra);
       row.state = targetState;
->>>>>>> fix/mangakatana-add-series
+      if (!hasVolume && info.volume) row.volume = info.volume;
       markedChapters++;
       matchedCount++;
       perSeries[match.title] = (perSeries[match.title] || 0) + 1;
