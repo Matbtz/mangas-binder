@@ -92,7 +92,7 @@ test('scanLibrary keeps the freshly-resolved provider volume and does NOT re-sta
 
   const chs = Object.fromEntries(listChaptersForSeries(s.id).map(c => [c.number, c]));
   for (const n of ['60', '61', '62']) {
-    assert.equal(chs[n].state, 'imported', `ch ${n} owned`);
+    assert.equal(chs[n].state, 'bindery', `ch ${n} owned`);
     assert.ok(chs[n].cbz_path?.endsWith('Rematch Series Vol. 03.cbz'), `ch ${n} linked to the on-disk file`);
   }
   // The provider volume wins — the stale "3" label must NOT come back.

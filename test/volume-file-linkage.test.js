@@ -159,7 +159,8 @@ test('library-dir scan matches a volume-named image folder by volume, not chapte
 
   const chs = listChaptersForSeries(s.id);
   assert.notEqual(chs.find(c => c.number === '12').state, 'imported', 'chapter 12 must not be claimed by the v12 folder');
+  assert.notEqual(chs.find(c => c.number === '12').state, 'bindery', 'chapter 12 must not be claimed by the v12 folder');
   for (const n of ['111', '112']) {
-    assert.equal(chs.find(c => c.number === n).state, 'imported', `chapter ${n} (volume 12) owned via the v12 folder`);
+    assert.equal(chs.find(c => c.number === n).state, 'bindery', `chapter ${n} (volume 12) owned via the v12 folder`);
   }
 });
