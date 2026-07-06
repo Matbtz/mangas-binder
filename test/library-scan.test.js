@@ -10,11 +10,12 @@ process.env.OUTPUT_DIR = path.join(tmp, 'out');
 process.env.STAGING_DIR = path.join(tmp, 'staging');
 
 const { ensureSeeded } = await import('../src/core/settings.js');
-const { createSeries, upsertChapter, listChaptersForSeries, setChapterState } = await import('../src/core/repo.js');
+const { createSeries, upsertChapter, listChaptersForSeries, setChapterState, updateSeries, getSeries } = await import('../src/core/repo.js');
 const { chapterStagingDir } = await import('../src/download/downloader.js');
 const { bindVolume } = await import('../src/core/binder.js');
 const { scanLibrary, readCbzInfo } = await import('../src/core/library-scan.js');
 const { getDb, closeDb } = await import('../src/core/db.js');
+const AdmZip = (await import('adm-zip')).default;
 
 ensureSeeded();
 after(() => { closeDb(); rmSync(tmp, { recursive: true, force: true }); });
@@ -172,5 +173,28 @@ test('scanLibrary prunes missing chapter files and resets state to wanted', asyn
   const pruned = chs.find(c => c.number === '10');
   assert.equal(pruned.state, 'wanted');
   assert.equal(pruned.cbz_path, null);
+});
+
+test('bindVolume writes a localized volume title into ComicInfo.xml when the cached chapter map has one', async () => {
+  const s = createSeries({
+    provider: 'mangadex', providerSeriesId: '55555555-5555-5555-5555-555555555555',
+    title: 'Titled Series', authors: ['A'], language: 'en', monitored: true, packagingMode: 'volume',
+  });
+  // Simulate a prior refresh having resolved+cached an external chapter map
+  // (core/chapter-map-consensus.js) whose Wikipedia source carried a real
+  // localized volume title, e.g. "Romance Dawn" for One Piece vol 1.
+  updateSeries(s.id, { chapterMapCache: { fetchedAt: Date.now(), map: [], volumeTitles: [['1', 'Romance Dawn']], reports: [] } });
+
+  const n = '1';
+  upsertChapter(s.id, { provider: 'mangadex', number: n, volume: '1' });
+  const d = chapterStagingDir(s.id, n); mkdirSync(d, { recursive: true });
+  writeFileSync(path.join(d, '001.png'), PNG);
+  const row = listChaptersForSeries(s.id).find(c => c.number === n);
+  setChapterState(row.id, 'downloaded', { staging_path: d, pages: 1 });
+
+  const res = await bindVolume(getSeries(s.id), '1', listChaptersForSeries(s.id), {});
+  const zip = new AdmZip(res.path);
+  const xml = zip.getEntry('ComicInfo.xml').getData().toString('utf-8');
+  assert.match(xml, /<Title>Romance Dawn<\/Title>/, 'the cached wiki volume title wins over the generic auto-title');
 });
 

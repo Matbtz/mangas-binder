@@ -30,6 +30,7 @@ export function ensureSeeded() {
   seedSetting('dataSaver', d.dataSaver);
   seedSetting('keepLoosePages', d.keepLoosePages);
   seedSetting('extrapolateVolumes', d.extrapolateVolumes);
+  seedSetting('chapterMapCacheHours', d.chapterMapCacheHours);
   seedSetting('flaresolverrUrl', d.flaresolverrUrl);
   seedSetting('mangaFallbackEnabled', d.mangaFallbackEnabled);
   seedSetting('discordWebhook', d.discordWebhook);

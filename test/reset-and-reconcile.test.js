@@ -55,19 +55,24 @@ test('deleteChaptersForSeries wipes every chapter row and reports the count', ()
   assert.ok(getSeries(s.id));
 });
 
-test('a complete wipe clears the cached hints and the last-scan timestamp (true from-scratch)', () => {
+test('a complete wipe clears the cached hints, last-scan timestamp, and chapter-map cache (true from-scratch)', () => {
   const s = createSeries({ provider: 'mangadex', providerSeriesId: 'reset-scan', title: 'Scan Reset', language: 'en', monitored: true, packagingMode: 'volume', totalVolumesHint: 5, totalChaptersHint: 55 });
   touchSeriesScan(s.id);
+  // Simulate a prior refresh having cached an external (Wikipedia/Fandom/
+  // MangaUpdates) chapter map (core/chapter-map-consensus.js).
+  updateSeries(s.id, { chapterMapCache: { fetchedAt: Date.now(), map: [['1', { volume: '1', source: 'wikipedia' }]], volumeTitles: [], reports: [] } });
   assert.ok(getSeries(s.id).last_scan_at, 'precondition: series has been scanned');
+  assert.ok(getSeries(s.id).chapter_map_cache_json, 'precondition: chapter-map cache populated');
 
   // Mirror the /reset route's wipe.
   deleteChaptersForSeries(s.id);
-  updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null, lastScanAt: null });
+  updateSeries(s.id, { totalVolumesHint: null, totalChaptersHint: null, lastScanAt: null, chapterMapCache: null });
 
   const after = getSeries(s.id);
   assert.equal(after.total_volumes_hint, null);
   assert.equal(after.total_chapters_hint, null);
   assert.equal(after.last_scan_at, null, 'next Refresh & Scan is treated as a first scan');
+  assert.equal(after.chapter_map_cache_json, null, 'cached external chapter map is cleared too — no stale cross-source data survives a wipe');
 });
 
 test('autoMapSuggestions matches volume-named files to every chapter of that volume', async () => {

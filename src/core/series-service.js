@@ -1,6 +1,6 @@
 import { getProvider, defaultDownloadProvider } from '../providers/index.js';
 import { consultVolumeProviders } from './volume-consensus.js';
-import { resolveChapterVolumeMap } from './chapter-map-consensus.js';
+import { resolveChapterVolumeMap, readCachedExternal, serializeExternalCache } from './chapter-map-consensus.js';
 import {
   createSeries, getSeries, updateSeries, touchSeriesScan,
   upsertChapter, chapterStateCounts, listChaptersForSeries, bulkSetChapterState,
@@ -165,8 +165,19 @@ export async function refreshSeries(seriesId) {
       // sanitizes the result, so a wiki table is an authoritative anchor set, not
       // a blind override. With Wikipedia/Fandom disabled this is exactly the old
       // MangaDex→MangaUpdates behaviour.
+      //
+      // The external (non-MangaDex) sources are the slow/rate-limited part, so
+      // their result is cached on the series row (chapter_map_cache_json) and
+      // reused for chapterMapCacheHours before re-fetching — only refreshSeries
+      // ever writes this cache (previewRefreshSeries only reads it: see its own
+      // "never persisted" contract below).
       try {
-        const { map: chMap } = await resolveChapterVolumeMap(series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value });
+        const ttlMs = Number(getSetting('chapterMapCacheHours', 24)) * 3600000;
+        const cachedExternal = readCachedExternal(series, ttlMs);
+        const { map: chMap, external, externalFromCache } = await resolveChapterVolumeMap(
+          series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, cachedExternal }
+        );
+        if (!externalFromCache) updateSeries(seriesId, { chapterMapCache: serializeExternalCache(external) });
         for (const ch of chapters) {
           const hit = chMap.get(String(parseFloat(ch.number)));
           if (hit && hit.volume && hit.volume !== ch.volume) ch.volume = hit.volume;
@@ -328,7 +339,13 @@ export async function previewRefreshSeries(seriesId) {
     }
 
     try {
-      const { map: chMap, counts, reports } = await resolveChapterVolumeMap(series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value });
+      // Read-only cache reuse: a fresh cache skips the slow external lookups so
+      // the preview stays snappy, but — per this function's "never persisted"
+      // contract — a cache MISS here is never written back; only refreshSeries
+      // (which actually commits the refresh) is allowed to populate the cache.
+      const ttlMs = Number(getSetting('chapterMapCacheHours', 24)) * 3600000;
+      const cachedExternal = readCachedExternal(series, ttlMs);
+      const { map: chMap, counts, reports } = await resolveChapterVolumeMap(series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, cachedExternal });
       // Apply the merged map; a chapter whose winning source isn't MangaDex is an
       // override of (or a fill beyond) MangaDex's own tag.
       for (const ch of chapters) {

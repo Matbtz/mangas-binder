@@ -45,6 +45,11 @@ export const config = {
     // source can't stall the whole scan cycle).
     refreshConcurrency: Number(process.env.REFRESH_CONCURRENCY || 3),
     seriesRefreshTimeoutSec: Number(process.env.SERIES_REFRESH_TIMEOUT_SEC || 90),
+    // How long a resolved external (Wikipedia/Fandom/MangaUpdates) per-chapter
+    // volume map stays cached on the series row before a refresh re-fetches it
+    // (see core/chapter-map-consensus.js). A preview always may reuse a fresh
+    // cache too, but never writes it.
+    chapterMapCacheHours: Number(process.env.CHAPTER_MAP_CACHE_HOURS || 24),
     defaultPackagingMode: process.env.DEFAULT_PACKAGING_MODE || 'volume', // volume | chapter
     defaultMonitorMode: process.env.DEFAULT_MONITOR_MODE || 'all',         // all | future | none
     defaultLanguage: process.env.DEFAULT_LANGUAGE || 'en',
