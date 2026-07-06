@@ -248,7 +248,7 @@ export default async function apiRoutes(app) {
       if (body.monitorMode === 'none') {
         // Cancel all active downloads, then skip everything remaining
         await cancelSeries(s.id);
-        const OWNED = new Set(['imported']);
+        const OWNED = new Set(['imported', 'bindery', 'downloaded']);
         const unownedIds = chapters.filter(c => !OWNED.has(c.state) && c.state !== 'skipped').map(c => c.id);
         if (unownedIds.length) bulkSetChapterState(unownedIds, 'skipped');
       } else if (body.monitorMode === 'all') {
@@ -262,7 +262,7 @@ export default async function apiRoutes(app) {
         // Apply threshold: chapters >= fromVolume → wanted, others → skipped.
         // Imported/bindery chapters are never downgraded.
         const threshold = parseFloat(body.monitorFromVolume ?? s.monitor_from_volume ?? 1);
-        const OWNED = new Set(['imported', 'bindery']);
+        const OWNED = new Set(['imported', 'bindery', 'downloaded']);
         const wantIds = [], skipIds = [];
         for (const c of chapters) {
           if (OWNED.has(c.state)) continue;

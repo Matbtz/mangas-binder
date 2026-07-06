@@ -358,6 +358,9 @@ async function _scanLibrary({ seriesId } = {}) {
   // from the very same on-disk pages).
   const driftedSeries = new Set();
 
+  const outputDir = getSetting('outputDir') || config.outputDir;
+  const outputDirNormalized = path.normalize(outputDir).toLowerCase();
+
   let scanned = 0;
   for (const file of files) {
     // Yield periodically so a large library scan never monopolises the event
@@ -379,6 +382,9 @@ async function _scanLibrary({ seriesId } = {}) {
     if (seriesId && match.id !== seriesId) continue;
     matchedFiles++;
 
+    const isBinderyFile = path.normalize(file).toLowerCase().startsWith(outputDirNormalized);
+    const targetState = isBinderyFile ? 'bindery' : 'imported';
+
     if (!chaptersBySeries.has(match.id)) {
       chaptersBySeries.set(match.id, new Map(listChaptersForSeries(match.id).map(c => [String(parseFloat(c.number)), c])));
     }
@@ -386,6 +392,7 @@ async function _scanLibrary({ seriesId } = {}) {
     let matchedCount = 0;
     for (const num of info.chapters) {
       const row = index.get(String(parseFloat(num)));
+<<<<<<< HEAD
       if (!row || row.state === 'imported') continue;
       // Adopt the file's volume label ONLY when the chapter has no volume of its
       // own — the provider/consensus volume is authoritative (see module header),
@@ -400,6 +407,16 @@ async function _scanLibrary({ seriesId } = {}) {
       setChapterState(row.id, 'imported', extra);
       row.state = 'imported';
       if (!hasVolume && info.volume) row.volume = info.volume;
+=======
+      if (!row || row.state === 'imported' || row.state === targetState) continue;
+      setChapterState(row.id, targetState, {
+        cbz_path: file,
+        calculated: 0,
+        language: match.language || 'en',
+        ...(info.volume ? { volume: info.volume } : {}),
+      });
+      row.state = targetState;
+>>>>>>> fix/mangakatana-add-series
       markedChapters++;
       matchedCount++;
       perSeries[match.title] = (perSeries[match.title] || 0) + 1;
@@ -411,9 +428,9 @@ async function _scanLibrary({ seriesId } = {}) {
     }
     if (matchedCount === 0 && info.volume) {
       for (const row of index.values()) {
-        if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === String(parseFloat(info.volume))) {
-          setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
-          row.state = 'imported';
+        if (row.state !== 'imported' && row.state !== targetState && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === String(parseFloat(info.volume))) {
+          setChapterState(row.id, targetState, { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+          row.state = targetState;
           markedChapters++;
           matchedCount++;
           perSeries[match.title] = (perSeries[match.title] || 0) + 1;
@@ -424,9 +441,9 @@ async function _scanLibrary({ seriesId } = {}) {
     // Tried before bare-number fallback so explicit #N wins over ambiguous bare digit.
     if (matchedCount === 0 && info.issueNum) {
       const row = index.get(info.issueNum);
-      if (row && row.state !== 'imported') {
-        setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
-        row.state = 'imported';
+      if (row && row.state !== 'imported' && row.state !== targetState) {
+        setChapterState(row.id, targetState, { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+        row.state = targetState;
         markedChapters++;
         matchedCount++;
         perSeries[match.title] = (perSeries[match.title] || 0) + 1;
@@ -442,9 +459,9 @@ async function _scanLibrary({ seriesId } = {}) {
       const verCh = versionTaggedChapter(base);
       if (verCh) {
         const row = index.get(String(parseFloat(verCh)));
-        if (row && row.state !== 'imported') {
-          setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
-          row.state = 'imported';
+        if (row && row.state !== 'imported' && row.state !== targetState) {
+          setChapterState(row.id, targetState, { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+          row.state = targetState;
           markedChapters++;
           matchedCount++;
           perSeries[match.title] = (perSeries[match.title] || 0) + 1;
@@ -456,9 +473,9 @@ async function _scanLibrary({ seriesId } = {}) {
         if (bareVol) {
           const vNum = String(parseFloat(bareVol[1]));
           for (const row of index.values()) {
-            if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
-              setChapterState(row.id, 'imported', { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
-              row.state = 'imported';
+            if (row.state !== 'imported' && row.state !== targetState && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
+              setChapterState(row.id, targetState, { cbz_path: file, calculated: row.calculated || 0, language: match.language || 'en' });
+              row.state = targetState;
               markedChapters++;
               perSeries[match.title] = (perSeries[match.title] || 0) + 1;
             }
@@ -497,15 +514,18 @@ async function _scanLibrary({ seriesId } = {}) {
         const chPath = path.join(seriesPath, chEntry.name);
         if (!dirHasImages(chPath)) continue;
 
+        const isBinderyFile = path.normalize(chPath).toLowerCase().startsWith(outputDirNormalized);
+        const targetState = isBinderyFile ? 'bindery' : 'imported';
+
         // A volume-named folder ("Vol. 12", "One Piece v85"): mark that
         // volume's chapters owned instead of misreading its number as a
         // chapter number.
         const dirVol = volumeFromName(chEntry.name);
         if (dirVol) {
           for (const row of index.values()) {
-            if (row.state !== 'imported' && row.volume != null && row.volume !== '' && String(parseFloat(row.volume)) === dirVol) {
-              setChapterState(row.id, 'imported', { cbz_path: chPath, calculated: row.calculated || 0, language: match.language || 'en' });
-              row.state = 'imported';
+            if (row.state !== 'imported' && row.state !== targetState && row.volume != null && row.volume !== '' && String(parseFloat(row.volume)) === dirVol) {
+              setChapterState(row.id, targetState, { cbz_path: chPath, calculated: row.calculated || 0, language: match.language || 'en' });
+              row.state = targetState;
               markedChapters++;
               matchedFiles++;
               perSeries[match.title] = (perSeries[match.title] || 0) + 1;
@@ -517,9 +537,9 @@ async function _scanLibrary({ seriesId } = {}) {
         const chNum = chNumFromDir(chEntry.name);
         if (!chNum) continue;
         const row = index.get(String(parseFloat(chNum)));
-        if (!row || row.state === 'imported') continue;
-        setChapterState(row.id, 'imported', { cbz_path: chPath, calculated: 0, language: match.language || 'en' });
-        row.state = 'imported';
+        if (!row || row.state === 'imported' || row.state === targetState) continue;
+        setChapterState(row.id, targetState, { cbz_path: chPath, calculated: 0, language: match.language || 'en' });
+        row.state = targetState;
         markedChapters++;
         matchedFiles++;
         perSeries[match.title] = (perSeries[match.title] || 0) + 1;
@@ -541,6 +561,8 @@ async function _scanLibrary({ seriesId } = {}) {
       if (!numStr) return false;
       const key = numStr.startsWith('Vol.') ? numStr : String(parseFloat(numStr));
       if (!numStr.startsWith('Vol.') && Number.isNaN(parseFloat(key))) return false;
+      const isBinderyFile = p && path.normalize(p).toLowerCase().startsWith(outputDirNormalized);
+      const targetState = isBinderyFile ? 'bindery' : 'imported';
       let row = index.get(key);
       if (!row) {
         upsertChapter(match.id, {
@@ -549,18 +571,18 @@ async function _scanLibrary({ seriesId } = {}) {
           volume: volStr ? String(parseFloat(volStr)) : null,
           title: numStr.startsWith('Vol.') ? `Volume ${volStr}` : `Chapter ${key}`,
           language: match.language || 'en'
-        }, 'imported');
+        }, targetState);
         row = listChaptersForSeries(match.id).find(c => c.number === key);
         if (row) {
-          setChapterState(row.id, 'imported', { cbz_path: p, calculated: 0 });
+          setChapterState(row.id, targetState, { cbz_path: p, calculated: 0 });
           index.set(key, row);
           markedChapters++;
         }
         return true;
       }
-      if (row.state !== 'imported') {
-        setChapterState(row.id, 'imported', { cbz_path: p, calculated: row.calculated || 0, language: match.language || 'en', ...(volStr ? { volume: String(parseFloat(volStr)) } : {}) });
-        row.state = 'imported';
+      if (row.state !== 'imported' && row.state !== targetState) {
+        setChapterState(row.id, targetState, { cbz_path: p, calculated: row.calculated || 0, language: match.language || 'en', ...(volStr ? { volume: String(parseFloat(volStr)) } : {}) });
+        row.state = targetState;
         markedChapters++;
         return true;
       }
@@ -570,15 +592,17 @@ async function _scanLibrary({ seriesId } = {}) {
     // 1. Scan customDir for CBZ files
     for (const file of walkCbz(customDir)) {
       const info = await readCbzInfo(file);
+      const isBinderyFile = path.normalize(file).toLowerCase().startsWith(outputDirNormalized);
+      const targetState = isBinderyFile ? 'bindery' : 'imported';
       let matchedCount = 0;
       for (const num of info.chapters) {
         if (ensureCh(num, info.volume, file)) matchedCount++;
       }
       if (matchedCount === 0 && info.volume) {
         for (const row of index.values()) {
-          if (row.state !== 'imported' && String(parseFloat(row.volume)) === String(parseFloat(info.volume))) {
-            setChapterState(row.id, 'imported', { cbz_path: file, calculated: 0 });
-            row.state = 'imported';
+          if (row.state !== 'imported' && row.state !== targetState && String(parseFloat(row.volume)) === String(parseFloat(info.volume))) {
+            setChapterState(row.id, targetState, { cbz_path: file, calculated: 0 });
+            row.state = targetState;
             markedChapters++;
             matchedCount++;
           }
@@ -613,6 +637,9 @@ async function _scanLibrary({ seriesId } = {}) {
         if (!e.isDirectory()) continue;
         const sub = path.join(dir, e.name);
         if (dirHasImages(sub)) {
+          const isBinderyFile = path.normalize(sub).toLowerCase().startsWith(outputDirNormalized);
+          const targetState = isBinderyFile ? 'bindery' : 'imported';
+
           // Same volume-vs-chapter disambiguation as CBZ files: a folder named
           // for a volume (long or short form) must never fall through to
           // chapter-number matching.
@@ -621,9 +648,9 @@ async function _scanLibrary({ seriesId } = {}) {
             const vNum = String(parseFloat(dirVol));
             let vmatched = 0;
             for (const row of index.values()) {
-              if (row.state !== 'imported' && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
-                setChapterState(row.id, 'imported', { cbz_path: sub, language: match.language || 'en' });
-                row.state = 'imported';
+              if (row.state !== 'imported' && row.state !== targetState && (row.volume != null && row.volume !== '') && String(parseFloat(row.volume)) === vNum) {
+                setChapterState(row.id, targetState, { cbz_path: sub, language: match.language || 'en' });
+                row.state = targetState;
                 markedChapters++;
                 matchedFiles++;
                 vmatched++;
@@ -660,8 +687,29 @@ async function _scanLibrary({ seriesId } = {}) {
       if (LOCAL_STATES.has(c.state) || c.cbz_path != null) {
         const p = c.cbz_path || c.staging_path;
         if (p && !p.startsWith('included_in_vol_') && !existsSync(p)) {
-          setChapterState(c.id, resetState, { cbz_path: null, staging_path: null });
-          prunedChapters++;
+          let foundInBooks = false;
+          const outputDir = getSetting('outputDir') || config.outputDir;
+          const outputDirNormalized = path.normalize(outputDir).toLowerCase();
+          const normP = path.normalize(p).toLowerCase();
+
+          if (normP.startsWith(outputDirNormalized)) {
+            const relPath = path.relative(outputDir, p);
+            for (const scanDir of scanDirs) {
+              const scanDirNorm = path.normalize(scanDir).toLowerCase();
+              if (scanDirNorm === outputDirNormalized) continue; // skip bindery itself
+              const candidatePath = path.join(scanDir, relPath);
+              if (existsSync(candidatePath)) {
+                setChapterState(c.id, 'imported', { cbz_path: candidatePath });
+                foundInBooks = true;
+                break;
+              }
+            }
+          }
+
+          if (!foundInBooks) {
+            setChapterState(c.id, resetState, { cbz_path: null, staging_path: null });
+            prunedChapters++;
+          }
         } else if (!p && LOCAL_STATES.has(c.state)) {
           setChapterState(c.id, resetState, { cbz_path: null, staging_path: null });
           prunedChapters++;

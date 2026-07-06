@@ -53,7 +53,7 @@ test('scanLibrary marks chapters owned by an existing CBZ as imported', async ()
 
   const chs = listChaptersForSeries(s.id);
   for (const c of chs) {
-    assert.equal(c.state, 'imported', `ch ${c.number} should be imported`);
+    assert.equal(c.state, 'bindery', `ch ${c.number} should be bindery`);
     assert.equal(c.volume, '1', 'volume adopted from existing file');
     assert.ok(c.cbz_path?.endsWith('Owned Series Vol. 01.cbz'));
   }
@@ -127,8 +127,8 @@ test('scanLibrary matches foreign CBZ via parent directory name when Series tag 
   assert.equal(out.matchedFiles, 1, 'should match the foreign CBZ via folder name');
 
   const chs = listChaptersForSeries(s.id);
-  const imported = chs.filter(c => c.state === 'imported');
-  assert.equal(imported.length, 2, 'both chapters in volume 1 should be marked imported');
+  const bindery = chs.filter(c => c.state === 'bindery');
+  assert.equal(bindery.length, 2, 'both chapters in volume 1 should be marked bindery');
 });
 
 test('scanLibrary ignores hidden directories (.tmp) and identifies single epub folders', async () => {
