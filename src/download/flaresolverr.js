@@ -46,7 +46,15 @@ export async function solve(url, { timeoutMs = 60000, signal } = {}) {
     if (err?.name === 'AbortError') throw err;
     throw new Error(`FlareSolverr unreachable at ${endpoint}: ${err.message}`);
   }
-  if (!res.ok) throw new Error(`FlareSolverr HTTP ${res.status} at ${endpoint}`);
+  if (!res.ok) {
+    // FlareSolverr answers normal solve failures (timeout, captcha, etc.) with
+    // HTTP 200 and a `status: 'error'` body (handled below); a bare non-2xx here
+    // means its own request handler crashed — e.g. the target URL forced a native
+    // file download instead of a page load, which aborts the browser navigation.
+    // Surface the body since "HTTP 500" alone gives no way to tell those apart.
+    const detail = await res.text().catch(() => '');
+    throw new Error(`FlareSolverr HTTP ${res.status} at ${endpoint}${detail ? `: ${detail.slice(0, 300)}` : ''}`);
+  }
 
   const data = await res.json();
   if (data.status !== 'ok' || !data.solution) {

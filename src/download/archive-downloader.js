@@ -43,23 +43,42 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
 
   const headers = { 'User-Agent': USER_AGENT, ...(found.headers || {}) };
   let res = await fetchRetry(found.url, { headers, retries: 3, signal });
+  // fetch()'s `url` reflects the final address after following redirects — this is
+  // the actual DDL mirror host (GetComics' short-lived /dls/ links 302 elsewhere),
+  // which is what we need to target below, both for solving and for the retry.
+  const finalUrl = res.url || found.url;
 
   // Many DDL mirrors (GetComics' rotating comicfiles.ru/fs*.* hosts, etc.) sit
   // behind a real Cloudflare JS challenge — a Referer/User-Agent alone can't get
   // past it, only a browser that actually solves it can. Same anti-bot situation
-  // as MangaKatana: if FlareSolverr is configured, solve the URL to obtain the
-  // cf_clearance cookie + the browser UA it used, then retry the download with
-  // those attached.
+  // as MangaKatana: if FlareSolverr is configured, solve it to obtain the
+  // cf_clearance cookie + the browser UA it used, then retry the download.
+  //
+  // Two things that look reasonable but don't work, discovered the hard way:
+  //   - Solving the *file* URL itself: once the challenge passes, Cloudflare hands
+  //     back the raw archive, which makes FlareSolverr's headless Chrome attempt a
+  //     native file download instead of a page load — that crashes the navigation
+  //     and FlareSolverr's own request handler, reported back to us as a bare
+  //     HTTP 500 with no useful detail. Solving the mirror's origin root instead
+  //     always resolves to an HTML response, so the challenge-solve stays a normal
+  //     page load; the resulting cf_clearance cookie is valid for the whole zone.
+  //   - Retrying against the original found.url: it 302-redirects cross-origin to
+  //     the mirror, and a manually-set Cookie header does not survive a
+  //     cross-origin redirect in fetch() (unlike Referer) — it gets silently
+  //     dropped on the second hop, so the solved session never actually reaches
+  //     the mirror. Retrying against finalUrl (the mirror URL itself) sends it
+  //     directly, with no redirect to lose it across.
   if (res.status === 403 && flareEnabled()) {
     try {
-      const { cookies, userAgent } = await flareSolve(found.url, { signal });
+      const origin = `${new URL(finalUrl).origin}/`;
+      const { cookies, userAgent } = await flareSolve(origin, { signal });
       const cookieStr = cookieHeader(cookies);
       if (cookieStr) {
         const solvedHeaders = { ...headers, 'User-Agent': userAgent || headers['User-Agent'], Cookie: cookieStr };
-        res = await fetchRetry(found.url, { headers: solvedHeaders, retries: 1, signal });
+        res = await fetchRetry(finalUrl, { headers: solvedHeaders, retries: 1, signal });
       }
     } catch (solveErr) {
-      logHistory('flaresolverr.error', { message: `FlareSolverr failed to solve ${found.url}: ${solveErr.message}` });
+      logHistory('flaresolverr.error', { message: `FlareSolverr failed to solve ${finalUrl}: ${solveErr.message}` });
     }
   }
 
