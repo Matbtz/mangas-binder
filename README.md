@@ -150,6 +150,13 @@ To enable:
 > `parseChapterImages`) and is the only place to fix. Downloaded pages are validated by
 > magic bytes, so a Cloudflare challenge page served as an "image" is rejected and retried.
 
+GetComics DDL links redirect to rotating mirror hosts (`fs*.comicfiles.ru` and others),
+some of which sit behind the same kind of Cloudflare challenge. A plain archive download
+that comes back `HTTP 403` automatically retries once through FlareSolverr if it's
+configured (same `FLARESOLVERR_URL` setting as above) — no separate GetComics-specific
+setup needed. Without FlareSolverr configured, a 403 from one of these hosts fails with
+a message telling you to set it up.
+
 ### Wikipedia chapter-map cross-check (opt-in, needs validation before use)
 
 Wikipedia's "List of `<X>` chapters" tables mirror the physical tankōbon volume

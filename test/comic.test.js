@@ -11,11 +11,11 @@ process.env.DB_PATH = path.join(tmp, 't.db');
 process.env.OUTPUT_DIR = path.join(tmp, 'out');
 process.env.STAGING_DIR = path.join(tmp, 'staging');
 
-const { ensureSeeded } = await import('../src/core/settings.js');
+const { ensureSeeded, setSetting } = await import('../src/core/settings.js');
 const { createSeries, listChaptersForSeries, upsertChapter, setChapterState } = await import('../src/core/repo.js');
 const { buildComicInfoXml } = await import('../src/core/comicinfo.js');
 const { issueCbzName, volumeCbzName } = await import('../src/core/packager.js');
-const { extractToStaging } = await import('../src/download/archive-downloader.js');
+const { extractToStaging, downloadArchiveChapter } = await import('../src/download/archive-downloader.js');
 const { bindChapter } = await import('../src/core/binder.js');
 const { readCbzInfo } = await import('../src/core/library-scan.js');
 const { parseSearchResults, extractDownloadLinks } = await import('../src/providers/getcomics.js');
@@ -126,4 +126,45 @@ test('getcomics HTML parsers extract posts and ranked download links', () => {
   assert.equal(links[0], 'https://getcomics.org/dlds/12345/');
   assert.ok(links.includes('https://pixeldrain.com/api/file/abc'));
   assert.ok(!links.includes('https://example.com/random'));
+});
+
+test('archive download: a 403 from a Cloudflare-guarded mirror retries via FlareSolverr', async () => {
+  // Regression for GetComics DDL links that redirect to a Cloudflare-challenged
+  // mirror host (fs*.comicfiles.ru, etc.) — a Referer header alone still 403s;
+  // only a solved cf_clearance cookie gets past it (same fix as MangaKatana).
+  setSetting('flaresolverrUrl', 'http://flaresolverr.local/v1');
+  const zipBuf = makeCbzBuffer(['001.jpg']);
+  const calls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url: String(url), headers: opts?.headers || {} });
+    if (String(url).includes('flaresolverr.local')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: 'ok',
+          solution: { response: '', cookies: [{ name: 'cf_clearance', value: 'solved-token' }], userAgent: 'SolvedUA/1.0', status: 200 },
+        }),
+      };
+    }
+    // First attempt (no solved cookie yet) 403s; the retry after solving succeeds.
+    const solved = (opts?.headers || {}).Cookie === 'cf_clearance=solved-token';
+    if (!solved) return { ok: false, status: 403, headers: { get: () => null } };
+    return { ok: true, status: 200, headers: { get: () => null }, arrayBuffer: async () => zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength) };
+  };
+  try {
+    const provider = {
+      name: 'getcomics', capabilities: { archive: true },
+      findIssueDownload: async () => ({ url: 'https://getcomics.org/dls/abc', headers: { Referer: 'https://getcomics.org/comic/x/' } }),
+    };
+    const { pageCount } = await downloadArchiveChapter(provider, { id: 999, title: 'Test' }, { number: '1' });
+    assert.equal(pageCount, 1);
+    const solvedRetry = calls.find(c => c.headers.Cookie === 'cf_clearance=solved-token');
+    assert.ok(solvedRetry, 'retried the archive URL with the FlareSolverr-solved cookie');
+    assert.equal(solvedRetry.headers['User-Agent'], 'SolvedUA/1.0', 'reuses the browser UA FlareSolverr solved with');
+  } finally {
+    globalThis.fetch = origFetch;
+    setSetting('flaresolverrUrl', '');
+  }
 });

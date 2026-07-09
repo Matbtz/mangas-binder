@@ -3,6 +3,8 @@ import path from 'path';
 import AdmZip from 'adm-zip';
 import { fetchRetry } from './limit.js';
 import { chapterStagingDir } from './downloader.js';
+import { solve as flareSolve, cookieHeader, isEnabled as flareEnabled } from './flaresolverr.js';
+import { logHistory } from '../core/db.js';
 
 const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) mangas-binder/2.0';
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
@@ -40,8 +42,30 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
   }
 
   const headers = { 'User-Agent': USER_AGENT, ...(found.headers || {}) };
-  const res = await fetchRetry(found.url, { headers, retries: 3, signal });
-  if (!res.ok) throw new Error(`Archive HTTP ${res.status} for #${chapter.number}`);
+  let res = await fetchRetry(found.url, { headers, retries: 3, signal });
+
+  // Many DDL mirrors (GetComics' rotating comicfiles.ru/fs*.* hosts, etc.) sit
+  // behind a real Cloudflare JS challenge — a Referer/User-Agent alone can't get
+  // past it, only a browser that actually solves it can. Same anti-bot situation
+  // as MangaKatana: if FlareSolverr is configured, solve the URL to obtain the
+  // cf_clearance cookie + the browser UA it used, then retry the download with
+  // those attached.
+  if (res.status === 403 && flareEnabled()) {
+    try {
+      const { cookies, userAgent } = await flareSolve(found.url, { signal });
+      const cookieStr = cookieHeader(cookies);
+      if (cookieStr) {
+        const solvedHeaders = { ...headers, 'User-Agent': userAgent || headers['User-Agent'], Cookie: cookieStr };
+        res = await fetchRetry(found.url, { headers: solvedHeaders, retries: 1, signal });
+      }
+    } catch (solveErr) {
+      logHistory('flaresolverr.error', { message: `FlareSolverr failed to solve ${found.url}: ${solveErr.message}` });
+    }
+  }
+
+  if (!res.ok) {
+    throw new Error(`Archive HTTP ${res.status} for #${chapter.number}${res.status === 403 ? ' (Cloudflare — configure FlareSolverr in Settings → Sources)' : ''}`);
+  }
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length === 0) throw new Error(`Empty archive for #${chapter.number}`);
 
