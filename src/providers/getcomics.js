@@ -106,9 +106,15 @@ export async function search(query) {
 
 /**
  * Resolve a downloadable archive for a single issue.
+ *
+ * The DDL link (getcomics.org/dlds/… or a mirror host) rejects direct fetches
+ * with no `Referer` — same anti-hotlink pattern as MangaKatana's image CDN — so
+ * we hand back the post page as `headers.Referer` for the archive-downloader to
+ * send on the actual file request; without it every download 403s.
+ *
  * @param {object} series  row (title, year)
  * @param {object} chapter row (number)
- * @returns {Promise<{ url, filename, kind } | null>}
+ * @returns {Promise<{ url, filename, kind, headers } | null>}
  */
 export async function findIssueDownload(series, chapter) {
   const q = `${cleanTitle(series.title)} ${chapter.number}`;
@@ -126,18 +132,23 @@ export async function findIssueDownload(series, chapter) {
   if (!links.length) return null;
 
   const url = links[0];
-  return { url, filename: `${cleanTitle(series.title)} ${chapter.number}.${archiveKind(url)}`, kind: archiveKind(url) };
+  return {
+    url,
+    filename: `${cleanTitle(series.title)} ${chapter.number}.${archiveKind(url)}`,
+    kind: archiveKind(url),
+    headers: { Referer: post.id },
+  };
 }
 
 export async function resolvePostUrl(postUrl) {
   if (HOST_RE.test(postUrl) && !postUrl.includes('getcomics.org/')) {
-    return { url: postUrl, filename: `manual.${archiveKind(postUrl)}`, kind: archiveKind(postUrl) };
+    return { url: postUrl, filename: `manual.${archiveKind(postUrl)}`, kind: archiveKind(postUrl), headers: { Referer: `${baseUrl()}/` } };
   }
   const html = await getHtml(postUrl);
   const links = extractDownloadLinks(html);
   if (!links.length) return null;
   const url = links[0];
-  return { url, filename: `manual.${archiveKind(url)}`, kind: archiveKind(url) };
+  return { url, filename: `manual.${archiveKind(url)}`, kind: archiveKind(url), headers: { Referer: postUrl } };
 }
 
 /** Reachability check for the Settings "Test connection" button. */

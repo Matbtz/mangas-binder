@@ -39,7 +39,8 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
     throw new Error(`Got a CBR (RAR) archive for #${chapter.number}; CBR isn't supported — only CBZ/ZIP.`);
   }
 
-  const res = await fetchRetry(found.url, { headers: { 'User-Agent': USER_AGENT }, retries: 3, signal });
+  const headers = { 'User-Agent': USER_AGENT, ...(found.headers || {}) };
+  const res = await fetchRetry(found.url, { headers, retries: 3, signal });
   if (!res.ok) throw new Error(`Archive HTTP ${res.status} for #${chapter.number}`);
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length === 0) throw new Error(`Empty archive for #${chapter.number}`);
