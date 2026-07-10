@@ -40,7 +40,7 @@ export async function autoMapSuggestions(series, dir) {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       if (e.name.startsWith('.')) continue;
       const ext = e.name.toLowerCase();
-      if (e.isFile() && (ext.endsWith('.cbz') || ext.endsWith('.epub'))) files.push(path.join(dir, e.name));
+      if (e.isFile() && (ext.endsWith('.cbz') || ext.endsWith('.cbr') || ext.endsWith('.rar') || ext.endsWith('.zip') || ext.endsWith('.epub'))) files.push(path.join(dir, e.name));
     }
   } catch { return { suggestions: [], totalFiles: 0, matchedFiles: 0 }; }
   files.sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true }));
@@ -73,7 +73,7 @@ export async function autoMapSuggestions(series, dir) {
 
     // 3. Bare-number fallback: extract the last number from the filename and try
     //    it as a volume first, then as a chapter number.
-    const base = path.basename(filePath).replace(/\.(cbz|epub)$/i, '');
+    const base = path.basename(filePath).replace(/\.(cbz|cbr|rar|zip|epub)$/i, '');
     const bareM = base.match(/(?:^|[-_\s])0*(\d{1,4}(?:\.\d+)?)(?:$|[-_\s.])/);
     if (bareM) {
       const vNum = String(parseFloat(bareM[1]));

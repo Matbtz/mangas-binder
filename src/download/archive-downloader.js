@@ -42,9 +42,6 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
   // no-resolvePostUrl branch still carry a single `url`.
   const candidates = found?.urls?.length ? found.urls : (found?.url ? [found.url] : []);
   if (!candidates.length) throw new Error(`No download found for ${series.title} #${chapter.number}`);
-  if (found.kind === 'cbr') {
-    throw new Error(`Got a CBR (RAR) archive for #${chapter.number}; CBR isn't supported — only CBZ/ZIP.`);
-  }
 
   const headers = { 'User-Agent': USER_AGENT, ...(found.headers || {}) };
   // Try each mirror in turn; the first that yields a valid archive wins. GetComics'
@@ -142,10 +139,10 @@ async function fetchArchiveBuffer(url, headers, signal) {
 
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length === 0) throw new Error('Empty archive');
-  // Validate the zip local-file-header magic (PK\x03\x04 / \x05\x06 / \x07\x08) so a
-  // stray HTML/JSON body served with a non-HTML content-type is caught here too.
-  if (!(buf[0] === 0x50 && buf[1] === 0x4b)) {
-    throw new Error('Downloaded file is not a zip/CBZ archive');
+  // Validate the zip local-file-header magic (PK\x03\x04 / \x05\x06 / \x07\x08) or RAR magic
+  // (Rar!\x1a\x07) so a stray HTML/JSON body served with a non-HTML content-type is caught.
+  if (!(buf[0] === 0x50 && buf[1] === 0x4b) && !isRarBuffer(buf)) {
+    throw new Error('Downloaded file is not a zip/CBZ or RAR/CBR archive');
   }
   return buf;
 }
@@ -223,6 +220,64 @@ export async function resolveWetransferDirect(pageUrl, html, cookies, signal) {
   }
 }
 
+export function isRarBuffer(buf) {
+  return buf && buf.length >= 7 && buf[0] === 0x52 && buf[1] === 0x61 && buf[2] === 0x72 && buf[3] === 0x21 && buf[4] === 0x1a && buf[5] === 0x07;
+}
+
+/**
+ * Enumerate and extract image entries from an in-memory archive (CBZ/ZIP or CBR/RAR).
+ * @param {Buffer} buffer
+ * @returns {Promise<Array<{ entryName: string, getData: () => Buffer }>>}
+ */
+export async function getArchiveImageEntries(buffer) {
+  if (isRarBuffer(buffer)) {
+    const { createExtractorFromData } = await import('node-unrar-js');
+    const extractor = await createExtractorFromData({ data: buffer });
+    const list = [...extractor.getFileList().fileHeaders];
+    const imageHeaders = list.filter(h => !h.flags.directory && IMAGE_EXTS.has(path.extname(h.name).toLowerCase()));
+    const extracted = [...extractor.extract({ files: imageHeaders.map(h => h.name) }).files];
+    const map = new Map();
+    for (const f of extracted) {
+      if (f.extraction) map.set(f.fileHeader.name, Buffer.from(f.extraction));
+    }
+    return imageHeaders
+      .map(h => ({
+        entryName: h.name,
+        getData: () => map.get(h.name) || Buffer.alloc(0)
+      }))
+      .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+  } else {
+    let zip;
+    try {
+      zip = new AdmZip(buffer);
+    } catch {
+      try {
+        const { createExtractorFromData } = await import('node-unrar-js');
+        const extractor = await createExtractorFromData({ data: buffer });
+        const list = [...extractor.getFileList().fileHeaders];
+        const imageHeaders = list.filter(h => !h.flags.directory && IMAGE_EXTS.has(path.extname(h.name).toLowerCase()));
+        if (imageHeaders.length) {
+          const extracted = [...extractor.extract({ files: imageHeaders.map(h => h.name) }).files];
+          const map = new Map();
+          for (const f of extracted) {
+            if (f.extraction) map.set(f.fileHeader.name, Buffer.from(f.extraction));
+          }
+          return imageHeaders
+            .map(h => ({
+              entryName: h.name,
+              getData: () => map.get(h.name) || Buffer.alloc(0)
+            }))
+            .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+        }
+      } catch {}
+      throw new Error('Downloaded file is not a readable zip/CBZ or RAR/CBR archive');
+    }
+    return zip.getEntries()
+      .filter(e => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase()))
+      .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+  }
+}
+
 /**
  * Restore several chapters out of ONE packaged (multi-chapter) volume CBZ in a
  * single parse of the archive, writing each chapter's pages to its own staging
@@ -236,14 +291,12 @@ export async function resolveWetransferDirect(pageUrl, html, cookies, signal) {
  * @returns {Promise<Set<string>>} the chapter numbers (normalised) it extracted
  */
 export async function extractChaptersFromArchive(zipBuffer, seriesId, chapterNumbers) {
-  let zip;
+  let images;
   try {
-    zip = new AdmZip(zipBuffer);
+    images = await getArchiveImageEntries(zipBuffer);
   } catch {
-    throw new Error('Downloaded file is not a readable zip/CBZ archive');
+    throw new Error('Downloaded file is not a readable zip/CBZ or RAR/CBR archive');
   }
-  const images = zip.getEntries()
-    .filter(e => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase()));
   const isPackaged = images.some(e => CBZ_PAGE_RE.test(path.basename(e.entryName)));
   if (!isPackaged) return new Set(); // caller falls back to per-chapter extraction
 
@@ -279,20 +332,17 @@ export async function extractChaptersFromArchive(zipBuffer, seriesId, chapterNum
 }
 
 /**
- * Extract image entries from an in-memory zip buffer into the chapter staging
+ * Extract image entries from an in-memory zip/rar buffer into the chapter staging
  * dir, renumbered in archive order. Exposed for offline testing.
  * @returns {Promise<{ dir, pageCount }>}
  */
 export async function extractToStaging(zipBuffer, seriesId, number, { onlyChapter = null } = {}) {
-  let zip;
+  let images;
   try {
-    zip = new AdmZip(zipBuffer);
+    images = await getArchiveImageEntries(zipBuffer);
   } catch {
-    throw new Error('Downloaded file is not a readable zip/CBZ archive');
+    throw new Error('Downloaded file is not a readable zip/CBZ or RAR/CBR archive');
   }
-  let images = zip.getEntries()
-    .filter(e => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase()))
-    .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
 
   // When restoring a single chapter out of one of our own packaged (possibly
   // multi-chapter) volume CBZs, keep only that chapter's pages. Foreign archives
@@ -400,13 +450,12 @@ export function groupImagesByChapterFolder(imageEntryNames) {
  * @returns {Promise<{ hierarchical: boolean, chapters?: Array<{number, dir, pageCount}>, ignoredRootFiles?: string[] }>}
  */
 export async function stageUploadedVolumeArchive(zipBuffer, seriesId) {
-  let zip;
+  let imageEntries;
   try {
-    zip = new AdmZip(zipBuffer);
+    imageEntries = await getArchiveImageEntries(zipBuffer);
   } catch {
-    throw new Error('Uploaded file is not a readable zip/CBZ archive');
+    throw new Error('Uploaded file is not a readable zip/CBZ or RAR/CBR archive');
   }
-  const imageEntries = zip.getEntries().filter(e => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase()));
   if (!imageEntries.length) throw new Error('Archive contains no page images');
 
   const { hierarchical, groups } = groupImagesByChapterFolder(imageEntries.map(e => e.entryName));

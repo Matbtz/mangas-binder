@@ -244,7 +244,7 @@ async function prewarmSharedArchives(series, chapters, archiveCache) {
   const byArchive = new Map(); // cbz_path -> numbers[]
   for (const c of chapters) {
     const cbzPath = c.cbz_path || c.cbzPath;
-    if (!cbzPath || !/\.(cbz|zip)$/i.test(cbzPath) || !existsSync(cbzPath)) continue;
+    if (!cbzPath || !/\.(cbz|cbr|rar|zip)$/i.test(cbzPath) || !existsSync(cbzPath)) continue;
     if (await hasStaging(series.id, c.number)) continue;
     if (!byArchive.has(cbzPath)) byArchive.set(cbzPath, []);
     byArchive.get(cbzPath).push(c.number);
@@ -278,7 +278,7 @@ export async function ensureChapterStaging(series, chapter, archiveCache = null)
       await cp(cbzPath, dir, { recursive: true });
       return true;
     }
-    if (/\.(cbz|zip)$/i.test(cbzPath)) {
+    if (/\.(cbz|cbr|rar|zip)$/i.test(cbzPath)) {
       let buf;
       if (archiveCache) {
         if (!archiveCache.has(cbzPath)) archiveCache.set(cbzPath, readFile(cbzPath));

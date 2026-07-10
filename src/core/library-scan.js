@@ -126,7 +126,7 @@ function walkCbz(dir, out = []) {
     if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walkCbz(full, out);
-    else if (e.isFile() && e.name.toLowerCase().endsWith('.cbz')) out.push(full);
+    else if (e.isFile() && /\.(cbz|cbr|rar|zip)$/i.test(e.name)) out.push(full);
   }
   return out;
 }
@@ -142,7 +142,7 @@ function walkUntrackedFiles(dir, out = []) {
     if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walkUntrackedFiles(full, out);
-    else if (e.isFile() && (e.name.toLowerCase().endsWith('.cbz') || e.name.toLowerCase().endsWith('.epub'))) out.push(full);
+    else if (e.isFile() && /\.(cbz|cbr|rar|zip|epub)$/i.test(e.name)) out.push(full);
   }
   return out;
 }
@@ -159,22 +159,54 @@ function tagText(xml, tag) {
 const cbzInfoCache = new Map(); // path -> { mtimeMs, size, info }
 const CBZ_CACHE_MAX = 5000;
 
+async function readRarDirectory(filePath) {
+  const { createExtractorFromFile } = await import('node-unrar-js');
+  const extractor = await createExtractorFromFile({ filepath: filePath });
+  const list = [...extractor.getFileList().fileHeaders];
+  const comic = list.find(h => !h.flags.directory && h.name.toLowerCase().endsWith('comicinfo.xml'));
+  let xml = null;
+  if (comic) {
+    const extracted = [...extractor.extract({ files: [comic.name] }).files];
+    if (extracted.length && extracted[0].extraction) {
+      xml = Buffer.from(extracted[0].extraction).toString('utf-8');
+    }
+  }
+  return {
+    names: list.map(h => h.name),
+    xml,
+  };
+}
+
 /** Read just the entry names + ComicInfo.xml, without loading the archive body. */
 async function readArchiveBits(filePath) {
+  if (/\.(cbr|rar)$/i.test(filePath)) {
+    try {
+      return await readRarDirectory(filePath);
+    } catch {
+      return { names: [], xml: null };
+    }
+  }
   try {
     const { names, entryData } = await readZipDirectory(filePath, {
       wantEntry: (n) => n.toLowerCase().endsWith('comicinfo.xml'),
     });
     return { names, xml: entryData ? entryData.toString('utf-8') : null };
   } catch {
-    // Rare archives (zip64 / unusual compression): fall back to the full reader.
-    const zip = new AdmZip(filePath);
-    const entries = zip.getEntries();
-    const comic = entries.find(e => e.entryName.toLowerCase().endsWith('comicinfo.xml'));
-    return {
-      names: entries.map(e => e.entryName),
-      xml: comic ? comic.getData().toString('utf-8') : null,
-    };
+    try {
+      const zip = new AdmZip(filePath);
+      const entries = zip.getEntries();
+      const comic = entries.find(e => e.entryName.toLowerCase().endsWith('comicinfo.xml'));
+      return {
+        names: entries.map(e => e.entryName),
+        xml: comic ? comic.getData().toString('utf-8') : null,
+      };
+    } catch {
+      try {
+        return await readRarDirectory(filePath);
+      } catch {
+        return { names: [], xml: null };
+      }
+    }
   }
 }
 
@@ -238,7 +270,7 @@ export async function readCbzInfo(filePath) {
   // short "v85" form (version tags like "Series 985 v2" yield no volume).
   const volume = volumeFromName(base);
   const hasSeriesTag = !!series;
-  if (!series) series = base.replace(/\.(cbz|epub)$/i, '');
+  if (!series) series = base.replace(/\.(cbz|cbr|rar|zip|epub)$/i, '');
   const info = { series, hasSeriesTag, mangadexId, comicvineId, publisher, genre, manga, volume, issueNum, chapters, isEpub, pageCount, error };
 
   if (st) {
@@ -442,7 +474,7 @@ async function _scanLibrary({ seriesId } = {}) {
     // When matching was via directory fallback and no "Vol N" keyword appears in the
     // filename, resolve the filename number.
     if (matchedCount === 0 && !info.volume && usedDirFallback) {
-      const base = path.basename(file).replace(/\.(cbz|epub)$/i, '');
+      const base = path.basename(file).replace(/\.(cbz|cbr|rar|zip|epub)$/i, '');
       // A version-tagged chapter ("One Piece 985 v2.cbz") is matched by its
       // chapter number — never read the big number as a volume, and never let
       // the small "v2" become a volume either.

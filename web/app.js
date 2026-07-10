@@ -574,7 +574,7 @@ async function showDetail(id) {
 
   // Secondary actions tucked into a "More" menu to declutter the toolbar.
   const moreMenu = menuButton('⋯ More', [
-    { label: 'Upload files', icon: '⬆', onClick: () => openUploadChapterModal({ seriesId: id, seriesTitle: s.title, onUploaded: () => { startLive(); showDetail(id); } }) },
+    { label: 'Upload files', icon: '⬆', onClick: () => openUploadChapterModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onUploaded: () => { startLive(); showDetail(id); } }) },
     { label: 'Manage Files', icon: '🗂', onClick: () => openManageFilesModal({
         seriesId: id,
         seriesTitle: s.title,
@@ -730,7 +730,7 @@ async function showDetail(id) {
     if (c.state !== 'imported' && c.state !== 'downloading') {
       const uploadBtn = h('<button class="btn sm icon" title="Upload file(s) for this chapter">⬆</button>');
       uploadBtn.onclick = () => openUploadChapterModal({
-        seriesId: id, seriesTitle: s.title, chapterNumber: c.number,
+        seriesId: id, seriesTitle: s.title, chapters: s.chapters, chapterNumber: c.number, initialMode: 'chapter',
         onUploaded: () => { startLive(); showDetail(id); },
       });
       act.append(uploadBtn);
@@ -1007,7 +1007,19 @@ async function showDetail(id) {
         }
       });
     };
-    actsContainer.append(searchVolBtn);
+    if (vk !== 'none') {
+      const uploadVolBtn = h('<button class="btn sm icon" title="Upload file(s) for this volume">⬆</button>');
+      uploadVolBtn.onclick = (e) => {
+        e.stopPropagation();
+        openUploadChapterModal({
+          seriesId: id, seriesTitle: s.title, chapters: s.chapters, chapterNumber: vk, initialMode: 'volume',
+          onUploaded: () => { startLive(); showDetail(id); },
+        });
+      };
+      actsContainer.append(searchVolBtn, uploadVolBtn);
+    } else {
+      actsContainer.append(searchVolBtn);
+    }
     // Delete volume files button (only for named volumes that have imported chapters)
     if (vk !== 'none' && imported > 0) {
       const delVolBtn = h('<button class="btn sm danger icon" title="Delete all local files for this volume">🗑</button>');
@@ -2095,11 +2107,19 @@ function openResetSeriesModal({ seriesId, seriesTitle, onReset }) {
 
 // --- Upload chapter modal (manual CBZ/image upload when no provider has it) ---
 // Purely a UX pre-fill for the editable chapter-# field below — never authoritative.
-function guessChapterNumberFromFilename(name) {
-  const hash = String(name || '').match(/#\s*0*(\d+(?:\.\d+)?)\b/);
-  if (hash) return hash[1];
-  const generic = String(name || '').match(/(\d+(?:\.\d+)?)/);
-  return generic ? generic[1] : '';
+// --- Upload chapter/volume modal (manual archive/image upload when no provider has it) ---
+// Purely a UX pre-fill for the editable chapter/volume # field below — never authoritative.
+function guessUploadInfoFromFilename(name, defaultMode = 'chapter', defaultNumber = '') {
+  if (defaultNumber !== '') {
+    return { mode: defaultMode, number: defaultNumber };
+  }
+  const base = String(name || '').replace(/\.(cbz|cbr|rar|zip|epub)$/i, '');
+  const chMatch = base.match(/(?:^|[-_\s\[(])(?:ch(?:apter)?|c|#)\.?\s*0*(\d+(?:\.\d+)?)\b/i);
+  if (chMatch) return { mode: 'chapter', number: chMatch[1] };
+  const volMatch = base.match(/(?:^|[-_\s\[(])(?:vol(?:ume)?|v)\.?\s*0*(\d+(?:\.\d+)?)\b/i);
+  if (volMatch) return { mode: 'volume', number: volMatch[1] };
+  const generic = base.match(/(?:^|[-_\s\[(#])0*(\d+(?:\.\d+)?)\b/);
+  return { mode: defaultMode, number: generic ? generic[1] : '' };
 }
 
 async function postUploadChapter(seriesId, row) {
@@ -2139,18 +2159,23 @@ function summarizeUploadResult(data) {
   return '✓ done';
 }
 
-function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onUploaded }) {
+function openUploadChapterModal({ seriesId, seriesTitle, chapters = [], chapterNumber = '', initialMode = 'chapter', onUploaded }) {
   const existing = document.getElementById('upload-chapter-modal');
   if (existing) existing.remove();
+
+  const uniqueChs = [...new Set(chapters.map(c => String(c.number)))].sort((a,b) => parseFloat(a) - parseFloat(b));
+  const uniqueVols = [...new Set(chapters.map(c => c.volume).filter(v => v !== null && v !== ''))].sort((a,b) => parseFloat(a) - parseFloat(b));
 
   const modal = h(`<div id="upload-chapter-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
     <div style="background:var(--panel);border:1px solid var(--line);border-radius:16px;width:100%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.9)">
       <div style="padding:18px 22px;border-bottom:1px solid var(--line)">
         <h3 style="margin:0;font-size:16px">⬆ Upload — ${esc(seriesTitle)}</h3>
-        <p class="muted" style="margin:6px 0 0;font-size:13px">Pick one-or-more .cbz/.zip files, and/or loose page images. Each CBZ defaults to one chapter — switch a row to "Volume" to upload a whole-volume archive instead (a folder-per-chapter layout inside it is split automatically; a flat archive is linked as-is to that volume's tracked chapters). Loose images are grouped into one chapter. Confirm the # for each row before uploading.</p>
+        <p class="muted" style="margin:6px 0 0;font-size:13px">Pick one-or-more .cbz/.cbr/.rar/.zip files, and/or loose page images. Each archive defaults to one chapter — switch a row to "Volume" to upload a whole-volume archive instead (a folder-per-chapter layout inside it is split automatically; a flat archive is linked as-is to that volume's tracked chapters). Loose images are grouped into one chapter or volume. Confirm the # for each row before uploading.</p>
       </div>
       <div id="uc-body" style="padding:16px 22px;overflow-y:auto;flex:1">
-        <input type="file" id="uc-picker" multiple accept=".cbz,.zip,image/*" style="margin-bottom:12px">
+        <datalist id="uc-ch-list">${uniqueChs.map(num => `<option value="${esc(num)}">Chapter #${esc(num)}</option>`).join('')}</datalist>
+        <datalist id="uc-vol-list">${uniqueVols.map(num => `<option value="${esc(num)}">Volume #${esc(num)}</option>`).join('')}</datalist>
+        <input type="file" id="uc-picker" multiple accept=".cbz,.cbr,.rar,.zip,image/*" style="margin-bottom:12px">
         <div id="uc-rows"></div>
       </div>
       <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
@@ -2160,7 +2185,7 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
     </div>
   </div>`);
 
-  // rows: [{ id, kind: 'archive'|'images', mode: 'chapter'|'volume' (archive only), label, chapterNumber, files, status, error }]
+  // rows: [{ id, kind: 'archive'|'images', mode: 'chapter'|'volume', label, chapterNumber, files, status, error }]
   let rows = [];
   const rowsEl = modal.querySelector('#uc-rows');
   const confirmBtn = modal.querySelector('#uc-confirm');
@@ -2168,13 +2193,13 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
   const renderRows = () => {
     rowsEl.innerHTML = rows.map(r => `
       <div class="row" data-row="${r.id}" style="align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)">
-        <span style="width:70px">${r.kind === 'archive' ? '📦 CBZ' : '🖼 Images'}</span>
+        <span style="width:70px">${r.kind === 'archive' ? '📦 Archive' : '🖼 Images'}</span>
         <span class="muted" style="flex:1;font-size:12px;word-break:break-all">${esc(r.label)}</span>
-        ${r.kind === 'archive' ? `<select class="uc-mode" data-row="${r.id}" style="width:6.5em">
+        <select class="uc-mode" data-row="${r.id}" style="width:6.5em">
           <option value="chapter" ${r.mode === 'chapter' ? 'selected' : ''}>Chapter</option>
           <option value="volume" ${r.mode === 'volume' ? 'selected' : ''}>Volume</option>
-        </select>` : ''}
-        <input class="uc-chnum" data-row="${r.id}" value="${esc(r.chapterNumber)}" style="width:5em" placeholder="${r.kind === 'archive' && r.mode === 'volume' ? 'vol #' : 'ch #'}">
+        </select>
+        <input class="uc-chnum" data-row="${r.id}" value="${esc(r.chapterNumber)}" list="${r.mode === 'volume' ? 'uc-vol-list' : 'uc-ch-list'}" style="width:5.5em" placeholder="${r.mode === 'volume' ? 'vol #' : 'ch #'}">
         <span class="uc-status" data-row="${r.id}" style="width:120px;font-size:12px">${r.status === 'done' ? summarizeUploadResult(r.result || {}) : r.status === 'error' ? `✕ ${esc(r.error || '')}` : r.status === 'uploading' ? '⏳…' : ''}</span>
       </div>`).join('');
     rowsEl.querySelectorAll('.uc-chnum').forEach(inp => {
@@ -2189,16 +2214,20 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
 
   modal.querySelector('#uc-picker').onchange = (e) => {
     const files = [...e.target.files];
-    const archives = files.filter(f => /\.(cbz|zip)$/i.test(f.name));
-    const images = files.filter(f => !/\.(cbz|zip)$/i.test(f.name));
-    rows = archives.map((f, i) => ({
-      id: `a${i}`, kind: 'archive', mode: 'chapter', label: f.name, files: [f],
-      chapterNumber: chapterNumber || guessChapterNumberFromFilename(f.name), status: 'pending',
-    }));
+    const archives = files.filter(f => /\.(cbz|cbr|rar|zip)$/i.test(f.name));
+    const images = files.filter(f => !/\.(cbz|cbr|rar|zip)$/i.test(f.name));
+    rows = archives.map((f, i) => {
+      const guessed = guessUploadInfoFromFilename(f.name, initialMode, chapterNumber);
+      return {
+        id: `a${i}`, kind: 'archive', mode: guessed.mode, label: f.name, files: [f],
+        chapterNumber: guessed.number, status: 'pending',
+      };
+    });
     if (images.length) {
+      const guessed = guessUploadInfoFromFilename(images[0].name, initialMode, chapterNumber);
       rows.push({
-        id: 'imgs', kind: 'images', label: `${images.length} image file(s)`, files: images,
-        chapterNumber: chapterNumber || guessChapterNumberFromFilename(images[0].name), status: 'pending',
+        id: 'imgs', kind: 'images', mode: guessed.mode, label: `${images.length} image file(s)`, files: images,
+        chapterNumber: guessed.number, status: 'pending',
       });
     }
     renderRows();
@@ -2213,7 +2242,7 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
     confirmBtn.disabled = true;
     let okCount = 0, errCount = 0;
     for (const r of rows) {
-      const isVolume = r.kind === 'archive' && r.mode === 'volume';
+      const isVolume = r.mode === 'volume';
       if (!r.chapterNumber || !String(r.chapterNumber).trim()) {
         r.status = 'error'; r.error = isVolume ? 'volume # required' : 'chapter # required'; errCount++; renderRows(); continue;
       }

@@ -17,7 +17,7 @@ import {
 } from '../../core/settings.js';
 import { followSeries, refreshSeries, previewRefreshSeries, promoteThresholdChapters } from '../../core/series-service.js';
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, DEFAULT_PROFILE_CONFIG } from '../../core/profiles.js';
-import { scanLibrary, readCbzInfo } from '../../core/library-scan.js';
+import { scanLibrary, readCbzInfo, chNumFromDir } from '../../core/library-scan.js';
 import { autoMapSuggestions, autoMatchSeriesFromDisk } from '../../core/auto-map.js';
 import { resolveVolumes } from '../../core/mapping.js';
 import { getVolumeStats, extrapolateVolumes, buildVolumeMapFromChapters, sanitizeVolumeMap } from '../../core/extrapolate.js';
@@ -26,12 +26,12 @@ import { volumeCbzName } from '../../core/packager.js';
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning, packageCompleteVolumes } from '../../download/worker.js';
 import { chapterStagingDir } from '../../download/downloader.js';
-import { extractToStaging, extractUploadedImagesToStaging, stageUploadedVolumeArchive } from '../../download/archive-downloader.js';
+import { extractToStaging, extractUploadedImagesToStaging, stageUploadedVolumeArchive, groupImagesByChapterFolder } from '../../download/archive-downloader.js';
 import { notify } from '../../core/notify.js';
 import { bus } from '../../core/events.js';
 import { getProviderStats } from '../../core/provider-stats.js';
 import { seriesView, chapterView } from '../views.js';
-import { normTitle, titlesMatch, destPath } from '../../core/library.js';
+import { normTitle, titlesMatch, destPath, writeCbz } from '../../core/library.js';
 
 const ACTIVE_STATES = ['wanted', 'queued', 'downloading', 'downloaded', 'failed'];
 
@@ -460,7 +460,7 @@ export default async function apiRoutes(app) {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
 
-    const ARCHIVE_EXTS = new Set(['.cbz', '.zip']);
+    const ARCHIVE_EXTS = new Set(['.cbz', '.zip', '.cbr', '.rar']);
     const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
     let chapterNumber = null;
     const archiveFiles = [];
@@ -537,14 +537,17 @@ export default async function apiRoutes(app) {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
 
+    const ARCHIVE_EXTS = new Set(['.cbz', '.zip', '.cbr', '.rar']);
+    const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
     let volume = null;
     const archiveFiles = [];
+    const imageFiles = [];
     for await (const part of req.parts()) {
       if (part.type === 'file') {
         const buf = await part.toBuffer();
         const ext = path.extname(part.filename || '').toLowerCase();
-        if (ext === '.cbz' || ext === '.zip') archiveFiles.push({ filename: part.filename, buf });
-        // non-archive files are silently ignored — a volume upload is archive-only
+        if (ARCHIVE_EXTS.has(ext)) archiveFiles.push({ filename: part.filename, buf });
+        else if (IMAGE_EXTS.has(ext)) imageFiles.push({ filename: part.filename, buf });
       } else if (part.fieldname === 'volume') {
         volume = part.value;
       }
@@ -553,8 +556,11 @@ export default async function apiRoutes(app) {
     if (!volume || !String(volume).trim()) {
       return reply.code(400).send({ error: 'volume required' });
     }
-    if (archiveFiles.length === 0) {
+    if (archiveFiles.length === 0 && imageFiles.length === 0) {
       return reply.code(400).send({ error: 'a CBZ/ZIP archive is required' });
+    }
+    if (archiveFiles.length > 0 && imageFiles.length > 0) {
+      return reply.code(400).send({ error: 'cannot mix an archive and loose images in one upload' });
     }
     if (archiveFiles.length > 1) {
       return reply.code(400).send({ error: 'only one archive per upload' });
@@ -563,7 +569,35 @@ export default async function apiRoutes(app) {
     const volKey = String(volume).trim();
     let staged;
     try {
-      staged = await stageUploadedVolumeArchive(archiveFiles[0].buf, s.id);
+      if (archiveFiles.length === 1) {
+        staged = await stageUploadedVolumeArchive(archiveFiles[0].buf, s.id);
+      } else {
+        const { hierarchical, groups } = groupImagesByChapterFolder(imageFiles.map(f => f.filename));
+        if (hierarchical) {
+          const byName = new Map(imageFiles.map(f => [f.filename, f]));
+          const ignoredRootFiles = groups.get('') || [];
+          const folders = [...groups.keys()].filter(k => k !== '');
+          const resolved = folders.map(folder => ({ folder, chapterNumber: chNumFromDir(folder), entryNames: groups.get(folder) }));
+          const unresolved = resolved.filter(r => !r.chapterNumber);
+          if (unresolved.length) {
+            throw new Error(`Could not determine a chapter number from folder name(s): ${unresolved.map(r => r.folder).join(', ')} — rename to include the chapter number, e.g. "Chapter 15".`);
+          }
+          const numbers = resolved.map(r => r.chapterNumber);
+          const dupes = [...new Set(numbers.filter((n, i) => numbers.indexOf(n) !== i))];
+          if (dupes.length) {
+            throw new Error(`Multiple folders resolved to the same chapter number: ${dupes.join(', ')}`);
+          }
+          const chapters = [];
+          for (const { chapterNumber, entryNames } of resolved) {
+            const files = entryNames.map(name => ({ filename: path.basename(name), buf: byName.get(name).buf }));
+            const { dir, pageCount } = await extractUploadedImagesToStaging(files, s.id, chapterNumber);
+            chapters.push({ number: chapterNumber, dir, pageCount });
+          }
+          staged = { hierarchical: true, chapters, ignoredRootFiles };
+        } else {
+          staged = { hierarchical: false };
+        }
+      }
     } catch (err) {
       return reply.code(400).send({ error: err.message });
     }
@@ -607,15 +641,26 @@ export default async function apiRoutes(app) {
     const fileName = volumeCbzName(s.title, volKey);
     const dest = destPath(s.title, fileName);
     mkdirSync(path.dirname(dest), { recursive: true });
-    const tmp = `${dest}.tmp`;
-    writeFileSync(tmp, archiveFiles[0].buf);
-    renameSync(tmp, dest);
+    let actualDest = dest;
+    if (archiveFiles.length === 1) {
+      const ext = path.extname(archiveFiles[0].filename).toLowerCase();
+      actualDest = (ext === '.cbr' || ext === '.rar') ? dest.replace(/\.cbz$/i, ext) : dest;
+      const tmp = `${actualDest}.tmp`;
+      writeFileSync(tmp, archiveFiles[0].buf);
+      renameSync(tmp, actualDest);
+    } else {
+      const entries = imageFiles
+        .sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))
+        .map(f => ({ archiveName: path.basename(f.filename), content: f.buf }));
+      const res = await writeCbz(entries, dest);
+      actualDest = res.path;
+    }
 
     for (const c of matched) {
-      setChapterState(c.id, 'bindery', { cbz_path: dest, staging_path: null, error: null });
+      setChapterState(c.id, 'bindery', { cbz_path: actualDest, staging_path: null, error: null });
     }
     logHistory('volume.uploaded', { seriesId: s.id, message: `Manually uploaded ${s.title} Vol. ${volKey} (${matched.length} chapters linked, flat archive)` });
-    return { ok: true, mode: 'flat', volume: volKey, path: dest, linkedChapters: matched.map(c => c.number) };
+    return { ok: true, mode: 'flat', volume: volKey, path: actualDest, linkedChapters: matched.map(c => c.number) };
   });
 
   // --- Delete series files ---
