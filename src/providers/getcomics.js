@@ -86,13 +86,17 @@ export function extractDownloadLinks(html) {
 }
 
 function rank(l) {
-  // Pixeldrain first: it's the one mirror with a clean, un-gated direct API
-  // (pixeldrain.com/api/file/{id}) — the "main server" DDL redirects to rotating
-  // comicfiles.ru hosts sitting behind a Cloudflare JS challenge that FlareSolverr
-  // routinely times out on, so what used to be our top pick is actually the least
-  // reliable. Then the main DDL, then any other mirror (WeTransfer/Mediafire/…)
-  // as a last-resort fallback ahead of anything unrecognised.
-  if (/pixeldrain/.test(l.text) || /pixeldrain/.test(l.href)) return 3;
+  // Order by how cleanly and reliably we can actually pull the file, NOT by the
+  // site's own "main server" preference. The "main server"/"download now" DDL
+  // redirects to rotating comicfiles.ru hosts behind a Cloudflare JS challenge
+  // that FlareSolverr routinely times out on (~70s of dead wait per attempt), so
+  // it must sit BELOW the mirrors we resolve directly:
+  //   pixeldrain — clean un-gated direct API (pixeldrain.com/api/file/{id})
+  //   mediafire  — clean landing-page → download*.mediafire.com resolver
+  //   main DDL   — canonical file but Cloudflare-gated (needs FlareSolverr)
+  //   other      — WeTransfer (best-effort) / TeraBox / Mega / unknown mirrors
+  if (/pixeldrain/.test(l.text) || /pixeldrain/.test(l.href)) return 4;
+  if (/media ?fire/.test(l.text) || /mediafire/.test(l.href)) return 3;
   if (/download now|main server/.test(l.text)) return 2;
   if (DLS_RE.test(l.href) || /fast-down/.test(l.href)) return 1;
   return 0;
