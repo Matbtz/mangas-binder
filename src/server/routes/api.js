@@ -662,11 +662,30 @@ export default async function apiRoutes(app) {
       actualDest = res.path;
     }
 
+    // Each matched chapter may currently point at its own physical file (e.g. a
+    // per-chapter CBZ from the original automatic download, or a differently-named
+    // volume file) — that old file is being superseded by actualDest and must be
+    // removed, not just left behind. Otherwise it lingers on disk right next to
+    // the new upload and Tome (which reads the library folder directly, not this
+    // app's DB) keeps serving its stale pages. Dedup by path since several
+    // chapters commonly already share one old file.
+    const removedOldPaths = new Set();
     for (const c of matched) {
       try {
         const sDir = chapterStagingDir(c.series_id, c.number);
         rmSync(sDir, { recursive: true, force: true });
       } catch {}
+      const oldPath = c.cbz_path;
+      if (oldPath && oldPath !== actualDest && !oldPath.startsWith('included_in_vol_') && !removedOldPaths.has(oldPath)) {
+        removedOldPaths.add(oldPath);
+        try {
+          if (existsSync(oldPath)) {
+            const st = statSync(oldPath);
+            if (st.isDirectory()) rmSync(oldPath, { recursive: true, force: true });
+            else unlinkSync(oldPath);
+          }
+        } catch {}
+      }
       setChapterState(c.id, 'bindery', { cbz_path: actualDest, staging_path: null, error: null });
     }
     logHistory('volume.uploaded', { seriesId: s.id, message: `Manually uploaded ${s.title} Vol. ${volKey} (${matched.length} chapters linked, flat archive)` });

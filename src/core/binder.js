@@ -165,7 +165,11 @@ export async function bindChapter(series, chapter, { coverUrl = null } = {}) {
     logPostprocessFallback('chapter.postprocess', label, series, stats);
     const fileName = isComic ? issueCbzName(series.title, num) : chapterCbzName(series.title, num);
     const dest = destPath(series.title, fileName);
-    const res = await writeCbz(entries, dest);
+    // Always overwrite: a re-download or re-upload of a chapter that was already
+    // packaged writes to this same deterministic path, and must replace the old
+    // content rather than silently keep it (writeCbz's default skip-if-exists is
+    // for first-time binds only — see bindVolume's callers, which force this too).
+    const res = await writeCbz(entries, dest, { overwrite: true });
     return { ...res, postprocess: summarizePostprocess(resolved, stats) };
   } finally {
     if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {});

@@ -143,6 +143,52 @@ test('upload-volume: flat archive is linked as-is to already-tracked chapters (n
   assert.equal(ch20.staging_path, null, 'no staging happened for the flat link case');
 });
 
+test('upload-volume: flat re-upload removes each chapter\'s old stale physical file, not just the new filename', async () => {
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const s = createSeries({
+    provider: 'comicvine', providerSeriesId: 'uv-stale', mediaType: 'comic',
+    downloadProvider: 'getcomics', title: 'Upload Volume Stale Test', language: 'en',
+    monitored: true, packagingMode: 'chapter',
+  });
+  upsertChapter(s.id, { provider: 'manual', number: '1', volume: '1' }, 'wanted');
+  upsertChapter(s.id, { provider: 'manual', number: '2', volume: '1' }, 'wanted');
+
+  // Simulate the original automatic download: each chapter already has its OWN
+  // separate physical CBZ on disk (chapter-packaging mode), containing stale/wrong
+  // content, tracked via cbz_path — nothing to do with the volume filename the
+  // upcoming flat volume upload will use.
+  const staleDir = path.join(tmp, 'stale-old-download');
+  mkdirSync(staleDir, { recursive: true });
+  const stalePath1 = path.join(staleDir, 'Old Series - Chapter 0001.cbz');
+  const stalePath2 = path.join(staleDir, 'Old Series - Chapter 0002.cbz');
+  writeFileSync(stalePath1, makeZip(['stale.jpg']));
+  writeFileSync(stalePath2, makeZip(['stale.jpg']));
+  let chapters = listChaptersForSeries(s.id);
+  setChapterState(chapters.find(c => c.number === '1').id, 'bindery', { cbz_path: stalePath1 });
+  setChapterState(chapters.find(c => c.number === '2').id, 'bindery', { cbz_path: stalePath2 });
+
+  const zipBuf = makeZip(['001.jpg', '002.jpg']); // flat, no chapter folders — the corrected volume
+  const res = await uploadVolume(s.id, { volume: '1' }, [{ filename: 'vol1.cbz', buf: zipBuf }]);
+
+  assert.equal(res.statusCode, 200, res.body);
+  const body = res.json();
+  assert.equal(body.mode, 'flat');
+
+  // The new, correct volume file replaces both chapters.
+  chapters = listChaptersForSeries(s.id);
+  const ch1 = chapters.find(c => c.number === '1');
+  const ch2 = chapters.find(c => c.number === '2');
+  assert.equal(ch1.cbz_path, body.path);
+  assert.equal(ch2.cbz_path, body.path);
+
+  // The stale per-chapter files from the original download must be gone — a
+  // reader that scans the library folder directly (not this app's DB) must never
+  // be able to keep serving them alongside the freshly uploaded volume.
+  assert.ok(!existsSync(stalePath1), 'stale chapter 1 file should have been removed');
+  assert.ok(!existsSync(stalePath2), 'stale chapter 2 file should have been removed');
+  assert.ok(existsSync(body.path), 'new volume file exists');
+});
+
 test('upload-volume: flat archive with no chapters tracked under that volume fails clearly', async () => {
   const s = createSeries({
     provider: 'comicvine', providerSeriesId: 'uv4', mediaType: 'comic',
