@@ -132,13 +132,26 @@ test('archive download: a 403 from a Cloudflare-guarded mirror retries via Flare
   // Regression for GetComics DDL links that redirect to a Cloudflare-challenged
   // mirror host (fs*.comicfiles.ru, etc.) — a Referer header alone still 403s;
   // only a solved cf_clearance cookie gets past it (same fix as MangaKatana).
+  // Also covers two non-obvious failure modes found after the first fix shipped:
+  //   - FlareSolverr must be pointed at the mirror's origin root, never the exact
+  //     file URL (solving the file URL crashes FlareSolverr's browser once the
+  //     challenge passes and it tries to natively download the response).
+  //   - The retry must hit the resolved mirror URL directly, not the original
+  //     getcomics.org/dls/… link — a Cookie header doesn't survive fetch()'s
+  //     cross-origin redirect, so retrying the redirecting link would silently
+  //     drop the solved session on the second hop.
   setSetting('flaresolverrUrl', 'http://flaresolverr.local/v1');
   const zipBuf = makeCbzBuffer(['001.jpg']);
+  const dlsUrl = 'https://getcomics.org/dls/abc';
+  const mirrorFileUrl = 'https://mirror.example/2024/file.cbz';
   const calls = [];
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
-    calls.push({ url: String(url), headers: opts?.headers || {} });
-    if (String(url).includes('flaresolverr.local')) {
+    const u = String(url);
+    calls.push({ url: u, headers: opts?.headers || {} });
+    if (u.includes('flaresolverr.local')) {
+      const { url: solvedUrl } = JSON.parse(opts.body);
+      assert.equal(solvedUrl, 'https://mirror.example/', 'solves the mirror origin root, not the file URL');
       return {
         ok: true,
         status: 200,
@@ -148,20 +161,27 @@ test('archive download: a 403 from a Cloudflare-guarded mirror retries via Flare
         }),
       };
     }
-    // First attempt (no solved cookie yet) 403s; the retry after solving succeeds.
-    const solved = (opts?.headers || {}).Cookie === 'cf_clearance=solved-token';
-    if (!solved) return { ok: false, status: 403, headers: { get: () => null } };
-    return { ok: true, status: 200, headers: { get: () => null }, arrayBuffer: async () => zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength) };
+    if (u === dlsUrl) {
+      // Simulates fetch() transparently following the 302 to the mirror: status/url
+      // reflect the final hop, same as a real fetch() Response after redirection.
+      return { ok: false, status: 403, url: mirrorFileUrl, headers: { get: () => null } };
+    }
+    if (u === mirrorFileUrl) {
+      const solved = (opts?.headers || {}).Cookie === 'cf_clearance=solved-token';
+      if (!solved) return { ok: false, status: 403, url: mirrorFileUrl, headers: { get: () => null } };
+      return { ok: true, status: 200, url: mirrorFileUrl, headers: { get: () => null }, arrayBuffer: async () => zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength) };
+    }
+    throw new Error(`unexpected fetch: ${u}`);
   };
   try {
     const provider = {
       name: 'getcomics', capabilities: { archive: true },
-      findIssueDownload: async () => ({ url: 'https://getcomics.org/dls/abc', headers: { Referer: 'https://getcomics.org/comic/x/' } }),
+      findIssueDownload: async () => ({ url: dlsUrl, headers: { Referer: 'https://getcomics.org/comic/x/' } }),
     };
     const { pageCount } = await downloadArchiveChapter(provider, { id: 999, title: 'Test' }, { number: '1' });
     assert.equal(pageCount, 1);
-    const solvedRetry = calls.find(c => c.headers.Cookie === 'cf_clearance=solved-token');
-    assert.ok(solvedRetry, 'retried the archive URL with the FlareSolverr-solved cookie');
+    const solvedRetry = calls.find(c => c.url === mirrorFileUrl && c.headers.Cookie === 'cf_clearance=solved-token');
+    assert.ok(solvedRetry, 'retried the resolved mirror URL directly with the FlareSolverr-solved cookie');
     assert.equal(solvedRetry.headers['User-Agent'], 'SolvedUA/1.0', 'reuses the browser UA FlareSolverr solved with');
   } finally {
     globalThis.fetch = origFetch;
