@@ -91,6 +91,18 @@ async function fetchArchiveBuffer(url, headers, signal) {
       finalUrl = direct;
       res = await fetchRetry(finalUrl, { headers, retries: 3, signal });
     }
+  } else if (/wetransfer\.com\/downloads\//i.test(finalUrl)) {
+    // WeTransfer: the download page is a JS SPA; the real file link comes from a
+    // POST to its download API (transfer id from the URL + security hash from the
+    // page), which returns a direct storage link. Best-effort — most GetComics
+    // WeTransfer links are expired or DMCA-blocked, so this usually returns null
+    // and we fall through to the next mirror.
+    const cookies = (res.headers.getSetCookie?.() || []).map(c => c.split(';')[0]).join('; ');
+    const direct = await resolveWetransferDirect(finalUrl, await res.text(), cookies, signal);
+    if (direct) {
+      finalUrl = direct;
+      res = await fetchRetry(finalUrl, { headers, retries: 3, signal });
+    }
   }
 
   // Cloudflare-challenged mirror (comicfiles.ru et al.): a Referer/User-Agent alone
@@ -154,6 +166,60 @@ export function extractMediafireDirect(html) {
     } catch { /* not valid base64 — fall through */ }
   }
   return null;
+}
+
+/**
+ * Pull the transfer id + security hash (and CSRF token, if present) out of a
+ * WeTransfer download page. The transfer id is the first path segment after
+ * /downloads/; the security hash is the last path segment, but the copy embedded
+ * in the page (`securityHash`) wins when present.
+ * @returns {{ transferId: string, securityHash: string, csrf: string|null }|null}
+ */
+export function extractWetransferParams(pageUrl, html) {
+  const m = pageUrl.match(/wetransfer\.com\/downloads\/([0-9a-z]+)(?:\/([0-9a-z]+))?\/([0-9a-z]+)/i);
+  if (!m) return null;
+  const transferId = m[1];
+  let securityHash = m[3];
+  const embedded = html.match(/"securityHash"\s*:\s*"([^"]+)"/);
+  if (embedded) securityHash = embedded[1];
+  if (!transferId || !securityHash) return null;
+  const csrf = (html.match(/<meta[^>]+name="csrf-token"[^>]+content="([^"]+)"/i)
+    || html.match(/"csrfToken"\s*:\s*"([^"]+)"/) || [])[1] || null;
+  return { transferId, securityHash, csrf };
+}
+
+/**
+ * Resolve a WeTransfer download page to its direct storage link by calling the
+ * transfer download API. Returns null on any failure (expired/blocked transfer,
+ * API shape change, missing params) so the caller falls through to the next
+ * mirror. Best-effort: the happy path can't be verified offline because live,
+ * non-blocked GetComics WeTransfer links are essentially unavailable.
+ * @returns {Promise<string|null>}
+ */
+export async function resolveWetransferDirect(pageUrl, html, cookies, signal) {
+  const params = extractWetransferParams(pageUrl, html);
+  if (!params) return null;
+  const api = `https://wetransfer.com/api/v4/transfers/${params.transferId}/download`;
+  const reqHeaders = {
+    'User-Agent': USER_AGENT,
+    'Content-Type': 'application/json',
+    Referer: pageUrl,
+    ...(params.csrf ? { 'x-csrf-token': params.csrf } : {}),
+    ...(cookies ? { Cookie: cookies } : {}),
+  };
+  try {
+    const r = await fetch(api, {
+      method: 'POST',
+      headers: reqHeaders,
+      body: JSON.stringify({ security_hash: params.securityHash, intent: 'entire_transfer' }),
+      signal,
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return typeof data?.direct_link === 'string' ? data.direct_link : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
