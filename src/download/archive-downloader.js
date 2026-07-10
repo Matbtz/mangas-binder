@@ -75,12 +75,22 @@ async function fetchArchiveBuffer(url, headers, signal) {
   // short-lived /dls/ links 302 out to the real mirror host.
   let finalUrl = res.url || url;
 
-  // Pixeldrain's DDL lands on its /u/{id} HTML *viewer* page, not the file. Rewrite
-  // to the direct-download API, which serves the raw CBZ and isn't Cloudflare-gated.
+  // Some mirrors hand back an intermediate page, not the file — resolve those to a
+  // real direct-download URL before we validate/keep the response.
   const pd = finalUrl.match(/^https?:\/\/pixeldrain\.com\/u\/([\w-]+)/i);
   if (pd) {
+    // Pixeldrain: /u/{id} is an HTML viewer; its direct API /api/file/{id} serves
+    // the raw CBZ and isn't Cloudflare-gated (pure URL rewrite, no page parse).
     finalUrl = `https://pixeldrain.com/api/file/${pd[1]}`;
     res = await fetchRetry(finalUrl, { headers, retries: 3, signal });
+  } else if (/mediafire\.com\/(?:file|file_premium)\//i.test(finalUrl)) {
+    // MediaFire: the /file/ landing page holds the real download*.mediafire.com
+    // link in its download button — parse it out and fetch that directly.
+    const direct = extractMediafireDirect(await res.text());
+    if (direct) {
+      finalUrl = direct;
+      res = await fetchRetry(finalUrl, { headers, retries: 3, signal });
+    }
   }
 
   // Cloudflare-challenged mirror (comicfiles.ru et al.): a Referer/User-Agent alone
@@ -125,6 +135,25 @@ async function fetchArchiveBuffer(url, headers, signal) {
     throw new Error('Downloaded file is not a zip/CBZ archive');
   }
   return buf;
+}
+
+/**
+ * Pull MediaFire's real download*.mediafire.com URL out of a /file/ landing page.
+ * The download button's href carries it directly; newer pages occasionally
+ * base64-scramble it into a `data-scrambled-url` attribute instead.
+ * @returns {string|null}
+ */
+export function extractMediafireDirect(html) {
+  const direct = html.match(/href="(https?:\/\/download[^"]+\.mediafire\.com\/[^"]+)"/i);
+  if (direct) return direct[1].replace(/&amp;/g, '&');
+  const scrambled = html.match(/data-scrambled-url="([^"]+)"/i);
+  if (scrambled) {
+    try {
+      const decoded = Buffer.from(scrambled[1], 'base64').toString('utf8');
+      if (/^https?:\/\//.test(decoded)) return decoded;
+    } catch { /* not valid base64 — fall through */ }
+  }
+  return null;
 }
 
 /**
