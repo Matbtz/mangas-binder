@@ -15,7 +15,7 @@ const { ensureSeeded, setSetting } = await import('../src/core/settings.js');
 const { createSeries, listChaptersForSeries, upsertChapter, setChapterState } = await import('../src/core/repo.js');
 const { buildComicInfoXml } = await import('../src/core/comicinfo.js');
 const { issueCbzName, volumeCbzName } = await import('../src/core/packager.js');
-const { extractToStaging, downloadArchiveChapter } = await import('../src/download/archive-downloader.js');
+const { extractToStaging, downloadArchiveChapter, extractMediafireDirect } = await import('../src/download/archive-downloader.js');
 const { bindChapter } = await import('../src/core/binder.js');
 const { readCbzInfo } = await import('../src/core/library-scan.js');
 const { parseSearchResults, extractDownloadLinks } = await import('../src/providers/getcomics.js');
@@ -231,6 +231,59 @@ test('archive download: falls back to the pixeldrain mirror when the main server
     assert.equal(pageCount, 2, 'archive extracted from the pixeldrain fallback');
     assert.ok(seen.includes(mainDls), 'tried the main server first');
     assert.ok(seen.includes('https://pixeldrain.com/api/file/sZZFJbou'), 'rewrote the pixeldrain viewer URL to the direct-download API');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('extractMediafireDirect pulls the direct download link from a /file/ landing page', () => {
+  const page = `<a aria-label="Download file" class="input popsok"
+        href="https://download941.mediafire.com/abc123/u1oep9/Star+Wars.cbz?x=1&amp;y=2"
+        id="downloadButton" rel="nofollow">Download (230MB)</a>`;
+  assert.equal(
+    extractMediafireDirect(page),
+    'https://download941.mediafire.com/abc123/u1oep9/Star+Wars.cbz?x=1&y=2', // &amp; decoded
+  );
+  // Base64 `data-scrambled-url` fallback used on some newer pages.
+  const scrambled = Buffer.from('https://download9.mediafire.com/z/f.cbz').toString('base64');
+  assert.equal(extractMediafireDirect(`<a data-scrambled-url="${scrambled}">x</a>`), 'https://download9.mediafire.com/z/f.cbz');
+  // No recognisable link → null (lets the caller fall through to the next mirror).
+  assert.equal(extractMediafireDirect('<html>no link here</html>'), null);
+});
+
+test('archive download: resolves a MediaFire landing page to its direct download', async () => {
+  // Real-world #6 failure: the only working mirror was MediaFire, whose /file/ URL
+  // is an HTML landing page (rejected as "not an archive"). The downloader must
+  // parse the download button and fetch the real download*.mediafire.com link.
+  setSetting('flaresolverrUrl', '');
+  const zipBuf = makeCbzBuffer(['001.jpg']);
+  const arrBuf = () => zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength);
+  const mfDls = 'https://getcomics.org/dls/MF';
+  const mfPage = 'https://www.mediafire.com/file_premium/u1oep9/Star_Wars.cbz/file';
+  const mfDirect = 'https://download941.mediafire.com/abc/u1oep9/Star+Wars.cbz';
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    seen.push(u);
+    // /dls/ redirector → 302 to the MediaFire HTML landing page.
+    if (u === mfDls) {
+      return { ok: true, status: 200, url: mfPage, headers: { get: () => 'text/html' },
+        text: async () => `<a id="downloadButton" href="${mfDirect}" rel="nofollow">Download</a>` };
+    }
+    if (u === mfDirect) {
+      return { ok: true, status: 200, url: u, headers: { get: () => 'application/zip' }, arrayBuffer: arrBuf };
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  try {
+    const provider = {
+      name: 'getcomics', capabilities: { archive: true },
+      findIssueDownload: async () => ({ urls: [mfDls], url: mfDls, headers: { Referer: 'https://getcomics.org/comic/x/' } }),
+    };
+    const { pageCount } = await downloadArchiveChapter(provider, { id: 997, title: 'Test' }, { number: '6' });
+    assert.equal(pageCount, 1, 'archive extracted from the resolved MediaFire direct link');
+    assert.ok(seen.includes(mfDirect), 'fetched the parsed download*.mediafire.com direct link');
   } finally {
     globalThis.fetch = origFetch;
   }
