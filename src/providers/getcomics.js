@@ -54,12 +54,20 @@ export function parseSearchResults(html) {
   return out;
 }
 
-const HOST_RE = /(getcomics\.org\/dlds|fast-down|cdn|pixeldrain\.com\/api\/file|\/run\/|\.cbz|\.cbr|\.zip)/i;
+// GetComics routes every mirror button through the same /dls/ (older: /dlds/)
+// redirector, so matching that path captures *all* mirrors regardless of their
+// button label — the download-host names below only matter for a manually-pasted
+// direct link that skips the redirector.
+const DLS_RE = /getcomics\.org\/(?:dls|dlds)\//i;
+const HOST_RE = /(fast-down|cdn|pixeldrain\.com\/api\/file|\/run\/|\.cbz|\.cbr|\.zip)/i;
 
 /**
  * Extract candidate download links from a post page, most-reliable first.
- * GetComics renders buttons as <a class="aio-button" …> with text like
- * "DOWNLOAD NOW", "Main Server", "Mirror Download", plus host mirrors.
+ * GetComics renders every mirror as an <a> pointing at its /dls/ redirector
+ * (labelled "DOWNLOAD NOW", "Pixeldrain", "WeTransfer", "Mediafire", …). We keep
+ * ALL of them — even ones whose label we don't recognise — so the downloader can
+ * fall through the whole list; a mirror we can't yet resolve simply fails its
+ * attempt and the loop moves on to the next candidate.
  */
 export function extractDownloadLinks(html) {
   const links = [];
@@ -68,11 +76,11 @@ export function extractDownloadLinks(html) {
   while ((m = re.exec(html)) !== null) {
     const href = m[1];
     const text = m[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const looksLikeDl = /download now|main server|mirror|fast down|pixeldrain|media ?fire/.test(text)
+    const looksLikeDl = DLS_RE.test(href)
+      || /download now|main server|mirror|fast down|pixeldrain|we ?transfer|media ?fire/.test(text)
       || HOST_RE.test(href);
     if (looksLikeDl && /^https?:\/\//.test(href)) links.push({ href, text });
   }
-  // Prefer the main DDL ("download now"/"main server") over mirrors.
   links.sort((a, b) => rank(b) - rank(a));
   return [...new Map(links.map(l => [l.href, l])).values()].map(l => l.href);
 }
@@ -82,10 +90,11 @@ function rank(l) {
   // (pixeldrain.com/api/file/{id}) — the "main server" DDL redirects to rotating
   // comicfiles.ru hosts sitting behind a Cloudflare JS challenge that FlareSolverr
   // routinely times out on, so what used to be our top pick is actually the least
-  // reliable. Then the main/fast-down DDL, then anything else.
+  // reliable. Then the main DDL, then any other mirror (WeTransfer/Mediafire/…)
+  // as a last-resort fallback ahead of anything unrecognised.
   if (/pixeldrain/.test(l.text) || /pixeldrain/.test(l.href)) return 3;
   if (/download now|main server/.test(l.text)) return 2;
-  if (/getcomics\.org\/dlds|fast-down/.test(l.href)) return 1;
+  if (DLS_RE.test(l.href) || /fast-down/.test(l.href)) return 1;
   return 0;
 }
 

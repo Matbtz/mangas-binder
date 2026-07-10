@@ -118,14 +118,20 @@ test('getcomics HTML parsers extract posts and ranked download links', () => {
   assert.match(posts[0].title, /Saga #1/);
 
   const post = `
-    <a class="aio-button" href="https://pixeldrain.com/api/file/abc">Pixeldrain</a>
-    <a class="aio-red" href="https://getcomics.org/dlds/12345/">DOWNLOAD NOW</a>
+    <a class="aio-button" href="https://getcomics.org/dls/PIX/">Pixeldrain</a>
+    <a class="aio-red" href="https://getcomics.org/dls/MAIN/">DOWNLOAD NOW</a>
+    <a class="aio-button" href="https://getcomics.org/dls/WET/">WeTransfer</a>
     <a href="https://example.com/random">unrelated</a>`;
   const links = extractDownloadLinks(post);
-  // Pixeldrain (un-gated direct API) now outranks the Cloudflare-gated main DDL;
-  // the main DDL is still kept as a fallback candidate; unrelated link excluded.
-  assert.equal(links[0], 'https://pixeldrain.com/api/file/abc');
-  assert.ok(links.includes('https://getcomics.org/dlds/12345/'));
+  // Every /dls/ mirror is captured regardless of label, ranked pixeldrain (un-gated
+  // direct API) > main DDL > any other mirror (e.g. WeTransfer) as a last resort.
+  // The main DDL and the unlabelled-by-our-rules WeTransfer are both kept as
+  // fallback candidates; the unrelated link is excluded.
+  assert.deepEqual(links, [
+    'https://getcomics.org/dls/PIX/',
+    'https://getcomics.org/dls/MAIN/',
+    'https://getcomics.org/dls/WET/',
+  ]);
   assert.ok(!links.includes('https://example.com/random'));
 });
 
