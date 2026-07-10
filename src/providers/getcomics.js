@@ -78,9 +78,14 @@ export function extractDownloadLinks(html) {
 }
 
 function rank(l) {
-  if (/download now|main server/.test(l.text)) return 3;
-  if (/getcomics\.org\/dlds|fast-down/.test(l.href)) return 2;
-  if (/pixeldrain/.test(l.href)) return 1;
+  // Pixeldrain first: it's the one mirror with a clean, un-gated direct API
+  // (pixeldrain.com/api/file/{id}) — the "main server" DDL redirects to rotating
+  // comicfiles.ru hosts sitting behind a Cloudflare JS challenge that FlareSolverr
+  // routinely times out on, so what used to be our top pick is actually the least
+  // reliable. Then the main/fast-down DDL, then anything else.
+  if (/pixeldrain/.test(l.text) || /pixeldrain/.test(l.href)) return 3;
+  if (/download now|main server/.test(l.text)) return 2;
+  if (/getcomics\.org\/dlds|fast-down/.test(l.href)) return 1;
   return 0;
 }
 
@@ -107,14 +112,18 @@ export async function search(query) {
 /**
  * Resolve a downloadable archive for a single issue.
  *
- * The DDL link (getcomics.org/dlds/… or a mirror host) rejects direct fetches
- * with no `Referer` — same anti-hotlink pattern as MangaKatana's image CDN — so
- * we hand back the post page as `headers.Referer` for the archive-downloader to
- * send on the actual file request; without it every download 403s.
+ * Returns EVERY candidate mirror (ranked, pixeldrain first) as `urls`, not just
+ * one, so the archive-downloader can fall back to the next when a mirror fails —
+ * critical because the "main server" DDL redirects to Cloudflare-gated
+ * comicfiles.ru hosts that often can't be solved, while pixeldrain works directly.
+ *
+ * The DDL link also rejects direct fetches with no `Referer` (same anti-hotlink
+ * pattern as MangaKatana's image CDN), so we hand back the post page as
+ * `headers.Referer` for the downloader to send on the actual file request.
  *
  * @param {object} series  row (title, year)
  * @param {object} chapter row (number)
- * @returns {Promise<{ url, filename, kind, headers } | null>}
+ * @returns {Promise<{ urls, url, filename, kind, headers } | null>}
  */
 export async function findIssueDownload(series, chapter) {
   const q = `${cleanTitle(series.title)} ${chapter.number}`;
@@ -128,27 +137,26 @@ export async function findIssueDownload(series, chapter) {
 
   // Prefer a post whose title contains the issue number.
   const post = results.find(r => matchesIssue(r.title, chapter.number)) || results[0];
-  const links = extractDownloadLinks(await getHtml(post.id));
-  if (!links.length) return null;
+  const urls = extractDownloadLinks(await getHtml(post.id));
+  if (!urls.length) return null;
 
-  const url = links[0];
   return {
-    url,
-    filename: `${cleanTitle(series.title)} ${chapter.number}.${archiveKind(url)}`,
-    kind: archiveKind(url),
+    urls,
+    url: urls[0], // backward-compat: first candidate
+    filename: `${cleanTitle(series.title)} ${chapter.number}.${archiveKind(urls[0])}`,
+    kind: archiveKind(urls[0]),
     headers: { Referer: post.id },
   };
 }
 
 export async function resolvePostUrl(postUrl) {
   if (HOST_RE.test(postUrl) && !postUrl.includes('getcomics.org/')) {
-    return { url: postUrl, filename: `manual.${archiveKind(postUrl)}`, kind: archiveKind(postUrl), headers: { Referer: `${baseUrl()}/` } };
+    return { urls: [postUrl], url: postUrl, filename: `manual.${archiveKind(postUrl)}`, kind: archiveKind(postUrl), headers: { Referer: `${baseUrl()}/` } };
   }
   const html = await getHtml(postUrl);
-  const links = extractDownloadLinks(html);
-  if (!links.length) return null;
-  const url = links[0];
-  return { url, filename: `manual.${archiveKind(url)}`, kind: archiveKind(url), headers: { Referer: postUrl } };
+  const urls = extractDownloadLinks(html);
+  if (!urls.length) return null;
+  return { urls, url: urls[0], filename: `manual.${archiveKind(urls[0])}`, kind: archiveKind(urls[0]), headers: { Referer: postUrl } };
 }
 
 /** Reachability check for the Settings "Test connection" button. */

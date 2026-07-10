@@ -36,38 +36,62 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
   const found = customUrl
     ? (provider.resolvePostUrl ? await provider.resolvePostUrl(customUrl) : { url: customUrl, kind: customUrl.endsWith('.zip') ? 'zip' : 'cbz' })
     : await provider.findIssueDownload(series, chapter);
-  if (!found?.url) throw new Error(`No download found for ${series.title} #${chapter.number}`);
+
+  // Providers now hand back every ranked mirror as `urls`; older shapes / the
+  // no-resolvePostUrl branch still carry a single `url`.
+  const candidates = found?.urls?.length ? found.urls : (found?.url ? [found.url] : []);
+  if (!candidates.length) throw new Error(`No download found for ${series.title} #${chapter.number}`);
   if (found.kind === 'cbr') {
     throw new Error(`Got a CBR (RAR) archive for #${chapter.number}; CBR isn't supported — only CBZ/ZIP.`);
   }
 
   const headers = { 'User-Agent': USER_AGENT, ...(found.headers || {}) };
-  let res = await fetchRetry(found.url, { headers, retries: 3, signal });
-  // fetch()'s `url` reflects the final address after following redirects — this is
-  // the actual DDL mirror host (GetComics' short-lived /dls/ links 302 elsewhere),
-  // which is what we need to target below, both for solving and for the retry.
-  const finalUrl = res.url || found.url;
+  // Try each mirror in turn; the first that yields a valid archive wins. GetComics'
+  // top-ranked "main server" mirror redirects to Cloudflare-gated comicfiles.ru
+  // hosts that FlareSolverr often can't solve, so falling back to the pixeldrain
+  // mirror (a clean, un-gated direct API) is what actually gets the file.
+  let lastErr;
+  for (const candidate of candidates) {
+    try {
+      const buf = await fetchArchiveBuffer(candidate, headers, signal);
+      return await extractToStaging(buf, series.id, chapter.number);
+    } catch (err) {
+      lastErr = err;
+      if (candidates.length > 1) {
+        logHistory('archive.mirror.failed', { message: `Mirror failed for #${chapter.number}: ${err.message}` });
+      }
+    }
+  }
+  throw new Error(`Archive download failed for #${chapter.number}: ${lastErr?.message || 'no working mirror'}`);
+}
 
-  // Many DDL mirrors (GetComics' rotating comicfiles.ru/fs*.* hosts, etc.) sit
-  // behind a real Cloudflare JS challenge — a Referer/User-Agent alone can't get
-  // past it, only a browser that actually solves it can. Same anti-bot situation
-  // as MangaKatana: if FlareSolverr is configured, solve it to obtain the
-  // cf_clearance cookie + the browser UA it used, then retry the download.
-  //
-  // Two things that look reasonable but don't work, discovered the hard way:
-  //   - Solving the *file* URL itself: once the challenge passes, Cloudflare hands
-  //     back the raw archive, which makes FlareSolverr's headless Chrome attempt a
-  //     native file download instead of a page load — that crashes the navigation
-  //     and FlareSolverr's own request handler, reported back to us as a bare
-  //     HTTP 500 with no useful detail. Solving the mirror's origin root instead
-  //     always resolves to an HTML response, so the challenge-solve stays a normal
-  //     page load; the resulting cf_clearance cookie is valid for the whole zone.
-  //   - Retrying against the original found.url: it 302-redirects cross-origin to
-  //     the mirror, and a manually-set Cookie header does not survive a
-  //     cross-origin redirect in fetch() (unlike Referer) — it gets silently
-  //     dropped on the second hop, so the solved session never actually reaches
-  //     the mirror. Retrying against finalUrl (the mirror URL itself) sends it
-  //     directly, with no redirect to lose it across.
+/**
+ * Fetch one mirror candidate and return the raw archive bytes, or throw if this
+ * mirror doesn't yield a valid CBZ/ZIP (so the caller can try the next one).
+ */
+async function fetchArchiveBuffer(url, headers, signal) {
+  let res = await fetchRetry(url, { headers, retries: 3, signal });
+  // fetch()'s `url` reflects the final address after following redirects — GetComics'
+  // short-lived /dls/ links 302 out to the real mirror host.
+  let finalUrl = res.url || url;
+
+  // Pixeldrain's DDL lands on its /u/{id} HTML *viewer* page, not the file. Rewrite
+  // to the direct-download API, which serves the raw CBZ and isn't Cloudflare-gated.
+  const pd = finalUrl.match(/^https?:\/\/pixeldrain\.com\/u\/([\w-]+)/i);
+  if (pd) {
+    finalUrl = `https://pixeldrain.com/api/file/${pd[1]}`;
+    res = await fetchRetry(finalUrl, { headers, retries: 3, signal });
+  }
+
+  // Cloudflare-challenged mirror (comicfiles.ru et al.): a Referer/User-Agent alone
+  // can't pass a real JS challenge — only a browser that solves it can. If
+  // FlareSolverr is configured, solve the mirror's ORIGIN ROOT (never the file URL:
+  // once the challenge passes Cloudflare returns the raw archive, which makes
+  // FlareSolverr's headless Chrome attempt a native download and crash the
+  // navigation → a bare HTTP 500). The resulting cf_clearance cookie is valid for
+  // the whole zone; retry the file URL DIRECTLY with it — a manually-set Cookie
+  // header does not survive fetch()'s cross-origin redirect, so we must not retry
+  // the original redirecting /dls/ link.
   if (res.status === 403 && flareEnabled()) {
     try {
       const origin = `${new URL(finalUrl).origin}/`;
@@ -83,12 +107,24 @@ export async function downloadArchiveChapter(provider, series, chapter, { signal
   }
 
   if (!res.ok) {
-    throw new Error(`Archive HTTP ${res.status} for #${chapter.number}${res.status === 403 ? ' (Cloudflare — configure FlareSolverr in Settings → Sources)' : ''}`);
+    throw new Error(`Archive HTTP ${res.status}${res.status === 403 ? ' (Cloudflare — configure FlareSolverr in Settings → Sources)' : ''}`);
   }
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length === 0) throw new Error(`Empty archive for #${chapter.number}`);
 
-  return extractToStaging(buf, series.id, chapter.number);
+  // A challenge / error page comes back as HTML, not the archive — reject it so the
+  // caller falls through to the next mirror instead of choking on a bad zip.
+  const contentType = res.headers.get('content-type') || '';
+  if (/text\/html/i.test(contentType)) {
+    throw new Error(`Mirror returned an HTML page, not an archive (${finalUrl})`);
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length === 0) throw new Error('Empty archive');
+  // Validate the zip local-file-header magic (PK\x03\x04 / \x05\x06 / \x07\x08) so a
+  // stray HTML/JSON body served with a non-HTML content-type is caught here too.
+  if (!(buf[0] === 0x50 && buf[1] === 0x4b)) {
+    throw new Error('Downloaded file is not a zip/CBZ archive');
+  }
+  return buf;
 }
 
 /**

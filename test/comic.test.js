@@ -122,9 +122,10 @@ test('getcomics HTML parsers extract posts and ranked download links', () => {
     <a class="aio-red" href="https://getcomics.org/dlds/12345/">DOWNLOAD NOW</a>
     <a href="https://example.com/random">unrelated</a>`;
   const links = extractDownloadLinks(post);
-  // "DOWNLOAD NOW" main DDL outranks the mirror; unrelated link excluded.
-  assert.equal(links[0], 'https://getcomics.org/dlds/12345/');
-  assert.ok(links.includes('https://pixeldrain.com/api/file/abc'));
+  // Pixeldrain (un-gated direct API) now outranks the Cloudflare-gated main DDL;
+  // the main DDL is still kept as a fallback candidate; unrelated link excluded.
+  assert.equal(links[0], 'https://pixeldrain.com/api/file/abc');
+  assert.ok(links.includes('https://getcomics.org/dlds/12345/'));
   assert.ok(!links.includes('https://example.com/random'));
 });
 
@@ -186,5 +187,45 @@ test('archive download: a 403 from a Cloudflare-guarded mirror retries via Flare
   } finally {
     globalThis.fetch = origFetch;
     setSetting('flaresolverrUrl', '');
+  }
+});
+
+test('archive download: falls back to the pixeldrain mirror when the main server is Cloudflare-blocked', async () => {
+  // The real-world failure: GetComics' top "main server" mirror redirects to a
+  // Cloudflare-gated comicfiles.ru host that FlareSolverr times out solving. The
+  // downloader must move on to the next candidate — pixeldrain — whose /u/{id}
+  // viewer URL we rewrite to the un-gated /api/file/{id} direct download.
+  setSetting('flaresolverrUrl', ''); // no solver available → main server can't be rescued
+  const zipBuf = makeCbzBuffer(['001.jpg', '002.jpg']);
+  const arrBuf = () => zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength);
+  const mainDls = 'https://getcomics.org/dls/MAIN';
+  const pxDls = 'https://getcomics.org/dls/PX';
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    seen.push(u);
+    // Main server → follows 302 to a Cloudflare-challenged mirror serving an HTML
+    // challenge page with a 403.
+    if (u === mainDls) return { ok: false, status: 403, url: 'https://fs2.comicfiles.ru/x.cbz', headers: { get: () => 'text/html' } };
+    // Pixeldrain DDL → 302 to its HTML *viewer* page (200, but not the file).
+    if (u === pxDls) return { ok: true, status: 200, url: 'https://pixeldrain.com/u/sZZFJbou', headers: { get: () => 'text/html' }, arrayBuffer: async () => new ArrayBuffer(0) };
+    // The rewritten direct-download API serves the real archive.
+    if (u === 'https://pixeldrain.com/api/file/sZZFJbou') {
+      return { ok: true, status: 200, url: u, headers: { get: () => 'application/vnd.comicbook+zip' }, arrayBuffer: arrBuf };
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  try {
+    const provider = {
+      name: 'getcomics', capabilities: { archive: true },
+      findIssueDownload: async () => ({ urls: [mainDls, pxDls], url: mainDls, headers: { Referer: 'https://getcomics.org/comic/x/' } }),
+    };
+    const { pageCount } = await downloadArchiveChapter(provider, { id: 998, title: 'Test' }, { number: '3' });
+    assert.equal(pageCount, 2, 'archive extracted from the pixeldrain fallback');
+    assert.ok(seen.includes(mainDls), 'tried the main server first');
+    assert.ok(seen.includes('https://pixeldrain.com/api/file/sZZFJbou'), 'rewrote the pixeldrain viewer URL to the direct-download API');
+  } finally {
+    globalThis.fetch = origFetch;
   }
 });
