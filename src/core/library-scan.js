@@ -11,7 +11,8 @@ function dirHasImages(dir) {
   catch { return false; }
 }
 
-function chNumFromDir(name) {
+/** Extract a chapter number from a folder name ("Chapter 15", "Ch.15", "#15", bare "15"). */
+export function chNumFromDir(name) {
   const m = name.match(/(?:^|\b)(?:ch(?:apter)?\.?\s*|#\s*)(\d+(?:\.\d+)?)\b/i) || name.match(/(?:^|\b)(\d+(?:\.\d+)?)\b/);
   return m ? String(parseFloat(m[1])) : null;
 }

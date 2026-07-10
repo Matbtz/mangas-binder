@@ -32,6 +32,10 @@ export const config = {
   // Empty token => no auth (fine for solo localhost). Set to require Bearer/?token=.
   authToken: process.env.AUTH_TOKEN || '',
 
+  // Largest single uploaded file (CBZ/ZIP, or one loose page image) accepted by
+  // POST /series/:id/upload-chapter, in MB. CBZs can run 100-300MB+.
+  uploadMaxFileMB: Number(process.env.UPLOAD_MAX_FILE_MB || 500),
+
   // Defaults seeded into the settings table on first run.
   defaults: {
     scanIntervalHours: Number(process.env.SCAN_INTERVAL_HOURS || 6),
