@@ -15,7 +15,7 @@ const { ensureSeeded, setSetting } = await import('../src/core/settings.js');
 const { createSeries, listChaptersForSeries, upsertChapter, setChapterState } = await import('../src/core/repo.js');
 const { buildComicInfoXml } = await import('../src/core/comicinfo.js');
 const { issueCbzName, volumeCbzName } = await import('../src/core/packager.js');
-const { extractToStaging, downloadArchiveChapter, extractMediafireDirect } = await import('../src/download/archive-downloader.js');
+const { extractToStaging, downloadArchiveChapter, extractMediafireDirect, extractWetransferParams } = await import('../src/download/archive-downloader.js');
 const { bindChapter } = await import('../src/core/binder.js');
 const { readCbzInfo } = await import('../src/core/library-scan.js');
 const { parseSearchResults, extractDownloadLinks } = await import('../src/providers/getcomics.js');
@@ -284,6 +284,69 @@ test('archive download: resolves a MediaFire landing page to its direct download
     const { pageCount } = await downloadArchiveChapter(provider, { id: 997, title: 'Test' }, { number: '6' });
     assert.equal(pageCount, 1, 'archive extracted from the resolved MediaFire direct link');
     assert.ok(seen.includes(mfDirect), 'fetched the parsed download*.mediafire.com direct link');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('extractWetransferParams reads transfer id + security hash (+ csrf) from a download page', () => {
+  const url = 'https://wetransfer.com/downloads/e791f84684db9a31e772c291f8c1dcf420241107013628/7ecc69?t_exp=1';
+  const html = '<meta name="csrf-token" content="TOKEN123"><script>{"securityHash":"7ecc69"}</script>';
+  assert.deepEqual(extractWetransferParams(url, html), {
+    transferId: 'e791f84684db9a31e772c291f8c1dcf420241107013628',
+    securityHash: '7ecc69',
+    csrf: 'TOKEN123',
+  });
+  // Three-segment (recipient) form: id/recipient/hash — hash is the last segment.
+  const three = extractWetransferParams('https://wetransfer.com/downloads/abcdef/recipientid/9f9f9f', '');
+  assert.equal(three.transferId, 'abcdef');
+  assert.equal(three.securityHash, '9f9f9f');
+  // A non-WeTransfer / malformed URL → null (caller falls through to next mirror).
+  assert.equal(extractWetransferParams('https://example.com/x', ''), null);
+});
+
+test('archive download: resolves a WeTransfer page via its download API', async () => {
+  // Best-effort last-resort mirror. Live GetComics WeTransfer links are almost
+  // always expired/DMCA-blocked, so this exercises the flow with a mocked live
+  // transfer: page → POST /api/v4/transfers/{id}/download → direct storage link.
+  setSetting('flaresolverrUrl', '');
+  const zipBuf = makeCbzBuffer(['001.jpg']);
+  const arrBuf = () => zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength);
+  const wtDls = 'https://getcomics.org/dls/WT';
+  const wtPage = 'https://wetransfer.com/downloads/abc123def/7ecc69';
+  const api = 'https://wetransfer.com/api/v4/transfers/abc123def/download';
+  const direct = 'https://storage.example/transfer/StarWars.cbz';
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    seen.push({ u, method: opts?.method || 'GET', body: opts?.body });
+    if (u === wtDls) {
+      return { ok: true, status: 200, url: wtPage,
+        headers: { get: () => 'text/html', getSetCookie: () => ['wt_session=xyz; Path=/'] },
+        text: async () => '<meta name="csrf-token" content="TOK"><script>{"securityHash":"7ecc69"}</script>' };
+    }
+    if (u === api) {
+      assert.equal(opts.method, 'POST');
+      assert.match(String(opts.headers.Cookie), /wt_session=xyz/);
+      assert.equal(opts.headers['x-csrf-token'], 'TOK');
+      assert.match(String(opts.body), /"security_hash":"7ecc69"/);
+      return { ok: true, status: 200, json: async () => ({ direct_link: direct }) };
+    }
+    if (u === direct) {
+      return { ok: true, status: 200, url: u, headers: { get: () => 'application/zip' }, arrayBuffer: arrBuf };
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  try {
+    const provider = {
+      name: 'getcomics', capabilities: { archive: true },
+      findIssueDownload: async () => ({ urls: [wtDls], url: wtDls, headers: { Referer: 'https://getcomics.org/comic/x/' } }),
+    };
+    const { pageCount } = await downloadArchiveChapter(provider, { id: 996, title: 'Test' }, { number: '3' });
+    assert.equal(pageCount, 1, 'archive extracted from the resolved WeTransfer direct link');
+    assert.ok(seen.some(s => s.u === api && s.method === 'POST'), 'called the WeTransfer download API');
+    assert.ok(seen.some(s => s.u === direct), 'fetched the returned direct storage link');
   } finally {
     globalThis.fetch = origFetch;
   }
