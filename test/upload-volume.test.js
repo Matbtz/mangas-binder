@@ -22,6 +22,7 @@ process.env.LOG_LEVEL = 'silent';
 const { buildApp } = await import('../src/server/app.js');
 const { setSetting } = await import('../src/core/settings.js');
 const { createSeries, listChaptersForSeries, upsertChapter, setChapterState } = await import('../src/core/repo.js');
+const { chapterStagingDir } = await import('../src/download/downloader.js');
 const { closeDb } = await import('../src/core/db.js');
 
 const app = await buildApp();
@@ -190,4 +191,37 @@ test('upload-volume: validation errors', async () => {
 
   const missingSeries = await uploadVolume(999999, { volume: '1' }, [{ filename: 'v.cbz', buf: makeZip(['a.jpg']) }]);
   assert.equal(missingSeries.statusCode, 404);
+});
+
+test('upload-volume: overwriting with new archive wipes zombie staging dirs and removes conflicting extensions', async () => {
+  const s = createSeries({
+    provider: 'comicvine', providerSeriesId: 'uv7', mediaType: 'comic',
+    downloadProvider: 'getcomics', title: 'Upload Volume Overwrite Test', language: 'en',
+    monitored: true, packagingMode: 'volume',
+  });
+  upsertChapter(s.id, { provider: 'comicvine', providerChapterId: 'ch1', number: '1', volume: '1' }, 'wanted');
+  const ch = listChaptersForSeries(s.id).find(c => c.number === '1');
+
+  // Simulate an old zombie download staging directory containing a wrong image (001.jpg)
+  const stagingDir = chapterStagingDir(s.id, '1');
+  rmSync(stagingDir, { recursive: true, force: true });
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(stagingDir, { recursive: true });
+  writeFileSync(path.join(stagingDir, '001.jpg'), Buffer.from('bad_old_data'));
+
+  // Also simulate an existing old .cbz volume file
+  const oldCbzPath = path.join(process.env.OUTPUT_DIR, 'Upload Volume Overwrite Test', 'Upload Volume Overwrite Test Vol. 01.cbz');
+  mkdirSync(path.dirname(oldCbzPath), { recursive: true });
+  writeFileSync(oldCbzPath, Buffer.from('old_cbz_data'));
+
+  // Now user uploads a flat .cbr archive for Volume 1
+  const newCbrZip = makeZip(['clean_page.png']);
+  const res = await uploadVolume(s.id, { volume: '1' }, [{ filename: 'vol1.cbr', buf: newCbrZip }]);
+  assert.equal(res.statusCode, 200);
+
+  const body = res.json();
+  assert.ok(body.path.endsWith('.cbr'), 'actualDest takes .cbr extension');
+  assert.ok(existsSync(body.path), 'new CBR exists');
+  assert.equal(existsSync(oldCbzPath), false, 'old CBZ with conflicting extension removed');
+  assert.equal(existsSync(stagingDir), false, 'old zombie staging dir wiped clean');
 });

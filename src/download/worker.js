@@ -1,4 +1,8 @@
 import { rm } from 'fs/promises';
+import { existsSync } from 'fs';
+import path from 'path';
+import { destPath } from '../core/library.js';
+import { volumeCbzName } from '../core/packager.js';
 import { getProvider } from '../providers/index.js';
 import {
   getSeries, getChapter, chaptersReadyToDownload, listChaptersForSeries, listChaptersInStates,
@@ -303,6 +307,21 @@ export async function packageCompleteVolumes(seriesId, { force = false } = {}) {
     const hasNew = vchapters.some(c => c.state === 'downloaded');
     if (!closed || !ready) continue;
     if (!force && !hasNew) continue;
+
+    if (!hasNew) {
+      const paths = new Set(nonSkipped.map(c => c.cbz_path || c.cbzPath).filter(Boolean));
+      if (paths.size === 1) {
+        const sharedPath = [...paths][0];
+        if (existsSync(sharedPath)) {
+          const outsideCount = allChapters.filter(c => (c.cbz_path || c.cbzPath) === sharedPath && (c.volume || 'none') !== volLabel).length;
+          const expectedBase = destPath(series.title, volumeCbzName(series.title, volLabel)).replace(/\.(cbz|cbr|rar|zip)$/i, '');
+          const sharedBase = sharedPath.replace(/\.(cbz|cbr|rar|zip)$/i, '');
+          if (outsideCount === 0 && path.normalize(sharedBase).toLowerCase() === path.normalize(expectedBase).toLowerCase()) {
+            continue; // Already a perfectly consolidated volume package matching this volume
+          }
+        }
+      }
+    }
 
     if (coverMap === null && provider.getVolumeCovers) {
       coverMap = await provider.getVolumeCovers(series.provider_series_id).catch(() => new Map());

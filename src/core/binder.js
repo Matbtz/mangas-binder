@@ -245,7 +245,7 @@ async function prewarmSharedArchives(series, chapters, archiveCache) {
   for (const c of chapters) {
     const cbzPath = c.cbz_path || c.cbzPath;
     if (!cbzPath || !/\.(cbz|cbr|rar|zip)$/i.test(cbzPath) || !existsSync(cbzPath)) continue;
-    if (await hasStaging(series.id, c.number)) continue;
+    if (c.state === 'downloaded' && await hasStaging(series.id, c.number)) continue;
     if (!byArchive.has(cbzPath)) byArchive.set(cbzPath, []);
     byArchive.get(cbzPath).push(c.number);
   }
@@ -265,20 +265,24 @@ async function prewarmSharedArchives(series, chapters, archiveCache) {
  * volume CBZ shared by several chapters is read from disk/NAS only once per bind.
  */
 export async function ensureChapterStaging(series, chapter, archiveCache = null) {
-  if (await hasStaging(series.id, chapter.number)) return true;
+  if (chapter.state === 'downloaded' && await hasStaging(series.id, chapter.number)) return true;
 
   const cbzPath = chapter.cbz_path || chapter.cbzPath;
   if (!cbzPath || !existsSync(cbzPath)) return false;
 
+  const dir = chapterStagingDir(series.id, chapter.number);
   try {
     const st = statSync(cbzPath);
     if (st.isDirectory()) {
-      const dir = chapterStagingDir(series.id, chapter.number);
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
       await mkdir(dir, { recursive: true });
       await cp(cbzPath, dir, { recursive: true });
       return true;
     }
     if (/\.(cbz|cbr|rar|zip)$/i.test(cbzPath)) {
+      if (existsSync(dir)) {
+        await rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
       let buf;
       if (archiveCache) {
         if (!archiveCache.has(cbzPath)) archiveCache.set(cbzPath, readFile(cbzPath));

@@ -645,6 +645,12 @@ export default async function apiRoutes(app) {
     if (archiveFiles.length === 1) {
       const ext = path.extname(archiveFiles[0].filename).toLowerCase();
       actualDest = (ext === '.cbr' || ext === '.rar') ? dest.replace(/\.cbz$/i, ext) : dest;
+      for (const oldExt of ['.cbz', '.cbr', '.rar', '.zip']) {
+        const oldFile = dest.replace(/\.cbz$/i, oldExt);
+        if (oldFile !== actualDest && existsSync(oldFile)) {
+          try { unlinkSync(oldFile); } catch {}
+        }
+      }
       const tmp = `${actualDest}.tmp`;
       writeFileSync(tmp, archiveFiles[0].buf);
       renameSync(tmp, actualDest);
@@ -652,11 +658,15 @@ export default async function apiRoutes(app) {
       const entries = imageFiles
         .sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))
         .map(f => ({ archiveName: path.basename(f.filename), content: f.buf }));
-      const res = await writeCbz(entries, dest);
+      const res = await writeCbz(entries, dest, { overwrite: true });
       actualDest = res.path;
     }
 
     for (const c of matched) {
+      try {
+        const sDir = chapterStagingDir(c.series_id, c.number);
+        rmSync(sDir, { recursive: true, force: true });
+      } catch {}
       setChapterState(c.id, 'bindery', { cbz_path: actualDest, staging_path: null, error: null });
     }
     logHistory('volume.uploaded', { seriesId: s.id, message: `Manually uploaded ${s.title} Vol. ${volKey} (${matched.length} chapters linked, flat archive)` });
@@ -801,7 +811,7 @@ export default async function apiRoutes(app) {
       });
     }
 
-     const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
+     const outputDirNormalized = path.normalize(getSetting('outputDir', config.outputDir)).toLowerCase();
     const binderyRows = getDb().prepare(`
       SELECT c.*, s.title AS series_title, s.cover_path AS series_cover, s.media_type AS series_media_type
       FROM chapters c JOIN series s ON s.id = c.series_id
@@ -920,7 +930,7 @@ bindery.push({
       const resetExtra = defaultState === 'wanted' ? { cbz_path: null, staging_path: null, attempts: 0 } : { cbz_path: null, staging_path: null };
 
       // Delete the file if it exists and is under outputDir (safety guardrail)
-      const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
+      const outputDirNormalized = path.normalize(getSetting('outputDir', config.outputDir)).toLowerCase();
       if (targetNormalized.startsWith(outputDirNormalized) && existsSync(cbzPath)) {
         try {
           const st = statSync(cbzPath);
@@ -944,7 +954,7 @@ bindery.push({
       }
     } else {
       // If not in database but file exists, delete it anyway if in output directory
-      const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
+      const outputDirNormalized = path.normalize(getSetting('outputDir', config.outputDir)).toLowerCase();
       if (targetNormalized.startsWith(outputDirNormalized) && existsSync(cbzPath)) {
         try {
           unlinkSync(cbzPath);
@@ -1064,7 +1074,7 @@ bindery.push({
     let filesAudited = 0;
     let issuesFound = 0;
 
-    const outputDirNormalized = path.normalize(config.outputDir).toLowerCase();
+    const outputDirNormalized = path.normalize(getSetting('outputDir', config.outputDir)).toLowerCase();
 
     for (const s of seriesList) {
       // Reconcile this series against the library on disk first: the chapters
@@ -1847,6 +1857,10 @@ bindery.push({
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });
     const removed = deleteChaptersForSeries(s.id);
+    try {
+      const sDir = path.join(config.stagingDir, String(s.id));
+      rmSync(sDir, { recursive: true, force: true });
+    } catch {}
     // Also drop the cached external (Wikipedia/Fandom/MangaUpdates) chapter map
     // (core/chapter-map-consensus.js) so a wipe forces a genuinely fresh
     // cross-source lookup on the next refresh, not a stale cached one.
