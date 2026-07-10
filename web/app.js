@@ -574,6 +574,7 @@ async function showDetail(id) {
 
   // Secondary actions tucked into a "More" menu to declutter the toolbar.
   const moreMenu = menuButton('⋯ More', [
+    { label: 'Upload files', icon: '⬆', onClick: () => openUploadChapterModal({ seriesId: id, seriesTitle: s.title, onUploaded: () => { startLive(); showDetail(id); } }) },
     { label: 'Manage Files', icon: '🗂', onClick: () => openManageFilesModal({
         seriesId: id,
         seriesTitle: s.title,
@@ -725,6 +726,14 @@ async function showDetail(id) {
         liveTick();
       };
       act.append(want);
+    }
+    if (c.state !== 'imported' && c.state !== 'downloading') {
+      const uploadBtn = h('<button class="btn sm icon" title="Upload file(s) for this chapter">⬆</button>');
+      uploadBtn.onclick = () => openUploadChapterModal({
+        seriesId: id, seriesTitle: s.title, chapterNumber: c.number,
+        onUploaded: () => { startLive(); showDetail(id); },
+      });
+      act.append(uploadBtn);
     }
     act.append(searchBtn);
   };
@@ -2082,6 +2091,116 @@ function openResetSeriesModal({ seriesId, seriesTitle, onReset }) {
       confirmBtn.textContent = '♻ Reset series';
     }
   };
+}
+
+// --- Upload chapter modal (manual CBZ/image upload when no provider has it) ---
+// Purely a UX pre-fill for the editable chapter-# field below — never authoritative.
+function guessChapterNumberFromFilename(name) {
+  const hash = String(name || '').match(/#\s*0*(\d+(?:\.\d+)?)\b/);
+  if (hash) return hash[1];
+  const generic = String(name || '').match(/(\d+(?:\.\d+)?)/);
+  return generic ? generic[1] : '';
+}
+
+async function postUploadChapter(seriesId, row) {
+  const fd = new FormData();
+  fd.append('chapterNumber', row.chapterNumber);
+  for (const f of row.files) fd.append('files', f, f.name);
+  const res = await fetch(`/api/series/${seriesId}/upload-chapter`, {
+    method: 'POST',
+    headers: token() ? { Authorization: `Bearer ${token()}` } : {},
+    body: fd, // multipart — browser sets its own Content-Type + boundary
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onUploaded }) {
+  const existing = document.getElementById('upload-chapter-modal');
+  if (existing) existing.remove();
+
+  const modal = h(`<div id="upload-chapter-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:16px;width:100%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.9)">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--line)">
+        <h3 style="margin:0;font-size:16px">⬆ Upload — ${esc(seriesTitle)}</h3>
+        <p class="muted" style="margin:6px 0 0;font-size:13px">Pick one-or-more .cbz/.zip files, and/or loose page images. Each CBZ becomes its own chapter; loose images are grouped into one chapter — confirm the chapter # for each before uploading.</p>
+      </div>
+      <div id="uc-body" style="padding:16px 22px;overflow-y:auto;flex:1">
+        <input type="file" id="uc-picker" multiple accept=".cbz,.zip,image/*" style="margin-bottom:12px">
+        <div id="uc-rows"></div>
+      </div>
+      <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn sm" id="uc-cancel">Cancel</button>
+        <button class="btn sm primary" id="uc-confirm" disabled>Upload</button>
+      </div>
+    </div>
+  </div>`);
+
+  // rows: [{ id, kind: 'archive'|'images', label, chapterNumber, files, status, error }]
+  let rows = [];
+  const rowsEl = modal.querySelector('#uc-rows');
+  const confirmBtn = modal.querySelector('#uc-confirm');
+
+  const renderRows = () => {
+    rowsEl.innerHTML = rows.map(r => `
+      <div class="row" data-row="${r.id}" style="align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)">
+        <span style="width:70px">${r.kind === 'archive' ? '📦 CBZ' : '🖼 Images'}</span>
+        <span class="muted" style="flex:1;font-size:12px;word-break:break-all">${esc(r.label)}</span>
+        <input class="uc-chnum" data-row="${r.id}" value="${esc(r.chapterNumber)}" style="width:5em" placeholder="ch #">
+        <span class="uc-status" data-row="${r.id}" style="width:120px;font-size:12px">${r.status === 'done' ? '✓ done' : r.status === 'error' ? `✕ ${esc(r.error || '')}` : r.status === 'uploading' ? '⏳…' : ''}</span>
+      </div>`).join('');
+    rowsEl.querySelectorAll('.uc-chnum').forEach(inp => {
+      inp.oninput = () => { const r = rows.find(x => String(x.id) === inp.dataset.row); if (r) r.chapterNumber = inp.value; };
+    });
+    confirmBtn.disabled = rows.length === 0;
+    confirmBtn.textContent = rows.length ? `Upload ${rows.length} item${rows.length === 1 ? '' : 's'}` : 'Upload';
+  };
+
+  modal.querySelector('#uc-picker').onchange = (e) => {
+    const files = [...e.target.files];
+    const archives = files.filter(f => /\.(cbz|zip)$/i.test(f.name));
+    const images = files.filter(f => !/\.(cbz|zip)$/i.test(f.name));
+    rows = archives.map((f, i) => ({
+      id: `a${i}`, kind: 'archive', label: f.name, files: [f],
+      chapterNumber: chapterNumber || guessChapterNumberFromFilename(f.name), status: 'pending',
+    }));
+    if (images.length) {
+      rows.push({
+        id: 'imgs', kind: 'images', label: `${images.length} image file(s)`, files: images,
+        chapterNumber: chapterNumber || guessChapterNumberFromFilename(images[0].name), status: 'pending',
+      });
+    }
+    renderRows();
+  };
+
+  const close = () => modal.remove();
+  modal.querySelector('#uc-cancel').onclick = close;
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  confirmBtn.onclick = async () => {
+    if (!rows.length) return;
+    confirmBtn.disabled = true;
+    let okCount = 0, errCount = 0;
+    for (const r of rows) {
+      if (!r.chapterNumber || !String(r.chapterNumber).trim()) {
+        r.status = 'error'; r.error = 'chapter # required'; errCount++; renderRows(); continue;
+      }
+      r.status = 'uploading'; renderRows();
+      try {
+        await postUploadChapter(seriesId, r);
+        r.status = 'done'; okCount++;
+      } catch (e) {
+        r.status = 'error'; r.error = e.message; errCount++;
+      }
+      renderRows();
+    }
+    toast(`Uploaded ${okCount} item${okCount === 1 ? '' : 's'}${errCount ? `, ${errCount} failed` : ''}`);
+    confirmBtn.disabled = false;
+    if (okCount > 0 && onUploaded) onUploaded();
+  };
+
+  document.body.appendChild(modal);
 }
 
 // --- Delete Files confirmation modal ---

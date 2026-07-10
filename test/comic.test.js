@@ -15,7 +15,7 @@ const { ensureSeeded, setSetting } = await import('../src/core/settings.js');
 const { createSeries, listChaptersForSeries, upsertChapter, setChapterState } = await import('../src/core/repo.js');
 const { buildComicInfoXml } = await import('../src/core/comicinfo.js');
 const { issueCbzName, volumeCbzName } = await import('../src/core/packager.js');
-const { extractToStaging, downloadArchiveChapter, extractMediafireDirect, extractWetransferParams } = await import('../src/download/archive-downloader.js');
+const { extractToStaging, extractUploadedImagesToStaging, downloadArchiveChapter, extractMediafireDirect, extractWetransferParams } = await import('../src/download/archive-downloader.js');
 const { bindChapter } = await import('../src/core/binder.js');
 const { readCbzInfo } = await import('../src/core/library-scan.js');
 const { parseSearchResults, extractDownloadLinks } = await import('../src/providers/getcomics.js');
@@ -80,6 +80,26 @@ test('extractToStaging unpacks a CBZ into the page-staging layout', async () => 
   assert.equal(pageCount, 3); // txt skipped
   const files = (await readdir(dir)).sort();
   assert.deepEqual(files, ['001.png', '002.jpg', '003.jpg']); // numeric-sorted, renumbered
+});
+
+test('extractUploadedImagesToStaging writes manually-uploaded loose images into the same staging layout', async () => {
+  const { dir, pageCount } = await extractUploadedImagesToStaging(
+    [
+      { filename: 'b.jpg', buf: PNG },
+      { filename: 'a.png', buf: PNG },
+      { filename: 'notes.txt', buf: PNG }, // non-image dropped, same as extractToStaging
+    ],
+    999, '8',
+  );
+  assert.equal(pageCount, 2);
+  const files = (await readdir(dir)).sort();
+  assert.deepEqual(files, ['001.png', '002.jpg']); // filename-sorted, renumbered
+
+  // No images at all → clear error instead of silently staging nothing.
+  await assert.rejects(
+    () => extractUploadedImagesToStaging([{ filename: 'notes.txt', buf: PNG }], 999, '9'),
+    /No page images found in upload/,
+  );
 });
 
 test('comic download→bind produces a #NNN issue CBZ with comic ComicInfo', async () => {

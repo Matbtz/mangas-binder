@@ -8,7 +8,7 @@ import { provider as hardcover } from '../../providers/hardcover.js';
 import {
   listSeries, getSeries, updateSeries, deleteSeries, deleteChaptersForSeries,
   listChaptersForSeries, listChapterProgress, chapterStateCounts, getChapter, setChapterState, bulkSetChapterState,
-  listChaptersInStates, recentHistory, listChapterFilesForSeries, resetStaleDownloads,
+  listChaptersInStates, recentHistory, listChapterFilesForSeries, resetStaleDownloads, upsertChapter,
 } from '../../core/repo.js';
 import { getDb, logHistory } from '../../core/db.js';
 import {
@@ -25,6 +25,7 @@ import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '.
 import { runScan, schedulerStatus, startScheduler } from '../../scheduler/scheduler.js';
 import { runOnce, cancelChapter, cancelSeries, resetStaleIfIdle, abortStuckInFlight, isRunning, packageCompleteVolumes } from '../../download/worker.js';
 import { chapterStagingDir } from '../../download/downloader.js';
+import { extractToStaging, extractUploadedImagesToStaging } from '../../download/archive-downloader.js';
 import { notify } from '../../core/notify.js';
 import { bus } from '../../core/events.js';
 import { getProviderStats } from '../../core/provider-stats.js';
@@ -445,6 +446,82 @@ export default async function apiRoutes(app) {
     setChapterState(c.id, 'wanted', { error: null, attempts: 0, cbz_path: null, staging_path: null, prog_done: null, prog_total: null });
     runOnce().catch(() => {});
     return { ok: true };
+  });
+
+  // Manually upload the content for one chapter (a CBZ/ZIP, or one-or-more loose
+  // page images) when no download provider has it. Content is staged exactly like
+  // a real download (extractToStaging / extractUploadedImagesToStaging), then fed
+  // into the SAME bind/package tail the worker runs after a successful download
+  // (worker.js: setChapterState → packageSingleChapter | packageCompleteVolumes) —
+  // no separate upload pipeline. Re-uploading an owned chapter overwrites it, same
+  // as /redownload above.
+  app.post('/api/series/:id/upload-chapter', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+
+    const ARCHIVE_EXTS = new Set(['.cbz', '.zip']);
+    const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
+    let chapterNumber = null;
+    const archiveFiles = [];
+    const imageFiles = [];
+    for await (const part of req.parts()) {
+      if (part.type === 'file') {
+        const buf = await part.toBuffer();
+        const ext = path.extname(part.filename || '').toLowerCase();
+        if (ARCHIVE_EXTS.has(ext)) archiveFiles.push({ filename: part.filename, buf });
+        else if (IMAGE_EXTS.has(ext)) imageFiles.push({ filename: part.filename, buf });
+        // any other extension (e.g. a stray .DS_Store) is silently ignored
+      } else if (part.fieldname === 'chapterNumber') {
+        chapterNumber = part.value;
+      }
+    }
+
+    if (!chapterNumber || !String(chapterNumber).trim()) {
+      return reply.code(400).send({ error: 'chapterNumber required' });
+    }
+    if (archiveFiles.length === 0 && imageFiles.length === 0) {
+      return reply.code(400).send({ error: 'no files uploaded' });
+    }
+    if (archiveFiles.length > 0 && imageFiles.length > 0) {
+      return reply.code(400).send({ error: 'cannot mix an archive and loose images in one upload' });
+    }
+    if (archiveFiles.length > 1) {
+      return reply.code(400).send({ error: 'only one CBZ/ZIP per upload' });
+    }
+
+    const number = String(chapterNumber).trim();
+    let dir, pageCount;
+    try {
+      if (archiveFiles.length === 1) {
+        ({ dir, pageCount } = await extractToStaging(archiveFiles[0].buf, s.id, number));
+      } else {
+        ({ dir, pageCount } = await extractUploadedImagesToStaging(imageFiles, s.id, number));
+      }
+    } catch (err) {
+      return reply.code(400).send({ error: err.message });
+    }
+
+    // Find-or-create the chapter row (same pattern as the volume manual-download
+    // route below: listChaptersForSeries + filter, no dedicated lookup-by-number).
+    let chapter = listChaptersForSeries(s.id).find(c => c.number === number);
+    if (!chapter) {
+      upsertChapter(s.id, { provider: 'manual', number }, 'wanted');
+      chapter = listChaptersForSeries(s.id).find(c => c.number === number);
+    }
+
+    setChapterState(chapter.id, 'downloaded', {
+      staging_path: dir, pages: pageCount, error: null, download_url: null,
+      prog_done: pageCount, prog_total: pageCount,
+    });
+    logHistory('chapter.uploaded', { seriesId: s.id, chapterId: chapter.id, message: `Manually uploaded ${s.title} #${number} (${pageCount} pages)` });
+
+    if (s.packaging_mode === 'chapter') {
+      const res = await packageSingleChapter(s.id, chapter.id);
+      return { ok: true, chapterId: chapter.id, mode: 'chapter', path: res.path };
+    } else {
+      const importedVolumes = await packageCompleteVolumes(s.id);
+      return { ok: true, chapterId: chapter.id, mode: 'volume', importedVolumes };
+    }
   });
 
   // --- Delete series files ---

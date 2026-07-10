@@ -322,3 +322,33 @@ export async function extractToStaging(zipBuffer, seriesId, number, { onlyChapte
   }
   return { dir, pageCount: images.length };
 }
+
+/**
+ * Write manually-uploaded loose page images into the chapter staging dir,
+ * renumbered by original filename order (numeric-aware sort) — the same
+ * 001.ext, 002.ext … layout extractToStaging/downloadChapter produce, so a
+ * manual upload feeds the shared binder/packager pipeline identically to a
+ * real download. Non-image files are silently dropped, same as extractToStaging.
+ * @param {Array<{ filename: string, buf: Buffer }>} files
+ * @returns {Promise<{ dir, pageCount }>}
+ */
+export async function extractUploadedImagesToStaging(files, seriesId, number) {
+  const images = files
+    .filter(f => IMAGE_EXTS.has(path.extname(f.filename || '').toLowerCase()))
+    .sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }));
+  if (!images.length) throw new Error('No page images found in upload');
+
+  const dir = chapterStagingDir(seriesId, number);
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(dir, { recursive: true });
+
+  let i = 0;
+  for (const img of images) {
+    const ext = path.extname(img.filename).toLowerCase();
+    const dest = path.join(dir, `${pad(++i)}${ext}`);
+    const tmp = `${dest}.part`;
+    await writeFile(tmp, img.buf);
+    await rename(tmp, dest);
+  }
+  return { dir, pageCount: images.length };
+}

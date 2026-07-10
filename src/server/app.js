@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
+import fastifyMultipart from '@fastify/multipart';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { mkdirSync } from 'fs';
@@ -28,7 +29,11 @@ export async function buildApp() {
     logger: {
       level: process.env.LOG_LEVEL || 'info',
       timestamp: () => `,"time":"${parisTime()}"`
-    }
+    },
+    // Fastify's default bodyLimit (1 MiB) covers our JSON API fine but not a
+    // manually-uploaded CBZ; raise it in step with the multipart per-file cap
+    // registered below.
+    bodyLimit: (config.uploadMaxFileMB + 5) * 1024 * 1024,
   });
 
   // Bearer/?token auth — only enforced when AUTH_TOKEN is configured.
@@ -49,6 +54,17 @@ export async function buildApp() {
     const code = err.statusCode && err.statusCode >= 400 ? err.statusCode : (upstream ? 502 : 500);
     req.log.error(err);
     reply.code(code).send({ error: err.message || 'Internal error' });
+  });
+
+  // For POST /series/:id/upload-chapter — manual CBZ/image upload when no
+  // download provider has an issue. Registered before apiRoutes so req.parts()
+  // is available to the route.
+  await app.register(fastifyMultipart, {
+    limits: {
+      fileSize: config.uploadMaxFileMB * 1024 * 1024,
+      files: 500, // a loose-image chapter upload is one file per page
+      fields: 5,
+    },
   });
 
   await app.register(apiRoutes);
