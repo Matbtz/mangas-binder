@@ -5,6 +5,7 @@ import { fetchRetry } from './limit.js';
 import { chapterStagingDir } from './downloader.js';
 import { solve as flareSolve, cookieHeader, isEnabled as flareEnabled } from './flaresolverr.js';
 import { logHistory } from '../core/db.js';
+import { chNumFromDir } from '../core/library-scan.js';
 
 const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) mangas-binder/2.0';
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
@@ -351,4 +352,86 @@ export async function extractUploadedImagesToStaging(files, seriesId, number) {
     await rename(tmp, dest);
   }
   return { dir, pageCount: images.length };
+}
+
+/**
+ * Detect whether a manually-uploaded "volume" archive has a folder-per-chapter
+ * layout (e.g. "Chapter 15/001.jpg", "Chapter 16/001.jpg") or is flat (all
+ * images loose, or all inside one single wrapping folder — e.g. "MyVol/001.jpg"
+ * or bare "001.jpg"). A single common wrapping folder is transparently
+ * collapsed before deciding, so packaging noise like an outer "Volume 3/" dir
+ * doesn't get mistaken for a chapter folder.
+ * @param {string[]} imageEntryNames  full in-archive paths of image entries
+ * @returns {{ hierarchical: boolean, groups: Map<string, string[]> }}
+ *   groups keys are folder names ('' = no chapter subfolder); hierarchical is
+ *   true only when 2+ distinct named folders are present.
+ */
+export function groupImagesByChapterFolder(imageEntryNames) {
+  let paths = imageEntryNames.map(n => n.split('/').filter(Boolean));
+  // Repeatedly strip a single common leading folder shared by every entry.
+  while (paths.length && paths.every(p => p.length > 1)) {
+    const firstDirs = new Set(paths.map(p => p[0]));
+    if (firstDirs.size !== 1) break;
+    paths = paths.map(p => p.slice(1));
+  }
+  const groups = new Map();
+  paths.forEach((segs, i) => {
+    const key = segs.length > 1 ? segs[0] : '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(imageEntryNames[i]);
+  });
+  const namedFolders = [...groups.keys()].filter(k => k !== '');
+  return { hierarchical: namedFolders.length > 1, groups };
+}
+
+/**
+ * Stage a manually-uploaded "volume" archive when it has a folder-per-chapter
+ * layout — each folder is extracted into its own chapter's staging dir (via
+ * extractUploadedImagesToStaging), exactly like a normal per-chapter upload,
+ * just derived from folder names instead of a single explicit chapter number.
+ *
+ * Flat archives (see groupImagesByChapterFolder) are NOT handled here — the
+ * caller keeps the whole file as-is and links it directly (no page splitting
+ * possible without a chapter-boundary signal), so this returns
+ * `{ hierarchical: false }` and does nothing further.
+ *
+ * Fails atomically: every folder's chapter number is resolved up front, so a
+ * single unparseable folder name aborts before anything is staged.
+ * @returns {Promise<{ hierarchical: boolean, chapters?: Array<{number, dir, pageCount}>, ignoredRootFiles?: string[] }>}
+ */
+export async function stageUploadedVolumeArchive(zipBuffer, seriesId) {
+  let zip;
+  try {
+    zip = new AdmZip(zipBuffer);
+  } catch {
+    throw new Error('Uploaded file is not a readable zip/CBZ archive');
+  }
+  const imageEntries = zip.getEntries().filter(e => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase()));
+  if (!imageEntries.length) throw new Error('Archive contains no page images');
+
+  const { hierarchical, groups } = groupImagesByChapterFolder(imageEntries.map(e => e.entryName));
+  if (!hierarchical) return { hierarchical: false };
+
+  const byName = new Map(imageEntries.map(e => [e.entryName, e]));
+  const ignoredRootFiles = groups.get('') || [];
+  const folders = [...groups.keys()].filter(k => k !== '');
+
+  const resolved = folders.map(folder => ({ folder, chapterNumber: chNumFromDir(folder), entryNames: groups.get(folder) }));
+  const unresolved = resolved.filter(r => !r.chapterNumber);
+  if (unresolved.length) {
+    throw new Error(`Could not determine a chapter number from folder name(s): ${unresolved.map(r => r.folder).join(', ')} — rename to include the chapter number, e.g. "Chapter 15".`);
+  }
+  const numbers = resolved.map(r => r.chapterNumber);
+  const dupes = [...new Set(numbers.filter((n, i) => numbers.indexOf(n) !== i))];
+  if (dupes.length) {
+    throw new Error(`Multiple folders resolved to the same chapter number: ${dupes.join(', ')}`);
+  }
+
+  const chapters = [];
+  for (const { chapterNumber, entryNames } of resolved) {
+    const files = entryNames.map(name => ({ filename: path.basename(name), buf: byName.get(name).getData() }));
+    const { dir, pageCount } = await extractUploadedImagesToStaging(files, seriesId, chapterNumber);
+    chapters.push({ number: chapterNumber, dir, pageCount });
+  }
+  return { hierarchical: true, chapters, ignoredRootFiles };
 }

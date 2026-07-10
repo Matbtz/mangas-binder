@@ -15,7 +15,7 @@ const { ensureSeeded, setSetting } = await import('../src/core/settings.js');
 const { createSeries, listChaptersForSeries, upsertChapter, setChapterState } = await import('../src/core/repo.js');
 const { buildComicInfoXml } = await import('../src/core/comicinfo.js');
 const { issueCbzName, volumeCbzName } = await import('../src/core/packager.js');
-const { extractToStaging, extractUploadedImagesToStaging, downloadArchiveChapter, extractMediafireDirect, extractWetransferParams } = await import('../src/download/archive-downloader.js');
+const { extractToStaging, extractUploadedImagesToStaging, groupImagesByChapterFolder, downloadArchiveChapter, extractMediafireDirect, extractWetransferParams } = await import('../src/download/archive-downloader.js');
 const { bindChapter } = await import('../src/core/binder.js');
 const { readCbzInfo } = await import('../src/core/library-scan.js');
 const { parseSearchResults, extractDownloadLinks } = await import('../src/providers/getcomics.js');
@@ -100,6 +100,34 @@ test('extractUploadedImagesToStaging writes manually-uploaded loose images into 
     () => extractUploadedImagesToStaging([{ filename: 'notes.txt', buf: PNG }], 999, '9'),
     /No page images found in upload/,
   );
+});
+
+test('groupImagesByChapterFolder: flat layouts (loose images, or one wrapping folder)', () => {
+  // No folders at all.
+  assert.equal(groupImagesByChapterFolder(['001.jpg', '002.jpg']).hierarchical, false);
+  // A single wrapping "volume" folder with no per-chapter subfolders is still flat —
+  // the wrapper is collapsed away, not mistaken for a chapter folder.
+  const wrapped = groupImagesByChapterFolder(['MyVol/001.jpg', 'MyVol/002.jpg']);
+  assert.equal(wrapped.hierarchical, false);
+  assert.deepEqual([...wrapped.groups.keys()], ['']);
+});
+
+test('groupImagesByChapterFolder: folder-per-chapter layouts are detected as hierarchical', () => {
+  const flatFolders = groupImagesByChapterFolder(['Chapter 15/001.jpg', 'Chapter 15/002.jpg', 'Chapter 16/001.jpg']);
+  assert.equal(flatFolders.hierarchical, true);
+  assert.deepEqual([...flatFolders.groups.keys()].sort(), ['Chapter 15', 'Chapter 16']);
+  assert.equal(flatFolders.groups.get('Chapter 15').length, 2);
+
+  // Same, but with an outer wrapping "volume" folder around the per-chapter folders.
+  const nested = groupImagesByChapterFolder(['MyVol/Chapter 15/001.jpg', 'MyVol/Chapter 16/001.jpg']);
+  assert.equal(nested.hierarchical, true);
+  assert.deepEqual([...nested.groups.keys()].sort(), ['Chapter 15', 'Chapter 16']);
+
+  // A stray root-level file (e.g. a loose cover.jpg) alongside chapter folders is
+  // bucketed under '' rather than breaking detection — caller decides what to do with it.
+  const withStray = groupImagesByChapterFolder(['cover.jpg', 'Chapter 15/001.jpg', 'Chapter 16/001.jpg']);
+  assert.equal(withStray.hierarchical, true);
+  assert.deepEqual(withStray.groups.get(''), ['cover.jpg']);
 });
 
 test('comic download→bind produces a #NNN issue CBZ with comic ComicInfo', async () => {

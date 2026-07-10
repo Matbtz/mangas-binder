@@ -2116,6 +2116,29 @@ async function postUploadChapter(seriesId, row) {
   return data;
 }
 
+// A "volume" upload: the backend auto-detects a folder-per-chapter archive
+// (splits it into its individual chapters) vs a flat archive (linked as-is to
+// every chapter already tracked under that volume — see the route for why).
+async function postUploadVolume(seriesId, row) {
+  const fd = new FormData();
+  fd.append('volume', row.chapterNumber); // row.chapterNumber holds whatever number the user typed, ch or vol
+  for (const f of row.files) fd.append('files', f, f.name);
+  const res = await fetch(`/api/series/${seriesId}/upload-volume`, {
+    method: 'POST',
+    headers: token() ? { Authorization: `Bearer ${token()}` } : {},
+    body: fd,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function summarizeUploadResult(data) {
+  if (data.mode === 'hierarchical') return `✓ split into ${data.chapters.length} ch`;
+  if (data.mode === 'flat') return `✓ linked ${data.linkedChapters.length} ch`;
+  return '✓ done';
+}
+
 function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onUploaded }) {
   const existing = document.getElementById('upload-chapter-modal');
   if (existing) existing.remove();
@@ -2124,7 +2147,7 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
     <div style="background:var(--panel);border:1px solid var(--line);border-radius:16px;width:100%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.9)">
       <div style="padding:18px 22px;border-bottom:1px solid var(--line)">
         <h3 style="margin:0;font-size:16px">⬆ Upload — ${esc(seriesTitle)}</h3>
-        <p class="muted" style="margin:6px 0 0;font-size:13px">Pick one-or-more .cbz/.zip files, and/or loose page images. Each CBZ becomes its own chapter; loose images are grouped into one chapter — confirm the chapter # for each before uploading.</p>
+        <p class="muted" style="margin:6px 0 0;font-size:13px">Pick one-or-more .cbz/.zip files, and/or loose page images. Each CBZ defaults to one chapter — switch a row to "Volume" to upload a whole-volume archive instead (a folder-per-chapter layout inside it is split automatically; a flat archive is linked as-is to that volume's tracked chapters). Loose images are grouped into one chapter. Confirm the # for each row before uploading.</p>
       </div>
       <div id="uc-body" style="padding:16px 22px;overflow-y:auto;flex:1">
         <input type="file" id="uc-picker" multiple accept=".cbz,.zip,image/*" style="margin-bottom:12px">
@@ -2137,7 +2160,7 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
     </div>
   </div>`);
 
-  // rows: [{ id, kind: 'archive'|'images', label, chapterNumber, files, status, error }]
+  // rows: [{ id, kind: 'archive'|'images', mode: 'chapter'|'volume' (archive only), label, chapterNumber, files, status, error }]
   let rows = [];
   const rowsEl = modal.querySelector('#uc-rows');
   const confirmBtn = modal.querySelector('#uc-confirm');
@@ -2147,11 +2170,18 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
       <div class="row" data-row="${r.id}" style="align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)">
         <span style="width:70px">${r.kind === 'archive' ? '📦 CBZ' : '🖼 Images'}</span>
         <span class="muted" style="flex:1;font-size:12px;word-break:break-all">${esc(r.label)}</span>
-        <input class="uc-chnum" data-row="${r.id}" value="${esc(r.chapterNumber)}" style="width:5em" placeholder="ch #">
-        <span class="uc-status" data-row="${r.id}" style="width:120px;font-size:12px">${r.status === 'done' ? '✓ done' : r.status === 'error' ? `✕ ${esc(r.error || '')}` : r.status === 'uploading' ? '⏳…' : ''}</span>
+        ${r.kind === 'archive' ? `<select class="uc-mode" data-row="${r.id}" style="width:6.5em">
+          <option value="chapter" ${r.mode === 'chapter' ? 'selected' : ''}>Chapter</option>
+          <option value="volume" ${r.mode === 'volume' ? 'selected' : ''}>Volume</option>
+        </select>` : ''}
+        <input class="uc-chnum" data-row="${r.id}" value="${esc(r.chapterNumber)}" style="width:5em" placeholder="${r.kind === 'archive' && r.mode === 'volume' ? 'vol #' : 'ch #'}">
+        <span class="uc-status" data-row="${r.id}" style="width:120px;font-size:12px">${r.status === 'done' ? summarizeUploadResult(r.result || {}) : r.status === 'error' ? `✕ ${esc(r.error || '')}` : r.status === 'uploading' ? '⏳…' : ''}</span>
       </div>`).join('');
     rowsEl.querySelectorAll('.uc-chnum').forEach(inp => {
       inp.oninput = () => { const r = rows.find(x => String(x.id) === inp.dataset.row); if (r) r.chapterNumber = inp.value; };
+    });
+    rowsEl.querySelectorAll('.uc-mode').forEach(sel => {
+      sel.onchange = () => { const r = rows.find(x => String(x.id) === sel.dataset.row); if (r) { r.mode = sel.value; renderRows(); } };
     });
     confirmBtn.disabled = rows.length === 0;
     confirmBtn.textContent = rows.length ? `Upload ${rows.length} item${rows.length === 1 ? '' : 's'}` : 'Upload';
@@ -2162,7 +2192,7 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
     const archives = files.filter(f => /\.(cbz|zip)$/i.test(f.name));
     const images = files.filter(f => !/\.(cbz|zip)$/i.test(f.name));
     rows = archives.map((f, i) => ({
-      id: `a${i}`, kind: 'archive', label: f.name, files: [f],
+      id: `a${i}`, kind: 'archive', mode: 'chapter', label: f.name, files: [f],
       chapterNumber: chapterNumber || guessChapterNumberFromFilename(f.name), status: 'pending',
     }));
     if (images.length) {
@@ -2183,12 +2213,13 @@ function openUploadChapterModal({ seriesId, seriesTitle, chapterNumber = '', onU
     confirmBtn.disabled = true;
     let okCount = 0, errCount = 0;
     for (const r of rows) {
+      const isVolume = r.kind === 'archive' && r.mode === 'volume';
       if (!r.chapterNumber || !String(r.chapterNumber).trim()) {
-        r.status = 'error'; r.error = 'chapter # required'; errCount++; renderRows(); continue;
+        r.status = 'error'; r.error = isVolume ? 'volume # required' : 'chapter # required'; errCount++; renderRows(); continue;
       }
       r.status = 'uploading'; renderRows();
       try {
-        await postUploadChapter(seriesId, r);
+        r.result = await (isVolume ? postUploadVolume(seriesId, r) : postUploadChapter(seriesId, r));
         r.status = 'done'; okCount++;
       } catch (e) {
         r.status = 'error'; r.error = e.message; errCount++;
