@@ -6,14 +6,13 @@
  * lists — where they exist — instead of only extrapolating from sparse provider
  * tags.
  *
- * VALIDATION NOTE: wiki markup varies per project/franchise and this module was
- * written without live wiki access (the build environment blocks wikipedia.org /
- * fandom.com by network policy — same situation under which providers/fandom.js
- * was originally written). Every parser therefore *fails closed*: an unrecognised
- * structure yields an empty map rather than a guess, so a bad parse can never
- * inject wrong anchors. The parsers cover the common templated formats and are
- * unit-tested against representative fixtures; they still warrant live validation
- * before the Wikipedia provider is enabled in a networked deployment.
+ * VALIDATION: wiki markup varies per project/franchise, so every parser *fails
+ * closed* — an unrecognised structure yields an empty map rather than a guess,
+ * and `looksLikeChapterList()` below throws out a map the parser produced but
+ * clearly misread. Validated live against the English Wikipedia: Bleach and
+ * Naruto parse correctly (including their split "(1–187)" style pages), while
+ * Berserk, Death Note and One Piece — whose layouts this parser reads as ISBN
+ * fragments and years — are rejected rather than half-trusted.
  */
 
 const HEADERS = { 'User-Agent': 'mangas-binder/2.0 (+https://github.com/Matbtz/mangas-binder)' };
@@ -60,6 +59,33 @@ export async function searchTitles(base, query, limit = 5) {
 // --- Chapter number extraction --------------------------------------------
 
 /**
+ * No manga runs past this; a "chapter number" above it came from something that
+ * isn't a chapter number at all. The case that motivated the cap: a citation on
+ * "List of Bleach volumes" carried an Internet Archive URL, and its snapshot
+ * stamp was read as chapter *20160610100934*. One such entry was enough to make
+ * the page's whole 646-chapter map look physically impossible to
+ * chapter-map-consensus.js, which threw the entire (otherwise usable) source
+ * away — a single stray token silently costing us the best volume-boundary
+ * source we had.
+ */
+const MAX_CHAPTER_NUMBER = 5000;
+
+/**
+ * Remove the parts of a wiki page that carry digits but no chapter numbers:
+ * HTML comments, `<ref>…</ref>` citations (and the templates nested inside them)
+ * and bare URLs. Deliberately does NOT touch `{{cite}}` templates outside a ref
+ * — a non-greedy match would stop at the first `}}` of a nested template and
+ * leave an unbalanced brace, breaking the template scanner below.
+ */
+function stripCitationNoise(wikitext) {
+  return String(wikitext)
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<ref[^>]*\/>/gi, ' ')
+    .replace(/<ref[\s\S]*?<\/ref>/gi, ' ')
+    .replace(/https?:\/\/\S+/g, ' ');
+}
+
+/**
  * Pull chapter numbers out of a free-form chapter reference, tolerating the
  * non-standard nomenclature the report flags (Blame!'s "LOG 12"/"EX-LOG",
  * decimal side-chapters "34.5"). Returns null for a pure bonus with no number
@@ -75,11 +101,17 @@ function chapterNumbersFromText(text) {
     const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
     if (b >= a && b - a < 500) { for (let i = a; i <= b; i++) out.push(String(i)); consumed.add(m.index); }
   }
-  if (out.length) return [...new Set(out)];
+  if (out.length) return [...new Set(out)].filter(isPlausibleChapterNumber);
   // Otherwise collect standalone integers/decimals ("LOG 12", "12.5", "1, 2, 3").
   const numRe = /\b(\d+(?:\.\d+)?)\b/g;
   while ((m = numRe.exec(s))) out.push(String(parseFloat(m[1])));
-  return [...new Set(out)];
+  return [...new Set(out)].filter(isPlausibleChapterNumber);
+}
+
+/** A parsed token can only be a chapter number if it's in a chapter's range. */
+function isPlausibleChapterNumber(n) {
+  const v = parseFloat(n);
+  return Number.isFinite(v) && v >= 0 && v <= MAX_CHAPTER_NUMBER;
 }
 
 // --- EN Wikipedia: {{Graphic novel list}} ---------------------------------
@@ -145,7 +177,7 @@ function parseGraphicNovelList(wikitext) {
     for (const item of items) {
       const body2 = item.replace(/^[#*\s]+/, '');
       const explicit = body2.match(/^0*(\d+(?:\.\d+)?)\s*[.:)\-–]/); // "12. Title" / "12 – Title"
-      if (explicit) {
+      if (explicit && isPlausibleChapterNumber(explicit[1])) {
         map.set(String(parseFloat(explicit[1])), vol);
         cumulative = Math.max(cumulative, Math.floor(parseFloat(explicit[1])));
       } else {
@@ -208,7 +240,61 @@ function parseChapterTable(wikitext) {
  */
 export function parseChapterVolumeMap(wikitext, lang = 'en') {
   if (!wikitext) return { map: new Map(), volumeTitles: new Map() };
-  const gnl = parseGraphicNovelList(wikitext);
+  const clean = stripCitationNoise(wikitext);
+  const gnl = parseGraphicNovelList(clean);
   if (gnl.map.size) return gnl;
-  return parseChapterTable(wikitext);
+  return parseChapterTable(clean);
+}
+
+// --- Structural quality gate ------------------------------------------------
+
+/**
+ * Measure how much a parsed map actually looks like a chapter list.
+ *
+ * Two properties define a real one, and both are cheap to check:
+ *  - **coverage** — a chapter list *enumerates* chapters, so the entries it
+ *    produced should account for most of the chapter range they span. A table
+ *    misread into a handful of scattered numbers won't.
+ *  - **monotonicity** — later chapters live in later volumes. Always. A parse
+ *    that puts chapter 2 in volume 14 and chapter 3 in volume 5 read the wrong
+ *    columns.
+ *
+ * @param {Map<string,string>} map chapter number → volume number
+ * @returns {{ entries:number, coverage:number, monotonic:number, minCh:number, maxCh:number, volumes:number }}
+ */
+export function chapterMapQuality(map) {
+  const pairs = [...(map || new Map()).entries()]
+    .map(([ch, vol]) => [parseFloat(ch), parseFloat(vol)])
+    .filter(([c, v]) => Number.isFinite(c) && Number.isFinite(v))
+    .sort((a, b) => a[0] - b[0]);
+  if (!pairs.length) return { entries: 0, coverage: 0, monotonic: 0, minCh: 0, maxCh: 0, volumes: 0 };
+
+  const minCh = pairs[0][0], maxCh = pairs[pairs.length - 1][0];
+  const span = Math.max(1, maxCh - minCh + 1);
+  let ordered = 0;
+  for (let i = 1; i < pairs.length; i++) if (pairs[i][1] >= pairs[i - 1][1]) ordered++;
+  return {
+    entries: pairs.length,
+    coverage: Math.min(1, pairs.length / span),
+    monotonic: pairs.length > 1 ? ordered / (pairs.length - 1) : 1,
+    minCh, maxCh,
+    volumes: new Set(pairs.map(p => p[1])).size,
+  };
+}
+
+/**
+ * Fail-closed acceptance test for a parsed page's map.
+ *
+ * Live-validated against the English Wikipedia: "List of Bleach chapters
+ * (188–423)" scores coverage 0.56 / monotonic 1.00 and passes, while
+ * "List of Berserk chapters" (23 scattered entries over a 0–4106 range, volumes
+ * jumping 1→14→5→11) and "Lists of One Piece chapters" (11 entries reading
+ * years and ISBN fragments as chapters) score ~0.006 coverage and fail. Both of
+ * those used to reach the consensus and were only stopped further downstream by
+ * the physical-plausibility band — i.e. by luck, not by a check that knew they
+ * were garbage.
+ */
+export function looksLikeChapterList(map, { minEntries = 5, minCoverage = 0.4, minMonotonic = 0.9 } = {}) {
+  const q = chapterMapQuality(map);
+  return q.entries >= minEntries && q.coverage >= minCoverage && q.monotonic >= minMonotonic;
 }

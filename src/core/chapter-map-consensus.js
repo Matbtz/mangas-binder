@@ -41,22 +41,72 @@ import { isProviderEnabled } from './settings.js';
 
 const key = (n) => String(parseFloat(n));
 
-/** True when a whole source map is safe to trust against the known bounds. */
-function mapIsPlausible(map, chapterCount, totalVolumesHint) {
-  if (!map || map.size === 0) return false;
-  let maxVol = 0, maxCh = 0;
-  for (const [ch, vol] of map) {
-    const vn = parseFloat(vol); if (Number.isFinite(vn) && vn > maxVol) maxVol = vn;
-    const cn = parseFloat(ch); if (Number.isFinite(cn) && cn > maxCh) maxCh = cn;
+// Absolute ceiling for a chapter number when we have no consensus to size
+// against. Mirrors providers/wiki-client.js's own cap.
+const MAX_PLAUSIBLE_CHAPTER = 5000;
+
+// How far a source's own chapters-per-volume may sit above the consensus before
+// it reads as "this source merged volumes together" rather than "this source
+// tagged part of the series". Only an *excess* is suspicious: a partial map
+// legitimately carries fewer chapters per volume than the real thing.
+const MERGED_VOLUMES_RATIO = 1.75;
+
+/**
+ * Vet one source's map against everything we know about the series, returning a
+ * cleaned copy plus whether it is fit to use.
+ *
+ * Entries are pruned *before* the map is judged, which is the important part: a
+ * single junk entry used to condemn an entire source. Live case — Wikipedia's
+ * Bleach page yielded 646 good chapter→volume pairs plus one whose "chapter
+ * number" was an Internet Archive timestamp scraped out of a citation; that lone
+ * entry made the map's implied chapters-per-volume astronomical and the whole
+ * source was dropped, leaving the estimator with MangaUpdates' 20 one-chapter
+ * anchors and no real volume boundaries at all.
+ *
+ * @returns {{ map: Map<string,string>, ok: boolean, reason?: string, dropped: number }}
+ */
+function vetSourceMap(rawMap, { chapterCount = 0, totalVolumesHint = null, totalChaptersHint = null } = {}) {
+  if (!rawMap || rawMap.size === 0) return { map: new Map(), ok: false, reason: 'empty', dropped: 0 };
+
+  const volCap = totalVolumesHint > 0 ? Math.floor(totalVolumesHint) * 1.5 + 1 : null;
+  const chCap = totalChaptersHint > 0
+    ? Math.max(totalChaptersHint * 1.5 + 50, chapterCount * 1.5 + 50)
+    : MAX_PLAUSIBLE_CHAPTER;
+
+  const map = new Map();
+  let dropped = 0, maxVol = 0, maxCh = 0;
+  for (const [ch, vol] of rawMap) {
+    const cn = parseFloat(ch), vn = parseFloat(vol);
+    if (!Number.isFinite(cn) || !Number.isFinite(vn) || vn <= 0 || cn < 0) { dropped++; continue; }
+    if (cn > chCap || (volCap != null && vn > volCap)) { dropped++; continue; }
+    map.set(ch, vol);
+    if (vn > maxVol) maxVol = vn;
+    if (cn > maxCh) maxCh = cn;
   }
-  if (maxVol <= 0) return false;
-  // A volume number well beyond a confident total is a mis-parse/wrong-edition.
-  if (totalVolumesHint > 0 && maxVol > Math.floor(totalVolumesHint) * 1.5 + 1) return false;
+  if (!map.size) return { map, ok: false, reason: 'no usable entries', dropped };
+
   // Highest volume vs highest chapter must imply a sane chapters-per-volume —
   // catches a mis-parsed table (e.g. chapter 100 tagged "volume 2", or a page
   // whose numbers were read as volumes) before it can seed wrong anchors.
-  if (impliesImpossibleChaptersPerVolume(maxVol, Math.max(maxCh, chapterCount))) return false;
-  return true;
+  if (impliesImpossibleChaptersPerVolume(maxVol, Math.max(maxCh, chapterCount))) {
+    return { map, ok: false, reason: 'implied chapters-per-volume outside the physical band', dropped };
+  }
+
+  // A source that maps most of the run into far fewer volumes than the series
+  // really has read the wrong edition or the wrong column — Wikipedia's
+  // "List of Bleach volumes" page parses as 643 chapters across 25 volumes (26
+  // per volume) against a 74-volume/686-chapter consensus (9 per volume). That
+  // is inside the absolute band above yet nearly 3x the truth, so it needs the
+  // consensus to be caught.
+  if (totalVolumesHint > 0 && totalChaptersHint > 0) {
+    const consensusPerVolume = totalChaptersHint / totalVolumesHint;
+    const sourcePerVolume = map.size / new Set([...map.values()]).size;
+    if (sourcePerVolume > consensusPerVolume * MERGED_VOLUMES_RATIO) {
+      return { map, ok: false, reason: 'volumes look merged against the consensus', dropped };
+    }
+  }
+
+  return { map, ok: true, dropped };
 }
 
 /**
@@ -65,10 +115,11 @@ function mapIsPlausible(map, chapterCount, totalVolumesHint) {
  * This is the part worth caching (see module docstring).
  *
  * @param {string} seriesTitle
- * @param {{ mangaUpdatesRef?:{seriesId:any,seriesTitle?:string}|null, totalVolumesHint?:number|null, chapterCount?:number }} [opts]
+ * @param {{ mangaUpdatesRef?:{seriesId:any,seriesTitle?:string}|null, totalVolumesHint?:number|null, totalChaptersHint?:number|null, chapterCount?:number }} [opts]
  * @returns {Promise<{ map: Map<string,{volume:string, source:string}>, volumeTitles: Map<string,string>, reports: Array<object> }>}
  */
-export async function fetchExternalChapterSources(seriesTitle, { mangaUpdatesRef = null, totalVolumesHint = null, chapterCount = 0 } = {}) {
+export async function fetchExternalChapterSources(seriesTitle, { mangaUpdatesRef = null, totalVolumesHint = null, totalChaptersHint = null, chapterCount = 0 } = {}) {
+  const vet = map => vetSourceMap(map, { chapterCount, totalVolumesHint, totalChaptersHint });
   const merged = new Map();
   const volumeTitles = new Map();
   const reports = [];
@@ -80,12 +131,14 @@ export async function fetchExternalChapterSources(seriesTitle, { mangaUpdatesRef
   // MangaUpdates releases (existing precedence over MangaDex).
   if (isProviderEnabled('mangaupdates') && mangaUpdatesRef?.seriesId) {
     try {
-      const { map, checked, verified, rejected } = await muFetchChapterVolumeMap(mangaUpdatesRef.seriesId, mangaUpdatesRef.seriesTitle || seriesTitle);
-      if (mapIsPlausible(map, chapterCount, totalVolumesHint)) {
-        apply(map, 'mangaupdates');
-        reports.push({ name: 'MangaUpdates', role: 'per-chapter release map', mapped: map.size, releasesChecked: checked, releasesVerified: verified, releasesRejectedMismatch: rejected });
+      const { map: raw, checked, verified, rejected } = await muFetchChapterVolumeMap(mangaUpdatesRef.seriesId, mangaUpdatesRef.seriesTitle || seriesTitle);
+      const v = vet(raw);
+      const base = { name: 'MangaUpdates', role: 'per-chapter release map', releasesChecked: checked, releasesVerified: verified, releasesRejectedMismatch: rejected };
+      if (v.ok) {
+        apply(v.map, 'mangaupdates');
+        reports.push({ ...base, mapped: v.map.size, ...(v.dropped ? { entriesDropped: v.dropped } : {}) });
       } else {
-        reports.push({ name: 'MangaUpdates', role: 'per-chapter release map', mapped: 0, rejectedAsImplausible: map?.size > 0, releasesChecked: checked, releasesVerified: verified, releasesRejectedMismatch: rejected });
+        reports.push({ ...base, mapped: 0, rejectedAsImplausible: raw?.size > 0, rejectionReason: v.reason, ...(v.dropped ? { entriesDropped: v.dropped } : {}) });
       }
     } catch { reports.push({ name: 'MangaUpdates', role: 'per-chapter release map', error: 'lookup failed' }); }
   }
@@ -94,12 +147,15 @@ export async function fetchExternalChapterSources(seriesTitle, { mangaUpdatesRef
   if (isProviderEnabled('fandom')) {
     try {
       const r = await fandom.fetchChapterVolumeMap?.(seriesTitle);
-      if (r && mapIsPlausible(r.map, chapterCount, totalVolumesHint)) {
-        apply(r.map, 'fandom');
-        for (const [v, t] of r.volumeTitles || []) if (!volumeTitles.has(v)) volumeTitles.set(v, t);
-        reports.push({ name: 'Fandom Wiki', role: 'per-chapter volume list', mapped: r.map.size, matchedTitle: r.matchedTitle, sourceUrl: r.sourceUrl });
+      const v = r ? vet(r.map) : null;
+      if (v?.ok) {
+        apply(v.map, 'fandom');
+        for (const [vol, t] of r.volumeTitles || []) if (!volumeTitles.has(vol)) volumeTitles.set(vol, t);
+        reports.push({ name: 'Fandom Wiki', role: 'per-chapter volume list', mapped: v.map.size, matchedTitle: r.matchedTitle, sourceUrl: r.sourceUrl, ...(v.dropped ? { entriesDropped: v.dropped } : {}) });
       } else if (r) {
-        reports.push({ name: 'Fandom Wiki', role: 'per-chapter volume list', mapped: 0, rejectedAsImplausible: true, matchedTitle: r.matchedTitle });
+        // "no usable entries" is a parse that found nothing, not a map we judged
+        // and threw out — say which, so the preview isn't misleading.
+        reports.push({ name: 'Fandom Wiki', role: 'per-chapter volume list', mapped: 0, rejectedAsImplausible: v.reason !== 'empty', rejectionReason: v.reason, matchedTitle: r.matchedTitle });
       }
     } catch { reports.push({ name: 'Fandom Wiki', role: 'per-chapter volume list', error: 'lookup failed' }); }
   }
@@ -108,12 +164,13 @@ export async function fetchExternalChapterSources(seriesTitle, { mangaUpdatesRef
   if (isProviderEnabled('wikipedia')) {
     try {
       const r = await wikipedia.fetchChapterVolumeMap?.(seriesTitle);
-      if (r && mapIsPlausible(r.map, chapterCount, totalVolumesHint)) {
-        apply(r.map, 'wikipedia');
-        for (const [v, t] of r.volumeTitles || []) volumeTitles.set(v, t); // wiki titles win
-        reports.push({ name: 'Wikipedia', role: 'per-chapter volume list', mapped: r.map.size, matchedTitle: r.matchedTitle, sourceUrl: r.sourceUrl, lang: r.lang });
+      const v = r ? vet(r.map) : null;
+      if (v?.ok) {
+        apply(v.map, 'wikipedia');
+        for (const [vol, t] of r.volumeTitles || []) volumeTitles.set(vol, t); // wiki titles win
+        reports.push({ name: 'Wikipedia', role: 'per-chapter volume list', mapped: v.map.size, matchedTitle: r.matchedTitle, sourceUrl: r.sourceUrl, lang: r.lang, ...(r.pages?.length > 1 ? { mergedPages: r.pages.length } : {}), ...(v.dropped ? { entriesDropped: v.dropped } : {}) });
       } else if (r) {
-        reports.push({ name: 'Wikipedia', role: 'per-chapter volume list', mapped: 0, rejectedAsImplausible: true, matchedTitle: r.matchedTitle, lang: r.lang });
+        reports.push({ name: 'Wikipedia', role: 'per-chapter volume list', mapped: 0, rejectedAsImplausible: v.reason !== 'empty', rejectionReason: v.reason, matchedTitle: r.matchedTitle, lang: r.lang });
       }
     } catch { reports.push({ name: 'Wikipedia', role: 'per-chapter volume list', error: 'lookup failed' }); }
   }
@@ -127,6 +184,7 @@ export async function fetchExternalChapterSources(seriesTitle, { mangaUpdatesRef
  * @param {{
  *   mangaUpdatesRef?:{seriesId:any,seriesTitle?:string}|null,
  *   totalVolumesHint?:number|null,
+ *   totalChaptersHint?:number|null,
  *   cachedExternal?:{map:Map,volumeTitles:Map,reports:Array<object>}|null,
  * }} [opts]
  * @returns {Promise<{
@@ -139,7 +197,7 @@ export async function fetchExternalChapterSources(seriesTitle, { mangaUpdatesRef
  *   externalFromCache: boolean,         // true when `cachedExternal` was reused (nothing new to persist)
  * }>}
  */
-export async function resolveChapterVolumeMap(seriesTitle, mangadexChapters, { mangaUpdatesRef = null, totalVolumesHint = null, cachedExternal = null } = {}) {
+export async function resolveChapterVolumeMap(seriesTitle, mangadexChapters, { mangaUpdatesRef = null, totalVolumesHint = null, totalChaptersHint = null, cachedExternal = null } = {}) {
   const merged = new Map();          // ch -> { volume, source }
 
   // 1. MangaDex tags (baseline, lowest priority) — always fresh, never cached.
@@ -151,7 +209,7 @@ export async function resolveChapterVolumeMap(seriesTitle, mangadexChapters, { m
 
   const externalFromCache = !!cachedExternal;
   const external = cachedExternal || await fetchExternalChapterSources(seriesTitle, {
-    mangaUpdatesRef, totalVolumesHint, chapterCount: mangadexChapters.length,
+    mangaUpdatesRef, totalVolumesHint, totalChaptersHint, chapterCount: mangadexChapters.length,
   });
 
   // 2. Overlay every external anchor over the MangaDex baseline. Correct

@@ -54,8 +54,32 @@ test('fetchVolumeInfo: returns null when the search has no results', async () =>
   assert.equal(info, null);
 });
 
-test('fetchVolumeInfo: returns null rather than throwing when the API is unreachable', async () => {
+test('fetchVolumeInfo: surfaces an unreachable API as an error, not as "no match"', async () => {
+  // A failed lookup and "MangaBaka has no such series" are different facts and
+  // the consensus reports them differently, so this must NOT resolve to null —
+  // a live HTTP 500 on the Bleach search was being shown as "no verified match
+  // found", hiding the one provider that could have outvoted a wrong chapter
+  // count. core/volume-consensus.js catches this per-provider, so a throw here
+  // never breaks the wider refresh.
   global.fetch = async () => { throw new Error('network down'); };
+  await assert.rejects(() => fetchVolumeInfo('One Piece'), /network down/);
+});
+
+test('fetchVolumeInfo: retries a transient 5xx before giving up', async () => {
+  let calls = 0;
+  global.fetch = async (url) => {
+    calls++;
+    if (calls === 1) return new Response('boom', { status: 500 });
+    if (String(url).includes('/search')) return jsonResponse({ data: [{ id: 7, title: 'One Piece' }] });
+    return jsonResponse({ data: { title: 'One Piece', final_volume: 115, total_chapters: 1186, status: 'releasing' } });
+  };
   const info = await fetchVolumeInfo('One Piece');
+  assert.equal(info.totalVolumes, 115);
+  assert.ok(calls >= 3, 'the failed search was retried');
+});
+
+test('fetchVolumeInfo: returns null when a verified match has no usable numbers', async () => {
+  global.fetch = async () => jsonResponse({ data: [] });
+  const info = await fetchVolumeInfo('Some Other Unknown Series');
   assert.equal(info, null);
 });

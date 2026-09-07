@@ -56,11 +56,12 @@ export function ensureSeeded() {
   // them opt-in the way an unverified sole source would need to be. (AniList
   // was removed: as an anime-first DB it only reports volume/chapter totals for
   // finished works and lowballed several ongoing manga.)
-  // Wikipedia supplies *per-chapter* volume anchors that outrank MangaDex tags,
-  // but its chapter-list parsers (providers/wiki-client.js) were built without
-  // live wiki access — so it's opt-in until validated against real markup, the
-  // same caution MangaKatana gets as an unverified sole source.
-  const DISABLED_BY_DEFAULT = new Set(['mangakatana', 'wikipedia']);
+  // Wikipedia supplies *per-chapter* volume anchors that outrank every other
+  // source — its chapter lists mirror the physical tankobon boundaries, which is
+  // exactly what the volume estimator needs and what no metadata API provides.
+  // Its parsers are now live-validated and reject a page they misread rather
+  // than half-trusting it (providers/wiki-client.js), so it is on by default.
+  const DISABLED_BY_DEFAULT = new Set(['mangakatana']);
   const ins = getDb().prepare('INSERT OR IGNORE INTO providers (name, enabled) VALUES (?, ?)');
   for (const p of allProviders()) ins.run(p.name, DISABLED_BY_DEFAULT.has(p.name) ? 0 : 1);
 

@@ -26,6 +26,10 @@ export function seriesView(row, { withCounts = true } = {}) {
     packagingMode: row.packaging_mode,
     totalVolumesHint: row.total_volumes_hint,
     totalChaptersHint: row.total_chapters_hint,
+    // Operator-pinned even split, when one is set — null on automatic.
+    manualDistribution: (row.manual_total_chapters > 0 && row.manual_total_volumes > 0)
+      ? { totalChapters: row.manual_total_chapters, totalVolumes: row.manual_total_volumes, at: row.manual_distribution_at || null }
+      : null,
     lastScanAt: row.last_scan_at,
     externalLinks: row.externalLinks || (row.external_links_json ? JSON.parse(row.external_links_json) : {}),
     counts: withCounts ? chapterStateCounts(row.id) : undefined,

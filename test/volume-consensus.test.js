@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveConsensus, impliesImpossibleChaptersPerVolume } from '../src/core/volume-consensus.js';
+import { resolveConsensus, impliesImpossibleChaptersPerVolume, observedChapterFloor } from '../src/core/volume-consensus.js';
 
 // Regression for a real production bug: MangaUpdates' own latest_chapter
 // field was badly stale for an older completed series ("20th Century Boys"
@@ -90,4 +90,40 @@ test('resolveConsensus: empty opinions array', () => {
   const result = resolveConsensus([]);
   assert.equal(result.value, null);
   assert.equal(result.confidence, 0);
+});
+
+// --- Observed chapter list as a floor ---------------------------------------
+// Regression for the reported Bleach case: MangaUpdates' latest_chapter says
+// 250 (the series really has 686), MangaBaka's search 500s and Fandom reports no
+// chapter count — so one wrong number won unopposed at "100% confidence", while
+// the source we were about to download from was listing 714 chapters. 250 over
+// 74 volumes is 3.4 chapters/volume, comfortably inside the physical band, so
+// nothing else could catch it.
+
+const chapterList = nums => nums.map(n => ({ number: String(n) }));
+const runOf = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(i); return out; };
+
+test('observedChapterFloor: a dense run reports the chapter it actually reaches', () => {
+  assert.equal(observedChapterFloor(chapterList(runOf(1, 686))), 686);
+});
+
+test('observedChapterFloor: a lone out-of-range chapter cannot inflate the floor', () => {
+  // "Pet": 55 real chapters plus a stray 1190 from a bad provider record.
+  assert.equal(observedChapterFloor(chapterList([...runOf(1, 55), 1190])), 55);
+});
+
+test('observedChapterFloor: an aggregator with a delisted middle falls back to its solid prefix', () => {
+  // One Piece on a source that drops the licensed middle: 1-305 and 1066-1177.
+  assert.equal(observedChapterFloor(chapterList([...runOf(1, 305), ...runOf(1066, 1177)])), 305);
+});
+
+test('observedChapterFloor: fractional chapters and an empty list are ignored', () => {
+  assert.equal(observedChapterFloor([{ number: '1.5' }, { number: '2.5' }]), null);
+  assert.equal(observedChapterFloor([]), null);
+  assert.equal(observedChapterFloor(null), null);
+});
+
+test('observedChapterFloor: a run that is mostly holes reports no floor at that height', () => {
+  // 10 chapters scattered over 1..500 is not evidence of a 500-chapter series.
+  assert.equal(observedChapterFloor(chapterList([...runOf(1, 10), 500])), 10);
 });

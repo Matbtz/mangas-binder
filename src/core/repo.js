@@ -87,6 +87,12 @@ const SERIES_PATCH_COLS = {
   // core/chapter-map-consensus.js). Stored as an opaque JSON blob — null clears
   // it (used by the series "reset" route to force a fresh fetch next refresh).
   chapterMapCache: v => (v == null ? null : JSON.stringify(v)),
+  // Operator-pinned even distribution ("N chapters over V volumes"). Setting
+  // both pins the series' volume layout; setting either to null releases it back
+  // to the automatic consensus/extrapolation path (see core/mapping.js).
+  manualTotalChapters: v => (v == null ? null : Math.floor(Number(v))),
+  manualTotalVolumes: v => (v == null ? null : Math.floor(Number(v))),
+  manualDistributionAt: v => v,
   coverPath: v => v,
   folderPath: v => v,
   provider: v => v,
@@ -103,6 +109,9 @@ const SERIES_COL_NAMES = {
   language: 'language', totalVolumesHint: 'total_volumes_hint', totalChaptersHint: 'total_chapters_hint',
   lastScanAt: 'last_scan_at',
   chapterMapCache: 'chapter_map_cache_json',
+  manualTotalChapters: 'manual_total_chapters',
+  manualTotalVolumes: 'manual_total_volumes',
+  manualDistributionAt: 'manual_distribution_at',
   coverPath: 'cover_path', folderPath: 'folder_path',
   provider: 'provider', providerSeriesId: 'provider_series_id',
   downloadProvider: 'download_provider', mediaType: 'media_type', title: 'title',

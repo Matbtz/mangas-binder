@@ -107,9 +107,59 @@ export function resolveConsensus(opinions, priorityOrder = PROVIDER_PRIORITY) {
 }
 
 /**
+ * How much bigger the chapter list we can actually see has to be before it
+ * overrules the providers' agreed chapter total. Small differences are normal
+ * (an ongoing series whose consensus lags by a few chapters, a source carrying a
+ * couple of extras) and the providers stay authoritative there; a gap this large
+ * means their number is simply wrong.
+ */
+const OBSERVED_OVERRIDE_RATIO = 1.2;
+const OBSERVED_OVERRIDE_MIN_GAP = 5;
+
+// A chapter number only counts as "the run reaches here" when the run up to it
+// is actually populated. Half is a generous floor for an aggregator with holes.
+const OBSERVED_DENSITY = 0.5;
+
+/**
+ * A hard lower bound on a series' chapter count, read off the chapter list the
+ * primary provider actually returned.
+ *
+ * This is evidence rather than an opinion: if a source really lists chapters up
+ * to 686, the series has at least 686 chapters whatever a metadata field says.
+ * But a chapter list also carries junk — a stray "chapter 1190" in a 55-chapter
+ * series, or an aggregator that delists a licensed middle and leaves only
+ * 1-305 and 1066-1177. So the bound is the highest chapter number whose run is
+ * still *dense*: the largest N where at least half of chapters 1..N are present.
+ * A lone outlier can never reach that bar, and a series with a big hole falls
+ * back to the end of its solid prefix instead of claiming the hole is real.
+ *
+ * @param {Array<{number: string|number}>} chapters
+ * @returns {number|null}
+ */
+export function observedChapterFloor(chapters) {
+  if (!Array.isArray(chapters) || !chapters.length) return null;
+  const ints = new Set();
+  for (const c of chapters) {
+    const n = parseFloat(c?.number ?? c);
+    if (Number.isInteger(n) && n > 0) ints.add(n);
+  }
+  if (!ints.size) return null;
+  const sorted = [...ints].sort((a, b) => a - b);
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    // i + 1 chapters are <= sorted[i], so that ratio is the run's density.
+    if ((i + 1) / sorted[i] >= OBSERVED_DENSITY) return sorted[i];
+  }
+  return null;
+}
+
+/**
  * Query every enabled total-volume/chapter provider for a manga series in
  * parallel and resolve a consensus for both metrics.
  *
+ * @param {string} seriesTitle
+ * @param {{ observedChapters?: Array<{number: string|number}> }} [opts]
+ *   `observedChapters` is the primary provider's own chapter list; it can only
+ *   ever raise the chapter consensus, never lower it (see observedChapterFloor).
  * @returns {Promise<{
  *   providerReports: Array<object>,        // for refresh-preview citation
  *   totalVolumes: ReturnType<typeof resolveConsensus>,
@@ -117,7 +167,7 @@ export function resolveConsensus(opinions, priorityOrder = PROVIDER_PRIORITY) {
  *   mangaUpdatesRef: { seriesId, seriesTitle } | null,  // for fetchChapterVolumeMap
  * }>}
  */
-export async function consultVolumeProviders(seriesTitle) {
+export async function consultVolumeProviders(seriesTitle, { observedChapters = null } = {}) {
   const providerReports = [];
   const volumeOpinions = [];   // { provider, value }
   const chapterOpinions = [];
@@ -201,6 +251,38 @@ export async function consultVolumeProviders(seriesTitle) {
   //    volume" claim that other providers share (55 chapters / 1 volume is out
   //    of band; 55 / 5 = 11 is fine).
   const totalChapters = resolveConsensus(consistentChapters);
+
+  // 1b. Floor the chapter consensus at what the primary provider actually lists.
+  //     A real production case: MangaUpdates reports latest_chapter=250 for
+  //     Bleach (really 686) and, with MangaBaka erroring out and Fandom offering
+  //     no chapter count, that lone wrong number won unopposed at "100%
+  //     confidence" — while the source we were about to download from was
+  //     listing 714 chapters. 250/74 volumes = 3.4 chapters per volume is
+  //     comfortably inside the physical-plausibility band, so nothing else
+  //     caught it. The visible chapter list is the one piece of ground truth in
+  //     this whole resolution, so it overrules a provider field that contradicts
+  //     it outright; small differences leave the consensus alone.
+  const observedFloor = observedChapterFloor(observedChapters);
+  if (observedFloor && (!totalChapters.value ||
+      (observedFloor >= totalChapters.value * OBSERVED_OVERRIDE_RATIO &&
+       observedFloor - totalChapters.value >= OBSERVED_OVERRIDE_MIN_GAP))) {
+    const outvoted = totalChapters.value;
+    totalChapters.value = observedFloor;
+    totalChapters.raisedToObservedList = true;
+    totalChapters.observedChapterFloor = observedFloor;
+    if (outvoted != null) {
+      totalChapters.confidence = 0;                 // no provider actually agrees with this
+      totalChapters.dissenting = [...totalChapters.agreeing, ...totalChapters.dissenting];
+      totalChapters.agreeing = [];
+      totalChapters.outvotedByObservedList = outvoted;
+    }
+    providerReports.push({
+      name: 'Chapter list', role: 'observed chapter count (floor)',
+      observedChapters: observedFloor,
+      ...(outvoted != null ? { providersClaimed: outvoted, note: 'provider chapter total is below the chapters actually listed — raised' } : {}),
+    });
+  }
+
   let volumeCandidates = consistentVolumes;
   const rejectedVolumeProviders = new Set();
   if (totalChapters.value) {

@@ -583,6 +583,14 @@ async function showDetail(id) {
         onApplied: () => showDetail(id),
       }) },
     { label: 'Manage volumes', icon: '📚', onClick: () => openManageVolumesModal({ seriesId: id, seriesTitle: s.title, chapters: s.chapters, onApplied: () => showDetail(id) }) },
+    // Permanent entry point for the distribution modal. The "✨ Extrapolate All"
+    // button lives in the "no volume" chapter group, which disappears once every
+    // chapter has a volume — including right after pinning an even split, when
+    // you most need a way back in to adjust or release it.
+    { label: s.manualDistribution
+        ? `Volume distribution (pinned ${s.manualDistribution.totalChapters}ch/${s.manualDistribution.totalVolumes}vol)`
+        : 'Volume distribution', icon: '📐',
+      onClick: () => openExtrapolateModal({ seriesId: id, seriesTitle: s.title, onApplied: () => showDetail(id), tab: s.manualDistribution ? 'even' : 'auto' }) },
     { label: 'Edit metadata', icon: '✍', onClick: () => openEditMetadataModal({ seriesId: id, title: s.title, description: s.description, coverPath: s.coverPath, onApplied: () => showDetail(id) }) },
     { label: 'External links', icon: '🔗', onClick: () => openExternalLinksModal({ seriesId: id, seriesTitle: s.title, mediaType: s.mediaType, externalLinks: s.externalLinks || {}, onApplied: () => showDetail(id) }) },
     { label: 'Reset series (wipe chapters)', icon: '♻', danger: true, onClick: () => openResetSeriesModal({ seriesId: id, seriesTitle: s.title, onReset: () => showDetail(id) }) },
@@ -1381,7 +1389,7 @@ function openManageFilesModal({ seriesId, seriesTitle, chapters, folderPath, onA
 }
 
 // --- Extrapolate Volumes modal ---
-async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
+async function openExtrapolateModal({ seriesId, seriesTitle, onApplied, tab = 'auto' }) {
   const existing = document.getElementById('extrapolate-modal');
   if (existing) existing.remove();
 
@@ -1394,16 +1402,23 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
       </div>
       <div style="display:flex;border-bottom:1px solid #2e353f;background:#111518;flex-shrink:0">
         <button id="em-tab-auto" style="flex:1;background:var(--acc);color:#fff;border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✨ Automatic</button>
-        <button id="em-tab-manual" style="flex:1;background:transparent;color:var(--fg);border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✏️ Manual</button>
+        <button id="em-tab-manual" style="flex:1;background:transparent;color:var(--fg);border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">✏️ Chapters/Vol</button>
+        <button id="em-tab-even" style="flex:1;background:transparent;color:var(--fg);border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit">📐 Even split</button>
       </div>
       <div id="em-options-row" style="padding:12px 20px;border-bottom:1px solid #2e353f;display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex-shrink:0">
         <div id="em-manual-opt" style="display:none;align-items:center;gap:8px">
           <span style="color:#ccc;font-size:13px">Chapters/Vol:</span>
           <input type="number" id="em-chs-per-vol" min="1" max="500" value="8" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:70px;font-family:inherit">
         </div>
-        <div style="display:flex;align-items:center;gap:8px">
+        <div id="em-maxvol-opt" style="display:flex;align-items:center;gap:8px">
           <span style="color:#ccc;font-size:13px">Extrapolate up to Volume:</span>
           <input type="number" id="em-max-vol" min="1" max="500" placeholder="e.g. 10" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:75px;font-family:inherit">
+        </div>
+        <div id="em-even-opt" style="display:none;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="color:#ccc;font-size:13px">Chapters:</span>
+          <input type="number" id="em-even-chapters" min="1" max="5000" placeholder="e.g. 686" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:85px;font-family:inherit">
+          <span style="color:#ccc;font-size:13px">Volumes:</span>
+          <input type="number" id="em-even-volumes" min="1" max="500" placeholder="e.g. 74" style="background:#0d1117;border:1px solid #30363d;color:#fff;padding:6px 10px;border-radius:6px;width:75px;font-family:inherit">
         </div>
         <button class="btn sm" id="em-preview-btn" style="margin-left:auto">🔍 Preview</button>
       </div>
@@ -1428,9 +1443,15 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
   const body = modal.querySelector('#em-body');
   const applyBtn = modal.querySelector('#em-apply');
   const manualOpt = modal.querySelector('#em-manual-opt');
+  const maxVolOpt = modal.querySelector('#em-maxvol-opt');
+  const evenOpt = modal.querySelector('#em-even-opt');
   const chsInput = modal.querySelector('#em-chs-per-vol');
   const maxVolInput = modal.querySelector('#em-max-vol');
+  const evenChaptersInput = modal.querySelector('#em-even-chapters');
+  const evenVolumesInput = modal.querySelector('#em-even-volumes');
   const previewBtn = modal.querySelector('#em-preview-btn');
+  let evenData = null;      // last /manual-distribution response
+  let evenDefaultsLoaded = false;
 
   const renderPreview = () => {
     if (!previewData) return;
@@ -1442,10 +1463,6 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
       return;
     }
     const stats = h('<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>');
-    const statCard = (val, label, color = '#aaa') => h(`<div style="flex:1;min-width:90px;background:#0d1117;border:1px solid #2e353f;border-radius:8px;padding:10px 14px;text-align:center">
-      <div style="font-size:20px;font-weight:700;color:${color}">${esc(String(val))}</div>
-      <div style="font-size:11px;color:#666;margin-top:2px">${label}</div>
-    </div>`);
     if (mode === 'auto') stats.appendChild(statCard(consecutiveVols, 'known volumes', 'var(--acc)'));
     stats.appendChild(statCard(chsPerVol, 'chapters / vol', 'var(--acc)'));
     stats.appendChild(statCard(totalUnassigned, 'unassigned'));
@@ -1469,7 +1486,87 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
     applyBtn.disabled = volumes.length === 0;
   };
 
+  const statCard = (val, label, color = '#aaa') => h(`<div style="flex:1;min-width:90px;background:#0d1117;border:1px solid #2e353f;border-radius:8px;padding:10px 14px;text-align:center">
+    <div style="font-size:20px;font-weight:700;color:${color}">${esc(String(val))}</div>
+    <div style="font-size:11px;color:#666;margin-top:2px">${label}</div>
+  </div>`);
+
+  // Even split: the operator states the two numbers and every volume gets the
+  // same share. Pinned on the series, so a later refresh can't undo it.
+  const renderEven = () => {
+    body.innerHTML = '';
+    if (!evenData) return;
+    if (evenData.active && evenData.current) {
+      const cur = evenData.current;
+      const banner = h(`<div style="background:#12261a;border:1px solid #2c5c3a;border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px;font-size:13px">
+        <span style="color:#7ecc7e">📌 Pinned:</span>
+        <span style="color:#ddd">${cur.totalChapters} chapters over ${cur.totalVolumes} volumes — refreshes keep this layout.</span>
+      </div>`);
+      const release = h('<button class="btn sm" style="margin-left:auto;flex-shrink:0">Release</button>');
+      release.onclick = async () => {
+        release.disabled = true;
+        try {
+          await api(`/series/${seriesId}/manual-distribution`, { method: 'POST', body: { clear: true } });
+          toast('Manual distribution released — back to automatic estimation');
+          close();
+          if (onApplied) onApplied();
+        } catch (e) { toast(e.message); release.disabled = false; }
+      };
+      banner.appendChild(release);
+      body.appendChild(banner);
+    }
+    if (evenData.error) {
+      body.appendChild(h(`<p style="color:var(--warn)">${esc(evenData.error)}</p>`));
+      applyBtn.disabled = true;
+      return;
+    }
+    const p = evenData.preview;
+    if (!p) { applyBtn.disabled = true; return; }
+    const stats = h('<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>');
+    stats.appendChild(statCard(p.totalVolumes, 'volumes', 'var(--acc)'));
+    stats.appendChild(statCard(p.chaptersPerVolume, 'chapters / vol', 'var(--acc)'));
+    stats.appendChild(statCard(`${p.minVolumeSize}–${p.maxVolumeSize}`, 'size range', '#7ecc7e'));
+    stats.appendChild(statCard(p.chaptersToCreate, 'placeholders'));
+    body.appendChild(stats);
+    if (p.skippedPackaged > 0) {
+      body.appendChild(h(`<p class="muted" style="font-size:12px;margin:-6px 0 10px">${p.skippedPackaged} already-packaged chapter${p.skippedPackaged !== 1 ? 's keep their' : ' keeps its'} current volume (the CBZ on disk was built with it).</p>`));
+    }
+    const list = h('<div style="display:flex;flex-direction:column;gap:4px"></div>');
+    for (const v of p.volumes) {
+      list.appendChild(h(`<div style="display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--panel2);border-radius:7px;font-size:13px">
+        <span style="font-weight:700;color:#fff;min-width:70px">${v.vol === 'Specials' ? 'Specials' : 'Vol. ' + esc(String(v.vol))}</span>
+        <span style="color:#888">Ch. ${esc(String(v.from))} – ${esc(String(v.to))}</span>
+        <span class="pill" style="margin-left:auto;font-size:11px">${v.count} ch.</span>
+      </div>`));
+    }
+    body.appendChild(list);
+    applyBtn.disabled = !p.volumes.length;
+  };
+
+  const fetchEvenPreview = async () => {
+    body.innerHTML = '<p class="muted" style="padding:8px 0">Loading preview…</p>';
+    applyBtn.disabled = true;
+    try {
+      const params = [];
+      const ch = Number(evenChaptersInput.value), vol = Number(evenVolumesInput.value);
+      if (ch > 0) params.push(`totalChapters=${encodeURIComponent(ch)}`);
+      if (vol > 0) params.push(`totalVolumes=${encodeURIComponent(vol)}`);
+      const qs = params.length ? '?' + params.join('&') : '';
+      evenData = await api(`/series/${seriesId}/manual-distribution${qs}`);
+      // First open: pre-fill from whatever is pinned, else the resolved consensus.
+      if (!evenDefaultsLoaded) {
+        evenDefaultsLoaded = true;
+        if (!evenChaptersInput.value && evenData.suggested?.totalChapters) evenChaptersInput.value = evenData.suggested.totalChapters;
+        if (!evenVolumesInput.value && evenData.suggested?.totalVolumes) evenVolumesInput.value = evenData.suggested.totalVolumes;
+      }
+      renderEven();
+    } catch (e) {
+      body.innerHTML = `<p style="color:var(--warn)">Failed to load preview: ${esc(e.message)}</p>`;
+    }
+  };
+
   const fetchPreview = async () => {
+    if (mode === 'even') return fetchEvenPreview();
     body.innerHTML = '<p class="muted" style="padding:8px 0">Loading preview…</p>';
     applyBtn.disabled = true;
     try {
@@ -1488,22 +1585,46 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
 
   const switchTab = (newMode) => {
     mode = newMode;
-    const autoTab = modal.querySelector('#em-tab-auto');
-    const manualTab = modal.querySelector('#em-tab-manual');
-    autoTab.style.cssText = `flex:1;background:${mode==='auto'?'var(--acc)':'transparent'};color:${mode==='auto'?'#fff':'var(--fg)'};border:none;border-right:1px solid #2e353f;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
-    manualTab.style.cssText = `flex:1;background:${mode==='manual'?'var(--acc)':'transparent'};color:${mode==='manual'?'#fff':'var(--fg)'};border:none;padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
+    const tabStyle = (active, last) => `flex:1;background:${active?'var(--acc)':'transparent'};color:${active?'#fff':'var(--fg)'};border:none;${last?'':'border-right:1px solid #2e353f;'}padding:9px 16px;font-size:13px;cursor:pointer;font-family:inherit`;
+    modal.querySelector('#em-tab-auto').style.cssText = tabStyle(mode === 'auto', false);
+    modal.querySelector('#em-tab-manual').style.cssText = tabStyle(mode === 'manual', false);
+    modal.querySelector('#em-tab-even').style.cssText = tabStyle(mode === 'even', true);
     manualOpt.style.display = mode === 'manual' ? 'flex' : 'none';
+    maxVolOpt.style.display = mode === 'even' ? 'none' : 'flex';
+    evenOpt.style.display = mode === 'even' ? 'flex' : 'none';
+    applyBtn.textContent = mode === 'even' ? '📐 Pin even split' : '✨ Extrapolate';
     fetchPreview();
   };
 
   modal.querySelector('#em-tab-auto').onclick = () => switchTab('auto');
   modal.querySelector('#em-tab-manual').onclick = () => switchTab('manual');
+  modal.querySelector('#em-tab-even').onclick = () => switchTab('even');
   previewBtn.onclick = () => fetchPreview();
   chsInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
   maxVolInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
+  evenChaptersInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
+  evenVolumesInput.onkeydown = e => { if (e.key === 'Enter') fetchPreview(); };
 
   applyBtn.onclick = async () => {
+    const label = applyBtn.textContent;
     applyBtn.disabled = true;
+    if (mode === 'even') {
+      applyBtn.textContent = 'Distributing…';
+      try {
+        const res = await api(`/series/${seriesId}/manual-distribution`, {
+          method: 'POST',
+          body: { totalChapters: Number(evenChaptersInput.value), totalVolumes: Number(evenVolumesInput.value) },
+        });
+        toast(`Spread ${res.assigned} chapter${res.assigned !== 1 ? 's' : ''} evenly over ${res.totalVolumes} volumes${res.created ? ` (${res.created} placeholder${res.created !== 1 ? 's' : ''} created)` : ''}`);
+        close();
+        if (onApplied) onApplied();
+      } catch (e) {
+        toast(e.message);
+        applyBtn.disabled = false;
+        applyBtn.textContent = label;
+      }
+      return;
+    }
     applyBtn.textContent = 'Extrapolating…';
     try {
       const reqBody = {};
@@ -1523,7 +1644,7 @@ async function openExtrapolateModal({ seriesId, seriesTitle, onApplied }) {
   };
 
   document.body.appendChild(modal);
-  fetchPreview();
+  if (tab === 'even') switchTab('even'); else fetchPreview();
 }
 
 // --- Refresh Preview modal ---
