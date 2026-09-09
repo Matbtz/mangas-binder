@@ -8,7 +8,7 @@ import {
 } from './repo.js';
 import { isProviderEnabled, getSetting } from './settings.js';
 import { scanLibrary } from './library-scan.js';
-import { resolveVolumes } from './mapping.js';
+import { resolveVolumes, manualDistributionOf } from './mapping.js';
 import { logHistory } from './db.js';
 import { buildVolumeMapFromChapters, sanitizeVolumeMap, getVolumeStats, extrapolateVolumes } from './extrapolate.js';
 
@@ -120,8 +120,26 @@ export async function refreshSeries(seriesId) {
 
   const chapters = await provider.listChapters(series.provider_series_id, { lang: series.language });
 
+  // An operator-pinned "N chapters over V volumes" split replaces the whole
+  // consensus/volume-map layer for this series: its numbers are the hints, its
+  // chapter total bounds gap-fill, and there is no point paying for the external
+  // per-chapter map since resolveVolumes() re-applies the pinned layout below.
+  const manual = manualDistributionOf(series);
+
   let consensusLatestChapter = null;
-  if (series.media_type === 'manga') {
+  if (manual) {
+    consensusLatestChapter = manual.totalChapters;
+    if (series.total_volumes_hint !== manual.totalVolumes || series.total_chapters_hint !== manual.totalChapters) {
+      updateSeries(seriesId, { totalVolumesHint: manual.totalVolumes, totalChaptersHint: manual.totalChapters });
+      Object.assign(series, { total_volumes_hint: manual.totalVolumes, total_chapters_hint: manual.totalChapters });
+    }
+    const knownNums = new Set(chapters.map(c => String(parseFloat(c.number))));
+    for (let i = 1; i <= manual.totalChapters; i++) {
+      if (!knownNums.has(String(i))) {
+        chapters.push({ id: `synth-${seriesId}-${i}`, number: String(i), volume: null, title: `Chapter ${i}`, lang: series.language });
+      }
+    }
+  } else if (series.media_type === 'manga') {
     try {
       // Cross-check every enabled total-volume/chapter provider instead of
       // trusting MangaUpdates alone (see volume-consensus.js: a real bug had
@@ -130,7 +148,7 @@ export async function refreshSeries(seriesId) {
       // and another had two providers share a physically impossible "1 volume"
       // count for a 55-chapter series). The resolved consensus both sets the
       // volume/chapter hints and bounds how far chapters are gap-filled.
-      const { totalVolumes, totalChapters, mangaUpdatesRef } = await consultVolumeProviders(series.title);
+      const { totalVolumes, totalChapters, mangaUpdatesRef } = await consultVolumeProviders(series.title, { observedChapters: chapters });
       const hintPatch = {};
       if (totalVolumes.value && series.total_volumes_hint !== totalVolumes.value) hintPatch.totalVolumesHint = totalVolumes.value;
       if (totalChapters.value && series.total_chapters_hint !== totalChapters.value) hintPatch.totalChaptersHint = totalChapters.value;
@@ -175,7 +193,7 @@ export async function refreshSeries(seriesId) {
         const ttlMs = Number(getSetting('chapterMapCacheHours', 24)) * 3600000;
         const cachedExternal = readCachedExternal(series, ttlMs);
         const { map: chMap, external, externalFromCache } = await resolveChapterVolumeMap(
-          series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, cachedExternal }
+          series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, totalChaptersHint: totalChapters.value, cachedExternal }
         );
         if (!externalFromCache) updateSeries(seriesId, { chapterMapCache: serializeExternalCache(external) });
         for (const ch of chapters) {
@@ -309,7 +327,7 @@ export async function previewRefreshSeries(seriesId) {
   // the per-chapter volume-override mechanic, which stays MangaUpdates-only.
   let mangaUpdates = null;
   if (series.media_type === 'manga') {
-    const { providerReports, totalVolumes, totalChapters, mangaUpdatesRef } = await consultVolumeProviders(series.title);
+    const { providerReports, totalVolumes, totalChapters, mangaUpdatesRef } = await consultVolumeProviders(series.title, { observedChapters: chapters });
     providersConsulted.push(...providerReports);
 
     mangaUpdates = {
@@ -345,7 +363,7 @@ export async function previewRefreshSeries(seriesId) {
       // (which actually commits the refresh) is allowed to populate the cache.
       const ttlMs = Number(getSetting('chapterMapCacheHours', 24)) * 3600000;
       const cachedExternal = readCachedExternal(series, ttlMs);
-      const { map: chMap, counts, reports } = await resolveChapterVolumeMap(series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, cachedExternal });
+      const { map: chMap, counts, reports } = await resolveChapterVolumeMap(series.title, chapters, { mangaUpdatesRef, totalVolumesHint: totalVolumes.value, totalChaptersHint: totalChapters.value, cachedExternal });
       // Apply the merged map; a chapter whose winning source isn't MangaDex is an
       // override of (or a fill beyond) MangaDex's own tag.
       for (const ch of chapters) {

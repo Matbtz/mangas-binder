@@ -19,7 +19,7 @@ import { followSeries, refreshSeries, previewRefreshSeries, promoteThresholdChap
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, DEFAULT_PROFILE_CONFIG } from '../../core/profiles.js';
 import { scanLibrary, readCbzInfo, chNumFromDir } from '../../core/library-scan.js';
 import { autoMapSuggestions, autoMatchSeriesFromDisk } from '../../core/auto-map.js';
-import { resolveVolumes } from '../../core/mapping.js';
+import { resolveVolumes, applyManualDistribution, manualDistributionOf, manualVolumeFor } from '../../core/mapping.js';
 import { getVolumeStats, extrapolateVolumes, buildVolumeMapFromChapters, sanitizeVolumeMap } from '../../core/extrapolate.js';
 import { packageSingleChapter, packageSingleVolume, auditSeriesVolumes } from '../../core/binder.js';
 import { volumeCbzName } from '../../core/packager.js';
@@ -1570,6 +1570,145 @@ bindery.push({
     autoPackageCompleteVolumes(s.id);
     return { ok: true, changes: totalChanges, created, skippedPackaged };
   });
+  // --- Manual even distribution ("N chapters over V volumes") ---------------
+  // The escape hatch for when the providers are simply wrong about a series and
+  // no amount of cross-checking fixes it: the operator states the two numbers
+  // and the layout follows from them, evenly, and stays pinned across refreshes
+  // (see core/mapping.js).
+  const MAX_MANUAL_VOLUMES = 500;
+
+  /** Validate + normalise the two numbers a manual distribution is made of. */
+  function parseManualDistribution(body) {
+    const totalChapters = Math.floor(Number(body?.totalChapters));
+    const totalVolumes = Math.floor(Number(body?.totalVolumes));
+    if (!(totalChapters > 0) || !(totalVolumes > 0)) return { error: 'totalChapters and totalVolumes must both be positive' };
+    if (totalChapters > MAX_SYNTH_CHAPTERS) return { error: `totalChapters cannot exceed ${MAX_SYNTH_CHAPTERS}` };
+    if (totalVolumes > MAX_MANUAL_VOLUMES) return { error: `totalVolumes cannot exceed ${MAX_MANUAL_VOLUMES}` };
+    if (totalVolumes > totalChapters) return { error: 'there cannot be more volumes than chapters' };
+    return { totalChapters, totalVolumes };
+  }
+
+  /** Per-volume breakdown the split would produce, without touching the DB. */
+  function previewManualDistribution(series, totalChapters, totalVolumes) {
+    const existing = listChaptersForSeries(series.id);
+    const known = new Set(existing.map(c => String(parseFloat(c.number))));
+    const numbers = existing.map(c => c.number);
+    let created = 0;
+    for (let i = 1; i <= totalChapters; i++) {
+      if (!known.has(String(i))) { numbers.push(String(i)); created++; }
+    }
+    const packagedElsewhere = new Set(
+      existing.filter(c => (c.state === 'imported' || c.state === 'bindery') && c.volume != null && c.volume !== '')
+        .map(c => String(parseFloat(c.number)))
+    );
+    const volumes = new Map();
+    let skippedPackaged = 0;
+    for (const num of numbers) {
+      if (packagedElsewhere.has(String(parseFloat(num)))) { skippedPackaged++; continue; }
+      const vol = manualVolumeFor(num, totalChapters, totalVolumes);
+      if (!volumes.has(vol)) volumes.set(vol, []);
+      volumes.get(vol).push(num);
+    }
+    const rows = [...volumes.entries()]
+      .sort((a, b) => (a[0] === 'Specials' ? 1 : b[0] === 'Specials' ? -1 : parseFloat(a[0]) - parseFloat(b[0])))
+      .map(([vol, chs]) => {
+        const sorted = [...chs].sort((a, b) => parseFloat(a) - parseFloat(b));
+        return { vol, count: sorted.length, from: sorted[0], to: sorted[sorted.length - 1] };
+      });
+    const sizes = rows.filter(r => r.vol !== 'Specials').map(r => r.count);
+    return {
+      totalChapters, totalVolumes,
+      chaptersToCreate: created,
+      skippedPackaged,
+      chaptersPerVolume: Math.round((totalChapters / totalVolumes) * 10) / 10,
+      minVolumeSize: sizes.length ? Math.min(...sizes) : 0,
+      maxVolumeSize: sizes.length ? Math.max(...sizes) : 0,
+      volumes: rows,
+    };
+  }
+
+  app.get('/api/series/:id/manual-distribution', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+    const current = manualDistributionOf(s);
+    const chapters = listChaptersForSeries(s.id);
+    const highest = chapters.reduce((m, c) => Math.max(m, parseFloat(c.number) || 0), 0);
+    // Defaults the UI can pre-fill: whatever is pinned, else the resolved
+    // consensus, else what the DB already holds.
+    const suggested = {
+      totalChapters: current?.totalChapters || s.total_chapters_hint || Math.floor(highest) || chapters.length,
+      totalVolumes: current?.totalVolumes || s.total_volumes_hint || null,
+    };
+    const q = parseManualDistribution({
+      totalChapters: req.query.totalChapters ?? suggested.totalChapters,
+      totalVolumes: req.query.totalVolumes ?? suggested.totalVolumes,
+    });
+    if (q.error) return { active: !!current, current, suggested, error: q.error };
+    return { active: !!current, current, suggested, preview: previewManualDistribution(s, q.totalChapters, q.totalVolumes) };
+  });
+
+  app.post('/api/series/:id/manual-distribution', async (req, reply) => {
+    const s = getSeries(Number(req.params.id));
+    if (!s) return reply.code(404).send({ error: 'not found' });
+
+    // Release the pin and hand the series back to the automatic estimator. The
+    // chapter rows keep whatever volumes they have until that runs.
+    if (req.body?.clear) {
+      updateSeries(s.id, { manualTotalChapters: null, manualTotalVolumes: null, manualDistributionAt: null });
+      logHistory('series.manual_distribution_cleared', { seriesId: s.id, message: 'manual volume distribution released' });
+      const res = resolveVolumes(s.id);
+      promoteThresholdChapters(s.id);
+      autoPackageCompleteVolumes(s.id);
+      return { ok: true, cleared: true, reassigned: res.assigned ?? 0 };
+    }
+
+    const q = parseManualDistribution(req.body);
+    if (q.error) return reply.code(400).send({ error: q.error });
+    const { totalChapters, totalVolumes } = q;
+
+    const db = getDb();
+    const existing = listChaptersForSeries(s.id);
+    const missing = missingChapterNumbers(existing, totalChapters);
+    // Placeholders only queue for download when the series monitors everything;
+    // promoteThresholdChapters() below re-queues the ones a 'from' threshold covers.
+    const initialState = s.monitor_mode === 'all' ? 'wanted' : 'skipped';
+    let created = 0;
+    if (missing.length) {
+      const insertCh = db.prepare(`
+        INSERT INTO chapters (series_id, provider, number, volume, title, language, state, calculated)
+        VALUES (?, ?, ?, NULL, ?, ?, ?, 0)
+      `);
+      db.exec('BEGIN');
+      try {
+        for (const numStr of missing) {
+          insertCh.run(s.id, s.provider || 'mangadex', numStr, `Chapter ${numStr}`, s.language || 'en', initialState);
+          created++;
+        }
+        db.exec('COMMIT');
+      } catch (e) {
+        db.exec('ROLLBACK');
+        throw e;
+      }
+    }
+
+    updateSeries(s.id, {
+      manualTotalChapters: totalChapters,
+      manualTotalVolumes: totalVolumes,
+      manualDistributionAt: new Date().toISOString(),
+      totalChaptersHint: totalChapters,
+      totalVolumesHint: totalVolumes,
+    });
+    logHistory('series.manual_distribution_set', {
+      seriesId: s.id,
+      message: `pinned ${totalChapters} chapter(s) across ${totalVolumes} volume(s)`,
+    });
+
+    const { assigned, skippedPackaged } = applyManualDistribution(s.id);
+    promoteThresholdChapters(s.id);
+    autoPackageCompleteVolumes(s.id);
+    return { ok: true, totalChapters, totalVolumes, created, assigned, skippedPackaged };
+  });
+
   app.post('/api/series/:id/custom-volume', async (req, reply) => {
     const s = getSeries(Number(req.params.id));
     if (!s) return reply.code(404).send({ error: 'not found' });

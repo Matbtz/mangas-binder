@@ -1,4 +1,5 @@
 import { extrapolateVolumes, sanitizeVolumeMap, buildVolumeMapFromChapters } from './extrapolate.js';
+import { logHistory } from './db.js';
 import { getSeries, listChaptersForSeries } from './repo.js';
 import { getDb } from './db.js';
 import { getSetting } from './settings.js';
@@ -28,6 +29,13 @@ export function resolveVolumes(seriesId, { chaptersPerVolume = null } = {}) {
 
   const series = getSeries(seriesId);
   if (!series) return { assigned: 0 };
+
+  // An operator-pinned even split wins over every provider and every estimate —
+  // that is the entire point of setting one. Re-applying it here (rather than
+  // only at the moment the operator clicks Apply) is what makes it survive: a
+  // scheduled refresh that discovers new chapters folds them into the same
+  // layout instead of quietly handing the series back to the estimator.
+  if (manualDistributionOf(series)) return applyManualDistribution(seriesId);
 
   const chapters = listChaptersForSeries(seriesId);
   const byNumber = new Map(chapters.map(c => [c.number, c]));
@@ -62,4 +70,72 @@ export function resolveVolumes(seriesId, { chaptersPerVolume = null } = {}) {
     }
   }
   return { assigned };
+}
+
+/**
+ * The operator-pinned split for a series, or null when it runs on automatic.
+ * @returns {{ totalChapters: number, totalVolumes: number } | null}
+ */
+export function manualDistributionOf(series) {
+  const totalChapters = Number(series?.manual_total_chapters);
+  const totalVolumes = Number(series?.manual_total_volumes);
+  if (!(totalChapters > 0) || !(totalVolumes > 0)) return null;
+  return { totalChapters: Math.floor(totalChapters), totalVolumes: Math.floor(totalVolumes) };
+}
+
+/**
+ * Volume number for one chapter under a pinned "N chapters over V volumes" split.
+ *
+ * Purely a function of (chapter, N, V) — it never looks at what else is in the
+ * database. That is deliberate: the assignment is then identical on every run,
+ * so repeated refreshes can't drift the boundaries, and a chapter the provider
+ * adds beyond N lands in the final volume rather than reshaping everything
+ * before it. Fractional chapters aren't part of the numbered sequence and are
+ * reported as Specials.
+ *
+ * @returns {string} a volume number, or 'Specials'
+ */
+export function manualVolumeFor(chapterNumber, totalChapters, totalVolumes) {
+  const n = parseFloat(chapterNumber);
+  if (!Number.isFinite(n)) return 'Specials';
+  if (!Number.isInteger(n) || String(chapterNumber).includes('.')) return 'Specials';
+  const V = Math.max(1, Math.floor(totalVolumes));
+  const N = Math.max(1, Math.floor(totalChapters));
+  return String(Math.min(V, Math.max(1, Math.ceil((n * V) / N))));
+}
+
+/**
+ * Write the pinned even split across the series' chapters.
+ *
+ * Chapters already packaged into a CBZ ('imported'/'bindery') keep the volume
+ * their file was built with — reassigning them here would desync the DB from
+ * what is on disk, the same protection the automatic path applies.
+ *
+ * @returns {{ assigned: number, skippedPackaged: number }}
+ */
+export function applyManualDistribution(seriesId) {
+  const series = getSeries(seriesId);
+  const manual = manualDistributionOf(series);
+  if (!manual) return { assigned: 0, skippedPackaged: 0 };
+
+  const upd = getDb().prepare(
+    "UPDATE chapters SET volume = ?, calculated = 1, updated_at = datetime('now') WHERE id = ?"
+  );
+  let assigned = 0, skippedPackaged = 0;
+  for (const c of listChaptersForSeries(seriesId)) {
+    if (c.state === 'imported' || c.state === 'bindery') {
+      if (c.volume != null && c.volume !== '') { skippedPackaged++; continue; }
+    }
+    const vol = manualVolumeFor(c.number, manual.totalChapters, manual.totalVolumes);
+    if (String(c.volume ?? '') === vol) continue;
+    upd.run(vol, c.id);
+    assigned++;
+  }
+  if (assigned) {
+    logHistory('series.manual_distribution', {
+      seriesId,
+      message: `${assigned} chapter(s) re-spread over ${manual.totalVolumes} volume(s) (manual ${manual.totalChapters}ch/${manual.totalVolumes}vol)`,
+    });
+  }
+  return { assigned, skippedPackaged };
 }

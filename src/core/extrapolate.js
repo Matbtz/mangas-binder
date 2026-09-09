@@ -17,21 +17,41 @@
  *     consistently — so passes 1 and 2 never see a per-chapter or overlap
  *     anomaly to reject). Observed in production on One Piece: volumes with
  *     10-12 chapters everywhere except a handful tagged with 32-33 each.
+ *  4. Discards a whole *sparse* anchor set whose implied per-volume density
+ *     contradicts the consensus (a couple of stale tags far apart).
+ *  5. Trims the thin anchors out of a *partial* map — one that tags many
+ *     volumes but only a sliver of each. Observed on Bleach: MangaUpdates'
+ *     release feed tagged 43 volumes, 20 of them with a single chapter, and a
+ *     one-chapter anchor is a data point inside a volume, not its boundary.
+ *  6. Reopens a *hole* in an otherwise complete map — a volume number the
+ *     source skipped entirely, which would otherwise be published as an empty
+ *     tome (Bleach again: Wikipedia jumps from volume 35 to 37).
  *
  * Returns { cleanVolumeMap, noisy } where `noisy` is the flat list of
  * chapter numbers (strings) that were pulled out of their volume.
  *
  * When `totalVolumesHint` is supplied (the cross-provider consensus count), any
  * volume tag numbered *beyond* that total is treated as impossible for THIS
- * series and demoted to `noisy` up front — see Pass 0 below. When
- * `totalChaptersHint` is also supplied, Pass 4 additionally discards a *sparse*
- * anchor set whose implied per-volume density contradicts the consensus.
+ * series and demoted to `noisy` up front — see Pass 0 below. Passes 4-6 need
+ * `totalChaptersHint` too: each judges the anchor set against how big a volume
+ * of THIS series should be, which is exactly what the two totals say.
  */
 // A realistic tankōbon collects a handful to a few dozen chapters; a density
 // outside this band between two tagged volumes is physically impossible (mirrors
 // volume-consensus.js, kept local to avoid importing the settings chain).
 const MIN_CHS_PER_VOL = 2;
 const MAX_CHS_PER_VOL = 40;
+
+// A tagged set covering at least this share of the series' chapters is treated
+// as a complete volume map (every volume genuinely tagged), so Pass 5's
+// partial-map trim stands down — a densely-tagged series' small volumes are real.
+const PARTIAL_COVERAGE_LIMIT = 0.85;
+
+// An anchor holding at least this share of an expected volume is "well covered"
+// enough for its first/last chapter to be trusted as the volume's actual
+// boundary; below it the anchor still says "this chapter is in volume N" but not
+// "volume N starts/ends here".
+const STRONG_ANCHOR_COVERAGE = 0.6;
 
 export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null, totalChaptersHint = null } = {}) {
   const noisy = [];
@@ -199,6 +219,94 @@ export function sanitizeVolumeMap(volumeMap, { totalVolumesHint = null, totalCha
     }
   }
 
+  // Pass 5: partial-coverage anchor trim. Pass 4 only fires on a *sparse* anchor
+  // set (few tagged volumes); a source can instead tag *many* volumes but only a
+  // sliver of each, which is just as destructive and slips straight through.
+  // Real case (Bleach): MangaUpdates' release feed mapped 193 of 686 chapters
+  // across 43 volumes — a handful complete (9-11 chapters) but 20 of them
+  // holding exactly ONE chapter. A one-chapter anchor is not a volume boundary,
+  // it is a single data point sitting inside one: it pins its neighbours into the
+  // volumes on either side, producing the reported "Vol 8: 1 ch." next to
+  // "Vol 28: 25 ch." breakdown.
+  //
+  // So when the consensus tells us how big a volume should be and the tagged set
+  // covers only a fraction of the run, demote the volumes that hold far less than
+  // one volume's worth back to `noisy` and let the boundary estimator place their
+  // chapters. Volumes that ARE substantially covered stay authoritative anchors,
+  // so this sharpens a partial map instead of discarding it (Pass 4's blunter
+  // all-or-nothing). Deliberately conservative — it needs both consensus totals,
+  // a genuinely partial map, and at least one surviving well-covered anchor.
+  if (totalVolumesHint > 0 && totalChaptersHint > 0) {
+    const intCountOf = chs => chs.filter(c => !String(c).includes('.') && Number.isInteger(parseFloat(c))).length;
+    const numericVols = Object.entries(cleanVolumeMap)
+      .filter(([vStr]) => vStr !== 'none' && !Number.isNaN(parseFloat(vStr)))
+      .map(([vStr, chs]) => ({ vStr, vNum: parseFloat(vStr), chs, ints: intCountOf(chs) }));
+
+    const taggedInts = numericVols.reduce((n, v) => n + v.ints, 0);
+    const coverage = taggedInts / totalChaptersHint;
+    const expected = totalChaptersHint / totalVolumesHint;
+    // Below this a volume holds less than "a meaningful part of a volume" and is
+    // read as an incomplete tag rather than a genuinely short volume.
+    const minKeep = Math.max(2, Math.ceil(expected * 0.4));
+    const highestVol = numericVols.reduce((m, v) => Math.max(m, v.vNum), 0);
+
+    if (coverage < PARTIAL_COVERAGE_LIMIT) {
+      // A volume with zero *integer* chapters (only ".5" omakes) is already not
+      // an anchor downstream — leave it be rather than exiling its bonus chapters.
+      // The series' final volume is legitimately allowed to be short, so it is
+      // never trimmed for being small.
+      const weak = numericVols.filter(v => v.ints > 0 && v.ints < minKeep &&
+        !(v.vNum === highestVol && v.vNum >= Math.floor(totalVolumesHint)));
+      const strong = numericVols.filter(v => v.ints >= minKeep);
+      if (strong.length > 0 && weak.length > 0) {
+        for (const v of weak) { noisy.push(...v.chs); delete cleanVolumeMap[v.vStr]; }
+      }
+    }
+  }
+
+  // Pass 6: dropped-volume repair, the mirror image of Pass 5. Where Pass 5
+  // handles a map that tags many volumes thinly, this handles one that tags
+  // nearly every volume fully but skips one outright — a source that lost a row.
+  // Live case (Bleach): Wikipedia's chapter lists cover all 686 chapters and 73
+  // of the 74 volumes, jumping straight from volume 35 to volume 37. Both
+  // neighbours look complete, so they pin their boundaries exactly and leave
+  // volume 36 with nothing at all — an empty tome in the library.
+  //
+  // A hole like that proves the labels bracketing it are wrong (the chapters of
+  // the dropped volume were filed under its neighbours), so the two anchors
+  // touching the hole are demoted and their chapters re-estimated across all
+  // three slots. Only fires on an otherwise complete map with a couple of holes:
+  // in a partial map, missing volumes are the norm and mean nothing.
+  if (totalVolumesHint > 0 && totalChaptersHint > 0) {
+    const numeric = Object.entries(cleanVolumeMap)
+      .filter(([vStr]) => vStr !== 'none' && !Number.isNaN(parseFloat(vStr)))
+      .map(([vStr, chs]) => ({ vStr, vNum: parseFloat(vStr), chs }))
+      .sort((a, b) => a.vNum - b.vNum);
+    const tagged = numeric.reduce((n, v) => n + v.chs.length, 0);
+    const V = Math.floor(totalVolumesHint);
+
+    if (numeric.length >= 2 && tagged / totalChaptersHint >= PARTIAL_COVERAGE_LIMIT) {
+      const present = new Set(numeric.map(v => v.vNum));
+      const holes = [];
+      for (let v = Math.ceil(numeric[0].vNum) + 1; v < numeric[numeric.length - 1].vNum && v <= V; v++) {
+        if (!present.has(v)) holes.push(v);
+      }
+      if (holes.length && holes.length <= Math.max(2, V * 0.1)) {
+        const demote = new Set();
+        for (const hole of holes) {
+          const below = numeric.filter(v => v.vNum < hole).pop();
+          const above = numeric.find(v => v.vNum > hole);
+          if (below) demote.add(below.vStr);
+          if (above) demote.add(above.vStr);
+        }
+        for (const vStr of demote) {
+          noisy.push(...cleanVolumeMap[vStr]);
+          delete cleanVolumeMap[vStr];
+        }
+      }
+    }
+  }
+
   return { cleanVolumeMap, noisy };
 }
 
@@ -291,22 +399,65 @@ export function getVolumeStats(rawVolumeMap, { totalVolumesHint = null, totalCha
 }
 
 /**
+ * Split an ordered chapter list into exactly `volumeCount` evenly-sized volumes.
+ *
+ * Rank-based rather than number-based on purpose: a hole in the numbering (a
+ * delisted arc) or a stray out-of-range chapter must not drag the split apart.
+ * Fractional chapters (".5" omakes) go to Specials instead of consuming a slot
+ * in the main sequence.
+ *
+ * This is the primitive behind the manual "N chapters over V volumes" mode and
+ * the no-anchor fallback below.
+ *
+ * @param {Array<string|number>} chapters
+ * @param {number} volumeCount
+ * @returns {{ [volume: string]: string[] }}
+ */
+export function evenVolumeSplit(chapters, volumeCount) {
+  const out = {};
+  const V = Math.max(1, Math.floor(volumeCount));
+  const integers = [];
+  for (const c of chapters) {
+    const n = parseFloat(c);
+    if (Number.isNaN(n)) continue;
+    if (String(c).includes('.') || !Number.isInteger(n)) { (out['Specials'] ||= []).push(String(c)); continue; }
+    integers.push({ raw: String(c), n });
+  }
+  integers.sort((a, b) => a.n - b.n);
+  const N = integers.length;
+  integers.forEach(({ raw }, i) => {
+    const v = N ? Math.min(V, Math.floor((i * V) / N) + 1) : 1;
+    (out[String(v)] ||= []).push(raw);
+  });
+  return out;
+}
+
+/**
  * Extrapolates missing volumes from known volume/chapter anchor points.
  *
- * For any unassigned chapter:
- *  1. Finds the nearest preceding anchor volume (maxCh < chNum).
- *  2. Finds the nearest succeeding anchor volume (minCh > chNum), if any.
- *  3. If both anchors exist, the chapters strictly between them are spread
- *     *evenly* across the volume slots available between the two anchor
- *     volumes (see localChsPerVol below) rather than walking forward with a
- *     single chsPerVol and clamping overshoot into the last slot before the
- *     next anchor — that clamp is what used to dump dozens of chapters into
- *     one volume whenever known anchors were sparse (e.g. only volume 1 and
- *     volume 10 tagged by the provider, with 90 untagged chapters between).
- *  4. If there's no succeeding anchor (tail of the series), estimated volume
- *     = baseVol + ceil((chNum - anchorCh) / chsPerVol), then clamped to
- *     totalVolumesHint (when known) so it never runs past the series' real
- *     length.
+ * The estimator works on volume *boundaries*, not on one chapter at a time.
+ * Every chapter — tagged or not — is laid out on a single ordered axis, and the
+ * job is to choose the V-1 cut positions that carve it into volumes:
+ *
+ *  1. Each anchor volume constrains the cuts around it. A *well-covered* anchor
+ *     (see STRONG_ANCHOR_COVERAGE) holds enough of a volume for its first and
+ *     last chapter to BE that volume's boundaries, so its two cuts are pinned
+ *     exactly. A thinly-covered anchor only says "this chapter sits in volume N"
+ *     and merely constrains the cuts to contain it.
+ *  2. Between two pinned cuts the chapters are spread *evenly* over the volume
+ *     slots in between, then clamped back inside whatever the thin anchors
+ *     require. Volumes therefore come out uniform by construction.
+ *  3. The volume count is the consensus total when known, otherwise the last
+ *     anchored volume plus however many more `chsPerVol` needs for the tail.
+ *
+ * Why this shape: the previous estimator walked each chapter out from its
+ * nearest anchor, so a thin anchor (one chapter tagged inside a volume) pinned
+ * its neighbours into the volumes on either side and starved its own. Against
+ * MangaUpdates' Bleach release feed — 43 tagged volumes, 20 of them holding a
+ * single chapter — that produced the reported "Vol 8: 1 ch." beside
+ * "Vol 28: 25 ch." breakdown. Choosing boundaries instead makes an even
+ * distribution the default and a lopsided one only possible when the anchors
+ * genuinely demand it.
  *
  * Special case — *no* usable anchors but a known total volume count: the
  * chapters are distributed across exactly that many volumes (by chapter number
@@ -333,59 +484,43 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
     .sort(([a], [b]) => parseFloat(a) - parseFloat(b));
 
   let chsPerVol = chsPerVolOverride || 10;
-  const knownSet = new Set();
-  const anchors = []; // [{ volNum, minCh, maxCh }]
+  const anchors = []; // [{ volNum, minCh, maxCh, size }] — integer chapters only
 
-  if (knownVols.length > 0) {
-    let totalChapters = 0;
-    for (const [vStr, chs] of knownVols) {
-      const vNum = parseFloat(vStr);
-      if (Number.isNaN(vNum)) continue;
-      knownSet.add(String(vNum));
-      totalChapters += chs.length;
-      let minCh = Infinity, maxCh = -Infinity;
-      for (const c of chs) {
-        if (String(c).includes('.')) continue; // ignore fractional chapters for volume anchor boundaries
-        const cNum = parseFloat(c);
-        if (!Number.isNaN(cNum) && Number.isInteger(cNum)) {
-          if (cNum < minCh) minCh = cNum;
-          if (cNum > maxCh) maxCh = cNum;
-        }
-      }
-      if (maxCh > -Infinity) anchors.push({ volNum: vNum, minCh, maxCh });
-    }
-    if (!chsPerVolOverride) {
-      const stats = getVolumeStats(volumeMap, { totalVolumesHint, totalChaptersHint });
-      chsPerVol = stats.avgChsPerVol || 10;
-      if (chsPerVol < 3) chsPerVol = 10; // safety clamp to prevent sparse/erroneous metadata from causing 1-chapter volumes
-
-      // The historical average only reflects the *tagged* volumes, which for an
-      // ongoing series (MangaDex commonly only tags early volumes) can be a
-      // poor predictor of how many chapters are actually left to fit into the
-      // remaining volumes. When we know the series' real total volume count
-      // (e.g. from MangaUpdates) and there's still runway left after the last
-      // anchor, derive the tail's chsPerVol from that instead — this is what
-      // keeps the *last* estimated volume roughly matching the known total
-      // rather than drifting far past (or stopping far short of) it.
-      if (totalVolumesHint) {
-        const lastAnchor = anchors.reduce((best, a) => (!best || a.volNum > best.volNum ? a : best), null);
-        const lastAnchorVol = lastAnchor ? Math.floor(lastAnchor.volNum) : 0;
-        const lastAnchorCh = lastAnchor ? lastAnchor.maxCh : 0;
-        const remainingVols = totalVolumesHint - lastAnchorVol;
-        if (remainingVols > 0) {
-          const maxUnassignedCh = Math.max(0, ...effectiveUnassigned.map(c => parseFloat(c)).filter(n => !Number.isNaN(n) && Number.isInteger(n)));
-          if (maxUnassignedCh > lastAnchorCh) {
-            chsPerVol = Math.max(1, Math.ceil((maxUnassignedCh - lastAnchorCh) / remainingVols));
-          }
-        }
+  for (const [vStr, chs] of knownVols) {
+    const vNum = parseFloat(vStr);
+    if (Number.isNaN(vNum)) continue;
+    let minCh = Infinity, maxCh = -Infinity, size = 0;
+    for (const c of chs) {
+      if (String(c).includes('.')) continue; // fractional chapters never define a boundary
+      const cNum = parseFloat(c);
+      if (!Number.isNaN(cNum) && Number.isInteger(cNum)) {
+        if (cNum < minCh) minCh = cNum;
+        if (cNum > maxCh) maxCh = cNum;
+        size++;
       }
     }
-    anchors.sort((a, b) => a.maxCh - b.maxCh);
+    if (maxCh > -Infinity) anchors.push({ volNum: vNum, minCh, maxCh, size });
   }
 
+  if (anchors.length > 0 && !chsPerVolOverride) {
+    const stats = getVolumeStats(volumeMap, { totalVolumesHint, totalChaptersHint });
+    chsPerVol = stats.avgChsPerVol || 10;
+    if (chsPerVol < 3) chsPerVol = 10; // safety clamp: sparse/erroneous metadata must not mint 1-chapter volumes
+  }
+  anchors.sort((a, b) => a.volNum - b.volNum);
+
+  // Split the pool: whole chapters take part in the boundary layout, fractional
+  // ones are Specials, and anything unparseable overflows.
   const sortedUnassigned = [...effectiveUnassigned].sort((a, b) => parseFloat(a) - parseFloat(b));
   const calculated = {};
   const overflow = [];
+  const freeRaw = new Map(); // chapterNumber -> the original string form
+  for (const chStr of sortedUnassigned) {
+    const chNum = parseFloat(chStr);
+    if (Number.isNaN(chNum)) { overflow.push(chStr); continue; }
+    if (String(chStr).includes('.') || !Number.isInteger(chNum)) { (calculated['Specials'] ||= []).push(chStr); continue; }
+    if (!freeRaw.has(chNum)) freeRaw.set(chNum, chStr);
+  }
 
   // No usable volume anchors at all (e.g. an English scanlation source that
   // tags nothing, like Pet on MangaKatana), but we DO know the series' real
@@ -394,15 +529,17 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
   // the old `ceil(chapterNumber / 10)`, which invented unbounded phantom
   // volumes from sparse or noisy chapter numbering (a finished 5-volume,
   // 55-chapter series was landing chapters in volumes as high as 120).
-  if (anchors.length === 0 && totalVolumesHint && totalVolumesHint >= 1) {
-    const V = Math.floor(totalVolumesHint);
-    const integers = [];
-    for (const chStr of sortedUnassigned) {
-      const n = parseFloat(chStr);
-      if (Number.isNaN(n)) { overflow.push(chStr); continue; }
-      if (String(chStr).includes('.') || !Number.isInteger(n)) { (calculated['Specials'] ||= []).push(chStr); continue; }
-      integers.push({ raw: chStr, n });
+  if (anchors.length === 0) {
+    const integers = [...freeRaw.entries()].map(([n, raw]) => ({ n, raw })).sort((a, b) => a.n - b.n);
+    if (!(totalVolumesHint >= 1)) {
+      // Nothing at all to bound against: fall back to the historical rate-based
+      // numbering (volume = ceil(chapter / chsPerVol)).
+      for (const { n, raw } of integers) {
+        (calculated[String(Math.max(1, Math.ceil(n / chsPerVol)))] ||= []).push(raw);
+      }
+      return { calculated, overflow };
     }
+    const V = Math.floor(totalVolumesHint);
     // Prefer number-based spacing when we also know the real chapter total: it
     // keeps every chapter at its true position and folds any stray
     // out-of-range chapter into the final known volume rather than past it.
@@ -418,85 +555,110 @@ export function extrapolateVolumes(rawVolumeMap, unassignedChapters, totalVolume
     const withinTotal = totalChaptersHint && totalChaptersHint > 0 && maxIntCh <= totalChaptersHint * 1.1;
     if (chsPerVolOverride && chsPerVolOverride > 0) {
       // Explicit rate requested (manual "extrapolate to volume N"): honour it.
-      for (const { raw, n } of integers) {
-        const estVol = Math.min(V, Math.max(1, Math.ceil(n / chsPerVolOverride)));
-        (calculated[String(estVol)] ||= []).push(raw);
+      for (const { n, raw } of integers) {
+        (calculated[String(Math.min(V, Math.max(1, Math.ceil(n / chsPerVolOverride))))] ||= []).push(raw);
       }
     } else if (withinTotal && maxIntCh > 0) {
       // Place each chapter by its fractional position in the run so all V volumes
       // are used and each is evenly sized — `ceil(n / ceil(total/V))` used to leave
       // the final volume empty and overload the penultimate one whenever the total
       // didn't divide evenly (109 chapters / 12 volumes landed everything in 1-11).
-      for (const { raw, n } of integers) {
-        const estVol = Math.min(V, Math.max(1, Math.floor(((n - 1) * V) / maxIntCh) + 1));
-        (calculated[String(estVol)] ||= []).push(raw);
+      for (const { n, raw } of integers) {
+        (calculated[String(Math.min(V, Math.max(1, Math.floor(((n - 1) * V) / maxIntCh) + 1)))] ||= []).push(raw);
       }
     } else {
-      const N = integers.length;
-      integers.forEach(({ raw }, i) => {
-        const estVol = N ? Math.min(V, Math.floor((i * V) / N) + 1) : 1;
-        (calculated[String(estVol)] ||= []).push(raw);
-      });
+      for (const [vol, chs] of Object.entries(evenVolumeSplit(integers.map(x => x.raw), V))) {
+        (calculated[vol] ||= []).push(...chs);
+      }
     }
     return { calculated, overflow };
   }
 
-  for (const chStr of sortedUnassigned) {
-    const chNum = parseFloat(chStr);
-    if (Number.isNaN(chNum)) { overflow.push(chStr); continue; }
+  // --- Boundary layout ------------------------------------------------------
+  // The axis is every whole chapter, anchored and free alike, in reading order.
+  const axis = [...new Set([
+    ...anchors.flatMap(a => [a.minCh, a.maxCh]),
+    ...knownVols.flatMap(([, chs]) => chs.map(c => parseFloat(c)).filter(n => Number.isInteger(n) && !Number.isNaN(n))),
+    ...freeRaw.keys(),
+  ])].sort((a, b) => a - b);
 
-    if (String(chStr).includes('.') || !Number.isInteger(chNum)) {
-      (calculated['Specials'] ||= []).push(chStr);
-      continue;
-    }
+  const lastAnchor = anchors[anchors.length - 1];
+  const maxAnchorVol = Math.floor(lastAnchor.volNum);
+  const maxAnchorCh = anchors.reduce((m, a) => Math.max(m, a.maxCh), -Infinity);
+  let V = totalVolumesHint > 0
+    ? Math.max(maxAnchorVol, Math.floor(totalVolumesHint))
+    : maxAnchorVol + Math.ceil(axis.filter(n => n > maxAnchorCh).length / chsPerVol);
+  V = Math.max(1, V);
 
-    let baseVol = 0, anchorCh = 0;
-    let nextVol = Infinity, nextMinCh = Infinity;
-
-    for (let j = 0; j < anchors.length; j++) {
-      if (anchors[j].maxCh < chNum) {
-        baseVol = anchors[j].volNum;
-        anchorCh = anchors[j].maxCh;
+  // capAtHint: chapters that don't fit in [1..hint] at the going rate are
+  // dropped rather than squeezed in (the caller asked for a hard cap).
+  if (capAtHint && totalVolumesHint > 0) {
+    V = Math.floor(totalVolumesHint);
+    const tailStart = axis.findIndex(n => n > maxAnchorCh);
+    if (tailStart >= 0) {
+      const capacity = Math.max(0, V - maxAnchorVol) * (chsPerVolOverride || chsPerVol);
+      const keep = tailStart + capacity;
+      for (let i = keep; i < axis.length; i++) {
+        const raw = freeRaw.get(axis[i]);
+        if (raw != null) { overflow.push(raw); freeRaw.delete(axis[i]); }
       }
-      if (anchors[j].minCh > chNum && anchors[j].volNum < nextVol) {
-        nextVol = anchors[j].volNum;
-        nextMinCh = anchors[j].minCh;
-      }
+      if (keep < axis.length) axis.length = Math.max(0, keep);
     }
-    baseVol = Math.floor(baseVol);
+  }
 
-    let estVol;
-    if (nextVol < Infinity) {
-      const boundedNextVol = Math.floor(nextVol);
-      // Number of whole volume "slots" strictly between the two anchors, and how
-      // many unassigned chapters have to fit in them. Sizing chsPerVol to this
-      // local gap (instead of a single global average) guarantees every slot gets
-      // a fair share instead of the last one absorbing whatever the global rate
-      // couldn't fit before hitting the next anchor.
-      const slots = Math.max(1, boundedNextVol - baseVol - 1);
-      const gapChapters = Math.max(1, nextMinCh - anchorCh - 1);
-      let localChsPerVol = chsPerVolOverride || Math.ceil(gapChapters / slots);
-      if (localChsPerVol * slots < gapChapters) localChsPerVol = Math.ceil(gapChapters / slots);
+  const n = axis.length;
+  const pos = new Map(axis.map((ch, i) => [ch, i]));
 
-      const diff = Math.max(1, chNum - anchorCh);
-      estVol = baseVol + Math.max(1, Math.ceil(diff / localChsPerVol));
-      estVol = Math.min(estVol, boundedNextVol - 1);
-    } else {
-      const diff = Math.max(1, chNum - anchorCh);
-      estVol = baseVol + Math.max(1, Math.ceil(diff / chsPerVol));
+  // An anchor covering at least STRONG_ANCHOR_COVERAGE of an expected volume is
+  // trusted for its *boundaries*; a thinner one only for *membership*.
+  const expectedSize = chsPerVolOverride
+    || ((totalChaptersHint > 0 && totalVolumesHint > 0) ? totalChaptersHint / totalVolumesHint : chsPerVol);
+  const strongMin = Math.max(2, Math.ceil(expectedSize * STRONG_ANCHOR_COVERAGE));
+
+  const lo = new Array(V + 2).fill(0);
+  const hi = new Array(V + 2).fill(n);
+  for (const a of anchors) {
+    const v = Math.floor(a.volNum);
+    if (v < 1 || v > V) continue;
+    const s = pos.get(a.minCh), e = pos.get(a.maxCh);
+    if (s == null || e == null) continue;         // trimmed away by the cap above
+    hi[v] = Math.min(hi[v], s);                   // volume v starts at or before its first tagged chapter
+    if (v + 1 <= V) lo[v + 1] = Math.max(lo[v + 1], e + 1); // and ends at or after its last
+    if (a.size >= strongMin) {
+      lo[v] = Math.max(lo[v], s);                 // well covered: those chapters ARE the boundaries
+      if (v + 1 <= V) hi[v + 1] = Math.min(hi[v + 1], e + 1);
     }
+  }
+  lo[1] = 0; hi[1] = 0;                           // volume 1 always starts at the first chapter
+  lo[V + 1] = n; hi[V + 1] = n;                   // and the last volume always runs to the end
+  for (let v = 2; v <= V; v++) lo[v] = Math.max(lo[v], lo[v - 1]);
+  for (let v = V; v >= 1; v--) hi[v] = Math.min(hi[v], hi[v + 1]);
+  for (let v = 1; v <= V + 1; v++) if (lo[v] > hi[v]) lo[v] = hi[v];
 
-    if (totalVolumesHint && estVol > totalVolumesHint) {
-      // Past the known total volume count. Either drop it (capAtHint) or clamp
-      // it into the final known volume — never mint a phantom volume beyond the
-      // series' real length.
-      if (capAtHint) { overflow.push(chStr); continue; }
-      estVol = Math.floor(totalVolumesHint);
+  // Cuts that the anchors fix exactly; everything between them is filled evenly.
+  const pinned = [{ v: 1, idx: 0 }];
+  for (let v = 2; v <= V; v++) if (lo[v] === hi[v]) pinned.push({ v, idx: lo[v] });
+  pinned.push({ v: V + 1, idx: n });
+
+  const cut = new Array(V + 2).fill(0);
+  for (let k = 0; k < pinned.length - 1; k++) {
+    const a = pinned[k], b = pinned[k + 1];
+    cut[a.v] = a.idx;
+    cut[b.v] = b.idx;
+    const spanVols = b.v - a.v;
+    const spanLen = b.idx - a.idx;
+    for (let j = 1; j < spanVols; j++) {
+      const even = a.idx + Math.round((j * spanLen) / spanVols);
+      cut[a.v + j] = Math.min(hi[a.v + j], Math.max(lo[a.v + j], even));
     }
-    // Chapters that precede the first anchor have baseVol 0 and get clamped to
-    // boundedNextVol-1, which can be 0 — never mint a "volume 0"; floor at 1.
-    estVol = Math.max(1, estVol);
-    (calculated[String(estVol)] ||= []).push(chStr);
+  }
+  for (let v = 2; v <= V + 1; v++) if (cut[v] < cut[v - 1]) cut[v] = cut[v - 1];
+
+  let vol = 1;
+  for (let i = 0; i < n; i++) {
+    while (vol < V && cut[vol + 1] <= i) vol++;
+    const raw = freeRaw.get(axis[i]);
+    if (raw != null) (calculated[String(vol)] ||= []).push(raw);
   }
 
   return { calculated, overflow };

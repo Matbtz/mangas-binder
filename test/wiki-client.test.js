@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseChapterVolumeMap } from '../src/providers/wiki-client.js';
+import { parseChapterVolumeMap, chapterMapQuality, looksLikeChapterList } from '../src/providers/wiki-client.js';
 
-// The wiki chapter-list parsers were written without live wiki access (network
-// policy blocks wikipedia.org / fandom.com in the build env), so these fixtures
-// mirror the documented templated formats. They pin the fail-closed contract and
-// the two common shapes: EN {{Graphic novel list}} and a FR/other chapters table.
+// Fixtures mirroring the shapes the live wikis actually serve. They pin the
+// fail-closed contract, the two common layouts (EN {{Graphic novel list}} and a
+// FR/other chapters table), and the two ways a parse goes wrong in the wild:
+// citation noise leaking in as chapter numbers, and a table read out of the
+// wrong columns entirely.
 
 const obj = (m) => Object.fromEntries([...m.entries()]);
 
@@ -107,4 +108,57 @@ test('fails closed on wikitext with no recognisable chapter structure', () => {
   assert.equal(map.size, 0);
   assert.deepEqual(obj(parseChapterVolumeMap(null).map), {});
   assert.deepEqual(obj(parseChapterVolumeMap('').map), {});
+});
+
+// --- Citation noise ---------------------------------------------------------
+
+test('parseChapterVolumeMap: an archive URL inside a citation is not read as a chapter number', () => {
+  // The live Bleach failure: a `<ref>` carrying
+  // web.archive.org/web/20160610100934/... put chapter "20160610100934" into the
+  // map, which made the whole source look physically impossible downstream.
+  const wikitext = `
+{| class="wikitable"
+|-
+! Volume !! Chapters
+|-
+| 1 || 1 – 7<ref>{{cite web|url=https://web.archive.org/web/20160610100934/http://example.com|title=Vol 1}}</ref>
+|-
+| 2 || 8 – 16<!-- checked 20240101 -->
+|}
+`;
+  const { map } = parseChapterVolumeMap(wikitext, 'en');
+  const chapters = [...map.keys()].map(Number).sort((a, b) => a - b);
+  assert.equal(Math.max(...chapters), 16, `no scraped timestamp survived, got ${Math.max(...chapters)}`);
+  assert.equal(map.get('7'), '1');
+  assert.equal(map.get('8'), '2');
+});
+
+// --- Structural quality gate ------------------------------------------------
+
+test('looksLikeChapterList: accepts a dense, monotonic list', () => {
+  const map = new Map();
+  for (let ch = 424; ch <= 686; ch++) map.set(String(ch), String(49 + Math.floor((ch - 424) / 10)));
+  assert.equal(looksLikeChapterList(map), true);
+  const q = chapterMapQuality(map);
+  assert.ok(q.coverage > 0.9);
+  assert.equal(q.monotonic, 1);
+});
+
+test('looksLikeChapterList: rejects scattered numbers read out of the wrong columns', () => {
+  // The live "List of Berserk chapters" parse: ISBN fragments and years read as
+  // chapter numbers, volumes jumping 1 → 14 → 5 → 11.
+  const map = new Map([
+    ['0', '1'], ['1', '1'], ['2', '14'], ['3', '5'], ['4', '11'], ['6', '4'],
+    ['978', '1'], ['1198', '1'], ['2754', '10'], ['4106', '14'],
+  ]);
+  assert.equal(looksLikeChapterList(map), false);
+});
+
+test('looksLikeChapterList: rejects a map whose volumes run backwards', () => {
+  const map = new Map();
+  for (let ch = 1; ch <= 50; ch++) map.set(String(ch), String(51 - ch)); // strictly decreasing
+  const q = chapterMapQuality(map);
+  assert.ok(q.coverage > 0.9, 'dense enough');
+  assert.equal(q.monotonic, 0);
+  assert.equal(looksLikeChapterList(map), false);
 });

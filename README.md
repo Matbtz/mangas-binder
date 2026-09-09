@@ -39,7 +39,14 @@ than a chapter into a tankōbon). Comics default to **one CBZ per issue**.
 - 🧩 **Reader-native** naming/layout (`Series Vol. NN.cbz`, `Series #NNN.cbz`).
 - 🗺️ **Smart volume mapping** — provider-tagged volumes are authoritative; units
   the source left untagged are assigned to *estimated* volumes (flagged in
-  ComicInfo) so volume packaging still works for scanlations/issue runs.
+  ComicInfo) so volume packaging still works for scanlations/issue runs. The
+  estimator picks volume **boundaries** over the whole chapter run rather than
+  walking out from each tag, so volumes come out evenly sized even when a source
+  tags only a chapter or two per volume.
+- 📐 **Manual even split** — when the providers are simply wrong about a series,
+  state the two numbers yourself ("686 chapters over 74 volumes") in
+  *More → Volume distribution → Even split*. It creates any missing chapters,
+  spreads them evenly, and stays pinned across refreshes until you release it.
 - 🖼️ **Image preprocessing** (optional, KCC-style) before packaging: resize to a
   device resolution, turn double-page spreads into full **landscape** pages
   (rotate or split), gamma, grayscale and JPEG re-encode. Build **profiles** in
@@ -157,11 +164,11 @@ configured (same `FLARESOLVERR_URL` setting as above) — no separate GetComics-
 setup needed. Without FlareSolverr configured, a 403 from one of these hosts fails with
 a message telling you to set it up.
 
-### Wikipedia chapter-map cross-check (opt-in, needs validation before use)
+### Wikipedia chapter-map cross-check
 
 Wikipedia's "List of `<X>` chapters" tables mirror the physical tankōbon volume
 boundaries, so where one exists it's a better source of chapter→volume anchors than
-crowd-sourced MangaDex tags or MangaUpdates' release feed. When enabled,
+crowd-sourced MangaDex tags or MangaUpdates' release feed.
 `src/providers/wikipedia.js` resolves it (cascading English → French, since some
 seinen titles only have a complete French chapter list) and merges it into the
 per-chapter volume consensus (`src/core/chapter-map-consensus.js`) at the top
@@ -169,21 +176,20 @@ priority: `mangadex tags < mangaupdates releases < fandom < wikipedia`. Fandom's
 per-volume category pages (`src/providers/fandom.js`) feed the same consensus for
 titles whose Wikipedia list lags behind current releases.
 
-**Wikipedia is disabled by default** (unlike Fandom/MangaBaka's total-count
-cross-checks). Its chapter-list parser (`src/providers/wiki-client.js`) was written
-and unit-tested against representative wikitext fixtures without live access to
-wikipedia.org (some deployment/CI environments block it by network policy) — so
-before flipping it on in **Settings → Sources**, run:
+A long series' chapter list is split by range — `List of Bleach chapters (1–187)`,
+`(188–423)`, `(424–686)` — so every matching page is parsed and **merged**; one page
+alone would claim the series ends at volume 21. Chapter-list pages outrank every
+other page shape, because a `List of <X> volumes` page has a different layout that
+the parser reads as far too many chapters per volume.
+
+Everything fails closed twice over: an unrecognised page yields no map, and a page
+the parser demonstrably misread — too sparse to be a chapter list, non-monotonic
+volumes, or a chapters-per-volume far above the resolved consensus — is discarded
+rather than half-trusted. To see what it makes of the titles you follow:
 
 ```
 node scripts/smoke-wiki-parsers.mjs
 ```
-
-with real network access, and eyeball the printed chapter→volume mappings against
-the actual chapter lists for a couple of series you follow. Every step fails closed
-(an unrecognised page/table structure yields no map, never a guess), so worst case
-it contributes nothing — but it's worth confirming it parses real markup correctly
-before it starts anchoring your library's volume boundaries.
 
 ### Library reconciliation (already-owned detection)
 

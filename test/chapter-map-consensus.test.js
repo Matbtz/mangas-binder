@@ -141,3 +141,68 @@ test('getVolumeTitle reads a title out of the cache regardless of TTL (best-effo
   assert.equal(getVolumeTitle(null, '1'), '');
   assert.equal(getVolumeTitle({ chapter_map_cache_json: 'garbage' }, '1'), '');
 });
+
+// --- Source vetting ---------------------------------------------------------
+
+test('vetting: one junk entry is dropped, the rest of the source is kept', async () => {
+  setProviderEnabled('wikipedia', true);
+  setProviderEnabled('fandom', false);
+  // The live Bleach case: a good chapter→volume map plus one entry whose
+  // "chapter number" was an Internet Archive timestamp scraped from a citation.
+  // That single entry used to make the whole map look impossible and the entire
+  // source was thrown away.
+  const map = new Map();
+  for (let ch = 1; ch <= 90; ch++) map.set(String(ch), String(Math.ceil(ch / 9)));
+  map.set('20160610100934', '3');
+  wikipedia.fetchChapterVolumeMap = async () => ({ map, volumeTitles: new Map(), matchedTitle: 'List of X chapters' });
+
+  const chs = Array.from({ length: 90 }, (_, i) => ({ number: String(i + 1), volume: null }));
+  const { map: merged, reports } = await resolveChapterVolumeMap('X', chs, { totalVolumesHint: 10, totalChaptersHint: 90 });
+  const report = reports.find(r => r.name === 'Wikipedia');
+  assert.equal(report.mapped, 90, 'the 90 good anchors survive');
+  assert.equal(report.entriesDropped, 1);
+  assert.equal(merged.get('45').volume, '5');
+});
+
+test('vetting: a source that merges volumes together is rejected against the consensus', async () => {
+  setProviderEnabled('wikipedia', true);
+  setProviderEnabled('fandom', false);
+  // Wikipedia's "List of Bleach volumes" page parses as ~26 chapters per volume
+  // against a 74-volume/686-chapter consensus (~9). Inside the absolute
+  // plausibility band, but nearly 3x the truth.
+  const map = new Map();
+  for (let ch = 1; ch <= 646; ch++) map.set(String(ch), String(Math.ceil(ch / 26)));
+  wikipedia.fetchChapterVolumeMap = async () => ({ map, volumeTitles: new Map(), matchedTitle: 'List of X volumes' });
+
+  const chs = Array.from({ length: 646 }, (_, i) => ({ number: String(i + 1), volume: null }));
+  const { reports } = await resolveChapterVolumeMap('X', chs, { totalVolumesHint: 74, totalChaptersHint: 686 });
+  const report = reports.find(r => r.name === 'Wikipedia');
+  assert.equal(report.mapped, 0);
+  assert.equal(report.rejectedAsImplausible, true);
+  assert.match(report.rejectionReason, /merged/);
+});
+
+test('vetting: a partial map is not mistaken for a merged one', async () => {
+  setProviderEnabled('wikipedia', true);
+  setProviderEnabled('fandom', false);
+  // MangaUpdates' Bleach release feed: fewer chapters per tagged volume than the
+  // truth, which is what a partial map looks like — it must still be usable.
+  const map = new Map();
+  for (let vol = 1; vol <= 40; vol++) map.set(String((vol - 1) * 9 + 1), String(vol));
+  wikipedia.fetchChapterVolumeMap = async () => ({ map, volumeTitles: new Map(), matchedTitle: 'partial' });
+
+  const chs = Array.from({ length: 686 }, (_, i) => ({ number: String(i + 1), volume: null }));
+  const { reports } = await resolveChapterVolumeMap('X', chs, { totalVolumesHint: 74, totalChaptersHint: 686 });
+  assert.equal(reports.find(r => r.name === 'Wikipedia').mapped, 40);
+});
+
+test('vetting: an empty parse is reported as empty, not as a rejected map', async () => {
+  setProviderEnabled('wikipedia', true);
+  setProviderEnabled('fandom', false);
+  wikipedia.fetchChapterVolumeMap = async () => ({ map: new Map(), volumeTitles: new Map(), matchedTitle: 'Nothing here' });
+  const { reports } = await resolveChapterVolumeMap('X', [{ number: '1', volume: null }], { totalVolumesHint: 5 });
+  const report = reports.find(r => r.name === 'Wikipedia');
+  assert.equal(report.mapped, 0);
+  assert.equal(report.rejectedAsImplausible, false, 'nothing was parsed, so nothing was judged implausible');
+  assert.equal(report.rejectionReason, 'empty');
+});
